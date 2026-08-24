@@ -360,13 +360,30 @@ def test_retry_prompt_includes_the_logs():
 
 def test_paths_have_a_single_definition():
     from src.log_pipeline import config
-    from src.tools import build_runbooks
     from src.utils import paths
 
     assert config.DRAIN3_STATE_DIR == paths.DRAIN3_STATE_DIR
     assert config.CATALOG_PATH == paths.CATALOG_PATH
-    assert build_runbooks.CASESHEETS_DIR == paths.LOCAL_CASESHEETS_DIR
     assert paths.CONSUMER_HEARTBEAT_PATH.parent == paths.LOCAL_CHECKPOINTS_DIR
+
+
+def test_build_runbooks_derives_no_casesheets_path_at_all():
+    """This used to assert `build_runbooks.CASESHEETS_DIR ==
+    paths.LOCAL_CASESHEETS_DIR` -- one path, not two derivations (G13).
+
+    The tool now reads casebooks through CasebookStorage and holds no path
+    constant, which satisfies G13 more strongly than agreeing with it did: on
+    the S3 backend the local path was correct AND useless, since walking it
+    found nothing and the runbook learning loop silently produced no drafts.
+    """
+    import inspect
+
+    from src.tools import build_runbooks
+
+    assert not hasattr(build_runbooks, "CASESHEETS_DIR")
+    source = inspect.getsource(build_runbooks)
+    assert "LOCAL_CASESHEETS_DIR" not in source
+    assert "list_events()" in source
 
 
 def test_heartbeat_path_is_shared_between_api_and_consumer():

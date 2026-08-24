@@ -358,3 +358,35 @@ def test_an_unrelated_s3_error_is_not_mistaken_for_contention():
     from src.storage.s3 import _is_precondition_failure
 
     assert _is_precondition_failure(_FakeS3._Error("AccessDenied", 403)) is False
+
+
+# ======================================================================
+# The two backends must stay interchangeable
+# ======================================================================
+
+def test_both_backends_implement_the_protocol_with_identical_signatures():
+    """Signature drift between the backends is how this codebase's worst bugs
+    started. F4 was a terminal status written to one file and read from
+    another; G2 and G3 were methods that worked locally and silently returned
+    nothing on S3. A caller is not supposed to know which backend it holds, so
+    pin that they are actually substitutable.
+    """
+    import inspect
+
+    from src.storage.base import CasebookStorage
+    from src.storage.s3 import S3CasebookStorage
+
+    protocol = {name for name, _ in inspect.getmembers(CasebookStorage, inspect.isfunction)
+                if not name.startswith("_")}
+
+    drift = []
+    for name in sorted(protocol):
+        local = getattr(LocalFilesystemCasebookStorage, name, None)
+        s3 = getattr(S3CasebookStorage, name, None)
+        assert local is not None, f"local backend is missing {name}"
+        assert s3 is not None, f"S3 backend is missing {name}"
+        if str(inspect.signature(local)) != str(inspect.signature(s3)):
+            drift.append(f"{name}: local{inspect.signature(local)} "
+                         f"vs s3{inspect.signature(s3)}")
+
+    assert not drift, "backend signatures have drifted:\n  " + "\n  ".join(drift)

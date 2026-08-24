@@ -953,13 +953,16 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
     # before this slow LLM call finally returned (0.8). Checks BOTH files:
     # the consumer's timeout handler used to write only casebook.json while
     # this guard read only status.json, so it never fired (F4).
-    # status.json only: both PROTECTED_TERMINAL_STATUSES are written by
-    # save_terminal, which always writes casebook.json first and status.json
-    # second -- so status.json carrying the verdict is implied by casebook.json
-    # carrying it, and reading both here doubled the round trips on a guard
-    # that runs for every packet.
-    current_status = await _off_loop(storage.terminal_status, event_id,
-                                     filenames=("status.json",))
+    #
+    # Reading only status.json is NOT a safe optimisation, despite costing one
+    # extra read. `save_terminal` writes casebook.json FIRST and status.json
+    # second, so status.json carrying the verdict implies casebook.json does --
+    # but not the reverse. An actor that died between its two writes leaves a
+    # terminal casebook.json and a stale status.json, and a guard reading only
+    # status.json sails past it and overwrites the verdict. That is F4 again by
+    # a narrower route, traded for one storage read on a path that has just
+    # spent minutes inside an LLM call.
+    current_status = await _off_loop(storage.terminal_status, event_id)
     if current_status in PROTECTED_TERMINAL_STATUSES:
         log.warning(
             "Discarding late result; a terminal status was already recorded by another actor",

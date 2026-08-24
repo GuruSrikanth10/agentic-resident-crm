@@ -539,8 +539,10 @@ async def analyze_dlt(message: DltMessage):
     # FAILED_TIMEOUT while DLQ-ing the message. Overwriting that with a
     # "successful" casebook leaves the verdict and the queued DLQ record
     # disagreeing about what happened (0.8 / F4).
-    recorded_status = await _off_loop(storage.terminal_status, case_id,
-                                      filenames=("status.json",))
+    # Both files, for the reason spelled out at the matching guard in
+    # routes.py: save_terminal writes casebook.json first, so a writer that
+    # died between its two writes is visible only in casebook.json.
+    recorded_status = await _off_loop(storage.terminal_status, case_id)
     if recorded_status in PROTECTED_TERMINAL_STATUSES:
         log.warning("Discarding late DLT result; a terminal status was already "
                     "recorded by another actor", recorded_status=recorded_status)

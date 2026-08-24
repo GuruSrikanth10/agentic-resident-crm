@@ -80,8 +80,12 @@ def load_group(fingerprint: str) -> Optional[dict]:
         return None
 
 
-def save_group(group: dict) -> None:
-    get_group_storage().save(group["fingerprint"], group, filename="group.json")
+# `save_group` deliberately no longer exists. It was a plain, non-atomic
+# `storage.save()` of a whole group record -- exactly the read-modify-write
+# pattern that made concurrent occurrence counts lose increments. Leaving it
+# beside `update_json` would have left a working, obvious, wrong way to write
+# a group for the next caller to reach for. Use `record_occurrence` or
+# `attach_recommendation`; both go through the atomic path.
 
 
 def record_occurrence(fingerprint: str,

@@ -233,3 +233,29 @@ def test_registering_a_bare_executor_is_refused():
 
     with pytest.raises(TypeError, match="zero-argument callable"):
         routes.register_executor(concurrent.futures.ThreadPoolExecutor(max_workers=1))
+
+
+def test_the_guard_sees_a_verdict_left_only_in_the_casebook():
+    """save_terminal writes casebook.json FIRST, so an actor that died between
+    its two writes leaves a terminal casebook and a stale status.json. A guard
+    reading only status.json sails past it -- which is F4 by a narrower route.
+    """
+    storage = case_storage.get_dlt_storage()
+    case_id = "dlt-T-63-9005"
+
+    def crash_midway_then_finish(*args, **kwargs):
+        # Only casebook.json, exactly as a crash between the two writes leaves it.
+        storage.save(case_id, {
+            "case_id": case_id,
+            "packet_status": {"status": "FAILED_TIMEOUT"},
+        }, filename="casebook.json")
+        return _finding(), None
+
+    with patch.object(dlt_routes.orchestrator, "investigate", crash_midway_then_finish), \
+         patch.object(dlt_routes.reuse, "decide",
+                      return_value=dlt_routes.reuse.ReuseDecision(
+                          dlt_routes.reuse.Decision.LLM_REQUIRED, "test")):
+        result = analyze_dlt(_message(case_id=case_id))
+
+    assert result["status"] == "already_processed"
+    assert storage.terminal_status(case_id) == "FAILED_TIMEOUT"
