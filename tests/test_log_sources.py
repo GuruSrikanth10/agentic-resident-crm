@@ -212,6 +212,14 @@ def test_reduce_logs_reports_no_logs_found_when_empty(monkeypatch):
 def test_reduce_logs_end_to_end_through_the_csv_mock(monkeypatch, tmp_path):
     from src.log_pipeline import pipeline as pipeline_module
 
+    # Pinned to the elastic-only leg, for the same reason as the test above:
+    # ES_MOCK_FILE is an Elasticsearch-path feature, and the default chain
+    # tries Kubernetes first. src/utils/env.py calls load_dotenv() at import,
+    # so a developer .env that narrows LOG_SOURCE -- as one running against
+    # K8S_FIXTURE_DIR does -- would otherwise make this test fail on their
+    # machine and pass in CI.
+    monkeypatch.setenv("LOG_SOURCE", "elastic")
+
     csv_path = tmp_path / "sample_logs.csv"
     _write_kibana_csv(csv_path, "evt-csv-3")
     monkeypatch.setenv("ES_MOCK_FILE", str(csv_path))
@@ -227,6 +235,11 @@ def test_reduce_logs_propagates_source_exceptions(monkeypatch):
     """reduce_logs must not convert a fetch failure into 'No logs found' --
     that would turn could-not-look into confirmed-absent."""
     from src.log_pipeline import pipeline as pipeline_module
+
+    # Elastic-only: the exception under test is raised by the Elasticsearch
+    # source, and it only propagates from the LAST source in the chain (see
+    # chain.fetch_with_fallback) -- so the chain must end there.
+    monkeypatch.setenv("LOG_SOURCE", "elastic")
 
     with patch("src.log_pipeline.sources.elastic.fetch_logs",
                side_effect=ESConnectionError("cluster down")):

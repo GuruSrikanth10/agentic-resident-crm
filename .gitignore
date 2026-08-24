@@ -19,6 +19,11 @@ local_checkpoints/
 # filelock artifacts
 *.lock
 
+# Offline log fixtures built by src/tools/build_log_fixture.py from downloaded
+# production logs. Real resident data -- never commit. `*.log` above already
+# covers current.log, but not the meta.json beside it.
+local_fixtures/
+
 # Captured DLT corpus (real production messages -- never commit)
 tests/fixtures/dlt/corpus/
 
@@ -34,6 +39,7 @@ tests/fixtures/dlt/corpus/
 # data, so unlike rules.csv it belongs in git.
 !reason_codes.csv
 
-# Timestamped .env backups. `.env` is ignored; its backups were not, so one
-# `git add -A` would have published every secret in them.
+# Local .env backups -- they hold the same secrets as .env, which is ignored
+# while its backups were not, so one `git add -A` would have published them.
+# `.env.bak*` rather than `.env.bak.*` so a plain `.env.bak` is caught too.
 .env.bak*
