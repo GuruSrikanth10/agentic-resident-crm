@@ -11,18 +11,25 @@ useful sentence than 431 individual casebooks.
 
 `members` is capped. An uncapped list on a fingerprint seeing 400 hits/day
 would grow without bound; `occurrence_count` keeps counting past the cap.
+
+**Updates go through `CasebookStorage.update_json`, not load-then-save.** Both
+mutations here are read-modify-write on a counter, and the DLT analysis role
+is meant to scale out. This used to be guarded by a `filelock` under
+`LOCAL_CHECKPOINTS_DIR` -- which coordinates processes on a shared filesystem
+and does nothing at all for two pods on different nodes, while the group
+records themselves were in S3. So on precisely the deployment the lock was
+written for, every increment was a lost-update race and two pods analysing one
+novel fingerprint could each write a different `recommendation`,
+last-writer-wins. `update_json` puts the atomicity in the backend that can
+actually provide it: a held lock locally, a conditional write on S3.
 """
 import json
 import os
-import threading
 import time
 from typing import Optional
 
-from filelock import FileLock
-
 from src.dlt.case_storage import get_group_storage
 from src.utils.logging_config import get_logger
-from src.utils.paths import LOCAL_CHECKPOINTS_DIR
 
 logger = get_logger(__name__)
 
@@ -35,7 +42,6 @@ STATE_NONE = "none"
 STATE_DRAFT = "draft"
 STATE_FINAL = "final"
 
-_lock = threading.Lock()
 
 
 def member_cap() -> int:
@@ -44,18 +50,6 @@ def member_cap() -> int:
                                          str(DEFAULT_MEMBER_CAP))))
     except (ValueError, TypeError):
         return DEFAULT_MEMBER_CAP
-
-
-def _file_lock(fingerprint: str) -> FileLock:
-    """Cross-process guard so two workers cannot lose an increment.
-
-    The in-process lock is not enough: the DLT analysis role is meant to scale
-    out to several pods, and on a shared filesystem they contend for the same
-    group file. Mirrors how `pending_rules.jsonl` is already guarded.
-    """
-    lock_dir = LOCAL_CHECKPOINTS_DIR / "dlt_group_locks"
-    lock_dir.mkdir(parents=True, exist_ok=True)
-    return FileLock(str(lock_dir / f"{fingerprint}.lock"), timeout=10)
 
 
 def _blank(fingerprint: str) -> dict:
@@ -86,8 +80,12 @@ def load_group(fingerprint: str) -> Optional[dict]:
         return None
 
 
-def save_group(group: dict) -> None:
-    get_group_storage().save(group["fingerprint"], group, filename="group.json")
+# `save_group` deliberately no longer exists. It was a plain, non-atomic
+# `storage.save()` of a whole group record -- exactly the read-modify-write
+# pattern that made concurrent occurrence counts lose increments. Leaving it
+# beside `update_json` would have left a working, obvious, wrong way to write
+# a group for the next caller to reach for. Use `record_occurrence` or
+# `attach_recommendation`; both go through the atomic path.
 
 
 def record_occurrence(fingerprint: str,
@@ -103,8 +101,12 @@ def record_occurrence(fingerprint: str,
     and make the cost model look better than it is.
     """
     now = time.time()
-    with _lock, _file_lock(fingerprint):
-        group = load_group(fingerprint) or _blank(fingerprint)
+
+    def mutate(current: Optional[dict]) -> dict:
+        # Called under the backend's own atomicity guarantee, and possibly
+        # more than once if a conditional write loses a race -- so everything
+        # here is derived from `current`, never from a value read earlier.
+        group = dict(current or _blank(fingerprint))
 
         already_member = case_id in group.get("members", [])
         if not already_member:
@@ -124,19 +126,21 @@ def record_occurrence(fingerprint: str,
             history[corroboration] = int(history.get(corroboration, 0)) + 1
             group["corroboration_history"] = history
 
-        save_group(group)
         return group
+
+    return get_group_storage().update_json(fingerprint, "group.json", mutate)
 
 
 def attach_recommendation(fingerprint: str, recommendation: dict,
                           state: str = STATE_DRAFT) -> dict:
     """Record the recommendation an investigation produced for this group."""
-    with _lock, _file_lock(fingerprint):
-        group = load_group(fingerprint) or _blank(fingerprint)
+    def mutate(current: Optional[dict]) -> dict:
+        group = dict(current or _blank(fingerprint))
         group["recommendation"] = recommendation
         group["recommendation_state"] = state
-        save_group(group)
         return group
+
+    return get_group_storage().update_json(fingerprint, "group.json", mutate)
 
 
 def has_usable_recommendation(group: Optional[dict]) -> bool:

@@ -17,8 +17,9 @@ from src.tools import dlt_report
 @pytest.fixture(autouse=True)
 def _isolate(monkeypatch, tmp_path):
     monkeypatch.delenv("CASEBOOK_STORAGE_BACKEND", raising=False)
-    monkeypatch.setattr("src.dlt.case_storage.LOCAL_CASESHEETS_DIR", tmp_path)
-    monkeypatch.setattr("src.dlt.groups.LOCAL_CHECKPOINTS_DIR", tmp_path / "ckpt")
+    monkeypatch.setattr("src.utils.paths.LOCAL_CASESHEETS_DIR", tmp_path)
+    # No group-lock directory to isolate any more: group updates go through
+    # CasebookStorage.update_json, whose atomicity lives in the backend.
     case_storage.reset_cache()
     yield
     case_storage.reset_cache()

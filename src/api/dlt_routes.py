@@ -16,13 +16,17 @@ Two ordering rules matter here:
   allowlisted so it survives -- it is an operational correlation id, and
   scrubbing it would destroy the investigation.
 """
+import asyncio
+import concurrent.futures
+import functools
 import json
+import os
 import time
 from typing import Optional
 
 from fastapi import APIRouter, Depends
 
-from src.api.routes import get_api_key, rate_limiter
+from src.api.routes import _off_loop, get_api_key, rate_limiter, register_executor
 from src.dlt import auto_replay, canned, groups, orchestrator, registry, reuse
 from src.dlt.case_storage import get_dlt_storage
 from src.dlt.corroborate import corroborate
@@ -40,7 +44,11 @@ from src.log_pipeline.pipeline import reduce_logs
 from src.models.dlt_payload_schemas import summarise_payload
 from src.models.dlt_schemas import DltMessage
 from src.models.dlt_synthesis import DltFinding, apply_dlt_confidence_policy
-from src.storage.base import LOGS_FETCHED_STATUS, TERMINAL_STATUSES
+from src.storage.base import (
+    LOGS_FETCHED_STATUS,
+    PROTECTED_TERMINAL_STATUSES,
+    TERMINAL_STATUSES,
+)
 from src.utils import metrics
 from src.utils.analysis_queue_publisher import publish_to_dlt_analysis_queue
 from src.utils.logging_config import get_logger
@@ -48,6 +56,63 @@ from src.utils.logging_config import get_logger
 logger = get_logger(__name__)
 
 router = APIRouter()
+
+# A dedicated, bounded pool for the DLT analysis graph -- a SIBLING of
+# routes._agent_invoke_executor, not the same one, so a DLT backlog cannot
+# starve the rejection lane and vice versa.
+#
+# `/analyze-dlt` used to be a sync `def`, which meant a multi-minute LLM
+# investigation occupied one of anyio's 40 default threadpool slots -- the
+# same pool /health, /ready, /fetch-logs and /fetch-dlt-logs are dispatched
+# on. routes.py documents at length why the rejection lane does not do that;
+# this lane simply had not been given the same treatment.
+_MAX_CONCURRENT_DLT_ANALYSES = int(
+    os.environ.get("MAX_CONCURRENT_DLT_ANALYSES",
+                   os.environ.get("MAX_CONCURRENT_INVESTIGATIONS", "5")))
+_dlt_invoke_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=_MAX_CONCURRENT_DLT_ANALYSES, thread_name_prefix="dlt-analyze"
+)
+# So the API's shutdown drain tears this pool down along with the rejection
+# lane's, rather than leaving its threads for SIGKILL. A getter, so swapping
+# this module's attribute substitutes the pool that actually gets shut down.
+register_executor(lambda: _dlt_invoke_executor)
+
+
+def _dlt_analyze_timeout_seconds() -> float:
+    """Server-side budget for one DLT analysis.
+
+    The DLT analysis consumer gives up after DLT_ANALYSIS_TIMEOUT_SECONDS
+    (default 300s) and writes FAILED_TIMEOUT itself. Without a budget on this
+    side, the API thread kept running an investigation nobody was waiting for
+    and could later overwrite that verdict with a "successful" casebook -- bug
+    0.8, which the rejection lane fixed and this one inherited unfixed.
+
+    Read at call time, like the rejection lane's equivalent, so it tracks a
+    reconfigured consumer timeout.
+    """
+    consumer_budget = float(os.environ.get("DLT_ANALYSIS_TIMEOUT_SECONDS", "300"))
+    default_budget = max(consumer_budget - 30, 30)
+    return float(os.environ.get("DLT_ANALYZE_TIMEOUT_SECONDS", default_budget))
+
+
+def _timeout_casebook(case_id: str, ref_id: Optional[str], budget: float) -> dict:
+    """Terminal record for an analysis that outran its server-side budget."""
+    return {
+        "schema_version": DLT_CASEBOOK_SCHEMA_VERSION,
+        "case_id": case_id,
+        "detected_at": time.time(),
+        "packet": {"ref_id": ref_id},
+        "finding": {
+            "narrative": (
+                f"The DLT analysis exceeded the server-side budget of "
+                f"{budget}s and was abandoned. The stack trace, headers and "
+                f"any fetched logs are attached; no finding was produced."
+            ),
+            "recommendation": "A human should read the attached evidence.",
+            "action": "NEEDS_MANUAL_REVIEW",
+        },
+        "packet_status": {"status": "FAILED_TIMEOUT"},
+    }
 
 #: Artifact names written per case. Kept here so Phase 8 and the operator CLI
 #: read them under one set of names.
@@ -333,19 +398,24 @@ def _terminal_status(finding) -> str:
 
 
 @router.post("/analyze-dlt", dependencies=[Depends(get_api_key), Depends(rate_limiter)])
-def analyze_dlt(message: DltMessage):
+async def analyze_dlt(message: DltMessage):
     """Endpoint the DLT analysis consumer forwards fetched cases to.
 
     The reuse policy decides whether this costs an LLM call. Logs and
     corroboration run either way -- never serve a cached recommendation blind
     (DLT_PLAN.md 5.7), because that would disable the mis-cast detector on
     exactly the occurrences worth catching.
+
+    `async def`, on the same reasoning as /process-rejection: the LLM lane is
+    minutes long, so it goes to a bounded executor under a server-side budget
+    rather than occupying a slot in Starlette's shared sync-dispatch pool for
+    its whole duration.
     """
     case_id = message.case_id
     log = logger.bind(case_id=case_id, ref_id=message.ref_id)
     storage = get_dlt_storage()
 
-    recorded_status = storage.terminal_status(case_id)
+    recorded_status = await _off_loop(storage.terminal_status, case_id)
     if recorded_status in TERMINAL_STATUSES:
         log.info("Skipping analysis; a terminal DLT case already exists",
                  recorded_status=recorded_status)
@@ -355,7 +425,7 @@ def analyze_dlt(message: DltMessage):
     failure = build_failure(headers, headers.exception_message)
     fingerprint = failure["fingerprint"]
 
-    logs = storage.load_artifact(case_id, FETCHED_LOGS_ARTIFACT) or ""
+    logs = await _off_loop(storage.load_artifact, case_id, FETCHED_LOGS_ARTIFACT) or ""
     # Re-derived from the payload on the queue message rather than read back
     # from the artifact, for the same reason `build_failure` re-parses the
     # trace: the derivation is pure, so recomputing it cannot drift, while a
@@ -373,7 +443,8 @@ def analyze_dlt(message: DltMessage):
     # occurrences" count includes the case it is describing. Recording only
     # touches counts and history, never `recommendation`, so the reuse
     # decision below sees exactly the same cache state either way.
-    group = groups.record_occurrence(
+    group = await _off_loop(
+        groups.record_occurrence,
         fingerprint, case_id,
         signature=failure["signature"],
         failure_class=failure["failure_class"],
@@ -393,9 +464,26 @@ def analyze_dlt(message: DltMessage):
         provenance = "group_reuse"
     else:
         log.info("Running the DLT analysis lane", reason=decision.reason)
-        finding, parse_error = orchestrator.investigate(
-            case_id, failure, corroboration, logs,
+        budget = _dlt_analyze_timeout_seconds()
+        invoke = functools.partial(
+            orchestrator.investigate, case_id, failure, corroboration, logs,
             payload_summary=payload_summary)
+        try:
+            finding, parse_error = await asyncio.wait_for(
+                asyncio.get_running_loop().run_in_executor(
+                    _dlt_invoke_executor, invoke),
+                timeout=budget,
+            )
+        except asyncio.TimeoutError:
+            # The consumer's own client-side budget is about to fire (or has
+            # already), and it will write FAILED_TIMEOUT and DLQ the message.
+            # Recording the same verdict here keeps the two in agreement
+            # instead of leaving this side to finish later and overwrite it.
+            log.error("DLT analysis exceeded the server-side budget",
+                      timeout_seconds=budget, state="FAILED_TIMEOUT")
+            await _off_loop(storage.save_terminal, case_id,
+                            _timeout_casebook(case_id, message.ref_id, budget))
+            return {"status": "failed_timeout", "case_id": case_id}
         provenance = "agent"
         if finding is None:
             finding = DltFinding(
@@ -421,13 +509,16 @@ def analyze_dlt(message: DltMessage):
     # treatment is recomputed identically every time, and re-storing a reused
     # one would just rewrite what is already there.
     if provenance == "agent":
-        group = groups.attach_recommendation(fingerprint, finding.model_dump(),
-                                             state=groups.STATE_DRAFT)
+        group = await _off_loop(groups.attach_recommendation, fingerprint,
+                                finding.model_dump(), state=groups.STATE_DRAFT)
 
     # Evaluated on the FINAL finding -- after ceilings, after reuse decay --
     # so a confidence the ceilings already capped is what gets checked, never
     # the model's raw, uncapped number.
-    replay = auto_replay.maybe_replay(case_id, message.ref_id, finding)
+    # May POST to the OIS replay endpoint or append to the pending queue --
+    # network or filesystem either way.
+    replay = await _off_loop(auto_replay.maybe_replay, case_id, message.ref_id,
+                             finding)
     metrics.record_dlt_auto_replay(
         "queued" if replay["queued"] else
         "failed" if replay["attempted"] else "not_attempted")
@@ -442,7 +533,22 @@ def analyze_dlt(message: DltMessage):
     if parse_error:
         casebook["finding"]["parse_error"] = parse_error
 
-    storage.save_terminal(case_id, casebook)
+    # The late-result guard, matching routes.py. The terminal check at the top
+    # of this function ran before a multi-minute investigation; by now the DLT
+    # analysis consumer's own client-side timeout may have fired and written
+    # FAILED_TIMEOUT while DLQ-ing the message. Overwriting that with a
+    # "successful" casebook leaves the verdict and the queued DLQ record
+    # disagreeing about what happened (0.8 / F4).
+    # Both files, for the reason spelled out at the matching guard in
+    # routes.py: save_terminal writes casebook.json first, so a writer that
+    # died between its two writes is visible only in casebook.json.
+    recorded_status = await _off_loop(storage.terminal_status, case_id)
+    if recorded_status in PROTECTED_TERMINAL_STATUSES:
+        log.warning("Discarding late DLT result; a terminal status was already "
+                    "recorded by another actor", recorded_status=recorded_status)
+        return {"status": "already_processed", "case_id": case_id}
+
+    await _off_loop(storage.save_terminal, case_id, casebook)
 
     log.info("DLT case analysed", failure_class=failure["failure_class"],
              corroboration=corroboration.verdict.value,

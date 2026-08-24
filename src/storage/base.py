@@ -70,11 +70,19 @@ class CasebookStorage(Protocol):
         """Check if a casebook exists. If terminal_only is True, returns True only if status is a terminal state."""
         ...
 
-    def terminal_status(self, event_id: str) -> Optional[str]:
+    def terminal_status(self, event_id: str,
+                        filenames: tuple = ("status.json", "casebook.json")) -> Optional[str]:
         """Return the terminal status recorded in EITHER file, or None.
 
         Checking both is what closes F4: whichever actor got there first, its
         verdict is visible to every other actor.
+
+        `filenames` narrows that search. Every actor that records a terminal
+        status does so through `save_terminal`, which writes casebook.json and
+        then status.json -- so a caller that only needs to know whether SOME
+        actor has finished can read status.json alone and halve the round
+        trips. On the S3 backend each of these is a network GET, and the
+        late-result guard in routes.py runs on every packet.
         """
         ...
 
@@ -100,6 +108,24 @@ class CasebookStorage(Protocol):
 
     def artifact_exists(self, event_id: str, filename: str) -> bool:
         """Is this artifact present?"""
+        ...
+
+    def update_json(self, event_id: str, filename: str, mutate) -> dict:
+        """Atomic read-modify-write of one JSON document.
+
+        `mutate` receives the current document (or None when absent) and
+        returns the document to store. It may be called more than once and
+        must therefore be free of side effects.
+
+        This exists because a read-modify-write built out of `load()` and
+        `save()` is only atomic where the backend can make it so, and the two
+        backends make it so by completely different means -- a lock locally, a
+        conditional write on S3. Callers that need the guarantee (the DLT
+        group counters, which are incremented by several analysis pods at
+        once) must not have to know which backend they are talking to.
+
+        Returns the stored document.
+        """
         ...
 
     def list_events(self) -> list:

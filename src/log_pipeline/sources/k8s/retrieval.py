@@ -275,63 +275,75 @@ def read_pod_logs(target: PodTarget, window: TimeWindow,
                 error=f"{type(e).__name__}: {e}",
             )
 
+    # Redaction is in a `finally` covering everything below, NOT a statement at
+    # the end of the happy path. It used to be the latter, and the
+    # current-instance handler returns early -- so when a restarted container's
+    # previous-instance read succeeded and its current-instance read then
+    # raised, the previous instance's records left this function unredacted.
+    # `read_all` keeps records from a failed target regardless of `ok`, and
+    # `KubernetesLogSource._fetch` hands them straight to `snapshot.save`, so
+    # resident identifiers reached durable storage -- the exact ordering
+    # guarantee redaction.py's "ORDERING IS LOAD-BEARING" header exists to
+    # state. Redaction is idempotent, so covering the happy path twice is free.
     try:
-        records, stats, read_bytes, truncated, oldest = _read_instance(
-            target, window, previous=False, selector=selector
-        )
-        outcome.oldest_line_timestamp = _older(outcome.oldest_line_timestamp, oldest)
-        outcome.records.extend(records)
-        outcome.bytes_read += read_bytes
-        outcome.truncated = outcome.truncated or truncated
-        _merge_stats(outcome.stats, stats)
-    except Exception as e:
-        status = getattr(e, "status", None)
-        if status == 404:
-            # The pod vanished between list and read -- skip it, keep going.
-            outcome.gaps.append(EvidenceGap(
-                GapType.POD_VANISHED,
-                f"pod {target.pod_name} disappeared between listing and reading; "
-                f"its logs are unrecoverable.",
-                {"pod_name": target.pod_name, "namespace": target.namespace},
-            ))
-        elif status == 403:
-            logger.error(
-                "Kubernetes RBAC denied pod log read",
-                namespace=target.namespace,
-                verb="get pods/log",
+        try:
+            records, stats, read_bytes, truncated, oldest = _read_instance(
+                target, window, previous=False, selector=selector
             )
-        outcome.ok = False
-        outcome.error = f"{type(e).__name__}: {e}"
-        logger.warning(
-            "Pod log read failed",
+            outcome.oldest_line_timestamp = _older(outcome.oldest_line_timestamp, oldest)
+            outcome.records.extend(records)
+            outcome.bytes_read += read_bytes
+            outcome.truncated = outcome.truncated or truncated
+            _merge_stats(outcome.stats, stats)
+        except Exception as e:
+            status = getattr(e, "status", None)
+            if status == 404:
+                # The pod vanished between list and read -- skip it, keep going.
+                outcome.gaps.append(EvidenceGap(
+                    GapType.POD_VANISHED,
+                    f"pod {target.pod_name} disappeared between listing and reading; "
+                    f"its logs are unrecoverable.",
+                    {"pod_name": target.pod_name, "namespace": target.namespace},
+                ))
+            elif status == 403:
+                logger.error(
+                    "Kubernetes RBAC denied pod log read",
+                    namespace=target.namespace,
+                    verb="get pods/log",
+                )
+            outcome.ok = False
+            outcome.error = f"{type(e).__name__}: {e}"
+            logger.warning(
+                "Pod log read failed",
+                pod_name=target.pod_name,
+                container=target.container,
+                error=outcome.error,
+            )
+            return outcome
+
+        if outcome.truncated:
+            outcome.gaps.append(EvidenceGap(
+                GapType.TRUNCATED,
+                f"pod {target.pod_name}/{target.container} hit the "
+                f"{_max_bytes_per_pod()} byte cap; older lines were not read.",
+                {"pod_name": target.pod_name, "container": target.container},
+            ))
+
+        logger.debug(
+            "Pod log read",
             pod_name=target.pod_name,
             container=target.container,
-            error=outcome.error,
+            lines=len(outcome.records),
+            bytes=outcome.bytes_read,
         )
         return outcome
-
-    if outcome.truncated:
-        outcome.gaps.append(EvidenceGap(
-            GapType.TRUNCATED,
-            f"pod {target.pod_name}/{target.container} hit the "
-            f"{_max_bytes_per_pod()} byte cap; older lines were not read.",
-            {"pod_name": target.pod_name, "container": target.container},
-        ))
-
-    # Redact AFTER identifier filtering (the raw id had to stay matchable)
-    # and BEFORE the records escape this function toward persistence.
-    outcome.redaction_counts = redaction.redact_records(
-        outcome.records, allowlist=allowlist
-    )
-
-    logger.debug(
-        "Pod log read",
-        pod_name=target.pod_name,
-        container=target.container,
-        lines=len(outcome.records),
-        bytes=outcome.bytes_read,
-    )
-    return outcome
+    finally:
+        # Redact AFTER identifier filtering (the raw id had to stay matchable)
+        # and BEFORE the records escape this function toward persistence -- on
+        # EVERY exit path, including the early return above.
+        outcome.redaction_counts = redaction.redact_records(
+            outcome.records, allowlist=allowlist
+        )
 
 
 def _older(current: Optional[str], candidate: Optional[str]) -> Optional[str]:
@@ -464,6 +476,20 @@ def read_all(targets: list, window: TimeWindow,
         _merge_stats(outcome.stats, result.stats)
 
     outcome.records.sort(key=_ordering_key)
+
+    # Apply the window's upper bound. The kubelet API has no "until", so this
+    # is the only place it can happen -- and it happens after the merge so a
+    # record is judged once rather than once per pod. Records whose timestamp
+    # cannot be read are kept (see TimeWindow.excludes).
+    if window.until is not None:
+        before = len(outcome.records)
+        outcome.records = [r for r in outcome.records
+                           if not window.excludes(r.get("timestamp"))]
+        dropped = before - len(outcome.records)
+        if dropped:
+            logger.info("Trimmed records past the window's upper bound",
+                        dropped=dropped, until=window.until.isoformat())
+
     return outcome
 
 

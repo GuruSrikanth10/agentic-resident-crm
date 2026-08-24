@@ -128,9 +128,23 @@ class FetchResult:
 
 @dataclass(frozen=True)
 class TimeWindow:
-    """How far back to look."""
+    """How far back to look, and optionally how recent to stop.
+
+    `hours` is the look-back, which is what the kubelet API accepts
+    (`since_seconds`). `until` is an upper bound the API cannot express, so it
+    is applied client-side after the read.
+
+    The DLT lane is the caller that needs one: its window is anchored on when
+    the last attempt actually failed, and lines from hours of unrelated later
+    activity are noise in the evidence handed to the model. `LogWindow`
+    described this bound and computed `end_ms` for it, but nothing ever
+    applied it -- the trailing half of the contract was documentation only.
+    """
 
     hours: float
+    #: Upper bound on record timestamps. None means "up to now", which is
+    #: every existing caller and exactly today's behaviour.
+    until: Optional[datetime] = None
 
     @property
     def seconds(self) -> int:
@@ -138,6 +152,24 @@ class TimeWindow:
 
     def start_time(self, now: Optional[datetime] = None) -> datetime:
         return (now or datetime.now(timezone.utc)) - timedelta(hours=self.hours)
+
+    def excludes(self, timestamp: Optional[str]) -> bool:
+        """Is this record newer than the window's upper bound?
+
+        Deliberately conservative: an absent or unparseable timestamp is NEVER
+        excluded. Dropping a line because we could not read its clock would be
+        discarding evidence on the strength of a parse failure, which is the
+        opposite of what this pipeline is for.
+        """
+        if self.until is None or not timestamp:
+            return False
+        try:
+            parsed = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed > self.until
 
     @classmethod
     def default(cls) -> "TimeWindow":

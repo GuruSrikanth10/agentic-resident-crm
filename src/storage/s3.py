@@ -36,6 +36,24 @@ logger = get_logger(__name__)
 _s3_client = None
 _s3_client_lock = threading.Lock()
 
+#: How many times `update_json` re-reads and retries after losing a
+#: conditional write. Contention is between the handful of pods analysing the
+#: same fingerprint at once, so this only has to outlast a short burst.
+UPDATE_MAX_ATTEMPTS = int(os.environ.get("S3_UPDATE_MAX_ATTEMPTS", "8"))
+
+
+def _is_precondition_failure(error) -> bool:
+    """Did a conditional write lose the race?
+
+    S3 answers a failed `If-Match` with 412 PreconditionFailed and a failed
+    `If-None-Match: *` with 409 ConditionalRequestConflict. Both mean the same
+    thing here: re-read and try again.
+    """
+    response = getattr(error, "response", None) or {}
+    code = (response.get("Error") or {}).get("Code")
+    status = (response.get("ResponseMetadata") or {}).get("HTTPStatusCode")
+    return code in ("PreconditionFailed", "ConditionalRequestConflict") or status in (409, 412)
+
 
 def _get_client():
     global _s3_client
@@ -117,8 +135,9 @@ class S3CasebookStorage(CasebookStorage):
             return (data.get("packet_status") or {}).get("status") in TERMINAL_STATUSES
         return True
 
-    def terminal_status(self, event_id: str) -> Optional[str]:
-        for filename in ("status.json", "casebook.json"):
+    def terminal_status(self, event_id: str,
+                        filenames: tuple = ("status.json", "casebook.json")) -> Optional[str]:
+        for filename in filenames:
             data = self.load(event_id, filename=filename)
             if not data:
                 continue
@@ -165,6 +184,65 @@ class S3CasebookStorage(CasebookStorage):
             return True
         except Exception:
             return False
+
+    def update_json(self, event_id: str, filename: str, mutate) -> dict:
+        """Read-modify-write via an S3 conditional write.
+
+        S3 gives no mutual exclusion, so a load-then-save pair is a lost-update
+        race: two analysis pods incrementing the same DLT group counter both
+        read N and both write N+1. `filelock` cannot help -- it coordinates
+        processes on a shared filesystem, and two pods have none.
+
+        The fix is compare-and-swap, which S3 does support: `If-None-Match: *`
+        creates only when absent, `If-Match: <etag>` overwrites only when the
+        object is still the one we read. Either returns 412 when another writer
+        got there first, and we retry from the fresh state.
+        """
+        key = self._key(event_id, filename)
+
+        for attempt in range(UPDATE_MAX_ATTEMPTS):
+            current, etag = self._load_with_etag(key)
+            updated = mutate(current)
+            if "schema_version" not in updated:
+                updated["schema_version"] = CASEBOOK_SCHEMA_VERSION
+
+            body = json.dumps(updated, indent=4, ensure_ascii=False).encode("utf-8")
+            condition = {"IfMatch": etag} if etag else {"IfNoneMatch": "*"}
+
+            try:
+                _get_client().put_object(
+                    Bucket=self.bucket, Key=key, Body=body,
+                    ContentType="application/json", **condition,
+                )
+                return updated
+            except Exception as e:
+                if not _is_precondition_failure(e):
+                    raise
+                logger.info("Conditional write lost a race; retrying",
+                            event_id=event_id, filename=filename,
+                            attempt=attempt + 1)
+
+        raise RuntimeError(
+            f"Could not update {key} after {UPDATE_MAX_ATTEMPTS} attempts: "
+            f"another writer won every round."
+        )
+
+    def _load_with_etag(self, key: str) -> tuple:
+        """Return (document, etag), or (None, None) when the key is absent."""
+        try:
+            response = _get_client().get_object(Bucket=self.bucket, Key=key)
+            body = json.loads(response["Body"].read().decode("utf-8"))
+            return body, response.get("ETag")
+        except Exception as e:
+            code = getattr(e, "response", {}).get("Error", {}).get("Code")
+            if code in ("NoSuchKey", "404"):
+                return None, None
+            # A corrupt document must not be silently replaced: without an
+            # etag we would fall through to IfNoneMatch and fail, which is the
+            # honest outcome.
+            logger.warning("Could not read for update", key=key,
+                           error=f"{type(e).__name__}: {e}")
+            return None, None
 
     def list_events(self) -> list:
         """List casebook prefixes, paginated.

@@ -39,5 +39,7 @@ tests/fixtures/dlt/corpus/
 # data, so unlike rules.csv it belongs in git.
 !reason_codes.csv
 
-# Local .env backups (contain the same secrets as .env)
-.env.bak.*
+# Local .env backups -- they hold the same secrets as .env, which is ignored
+# while its backups were not, so one `git add -A` would have published them.
+# `.env.bak*` rather than `.env.bak.*` so a plain `.env.bak` is caught too.
+.env.bak*

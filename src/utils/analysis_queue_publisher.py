@@ -8,33 +8,15 @@ shape (cached producer, `acks="all"` so the last line of defence for handing
 work to the slow consumer isn't a leader-only ack), but publishes the payload
 unwrapped -- there is no error to envelope here, unlike a DLQ message.
 """
-import json
-from kafka import KafkaProducer
 from src.utils.env import get_required_env
+from src.utils.kafka_producer import brokers as _brokers
+from src.utils.kafka_producer import get_producer
 from src.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
 
 analysis_topic = get_required_env("PACKET_ANALYSIS_TOPIC_NAME", "packet-analysis-queue")
-brokers = [
-    b.strip() for b in get_required_env("KAFKA_CONSUMER_BROKERS", "localhost:9092").split(",") if b.strip()
-]
-
-_producer = None
-
-def get_producer():
-    global _producer
-    if _producer is None:
-        try:
-            _producer = KafkaProducer(
-                bootstrap_servers=brokers,
-                value_serializer=lambda v: json.dumps(v).encode("utf-8"),
-                acks="all",
-                retries=3,
-            )
-        except Exception as e:
-            logger.error("Failed to initialize analysis-queue producer", error=str(e))
-    return _producer
+brokers = _brokers()
 
 def publish_to_analysis_queue(payload: dict) -> bool:
     """Publish a fetched packet's payload for the slow consumer to pick up.
@@ -63,26 +45,17 @@ def publish_to_analysis_queue(payload: dict) -> bool:
 # ---------------------------------------------------------------------------
 # DLT analysis queue (DLT_PLAN.md Phase 5)
 # ---------------------------------------------------------------------------
-# A second topic and a second producer rather than a parameter on the one
-# above: the two queues carry different message shapes, are consumed by
-# different roles, and a backlog on one must not be able to stall the other.
-
-_dlt_producer = None
+# A second TOPIC, but not a second producer. The two queues carry different
+# message shapes, are consumed by different roles, and a backlog on one must
+# not stall the other -- all of which is true of the topics and none of which
+# is a property of the client object. A KafkaProducer multiplexes topics, so
+# the separate one this used to build bought nothing and cost a third
+# connection pool, metadata fetcher and sender thread per process.
 
 
 def get_dlt_producer():
-    global _dlt_producer
-    if _dlt_producer is None:
-        try:
-            _dlt_producer = KafkaProducer(
-                bootstrap_servers=brokers,
-                value_serializer=lambda v: json.dumps(v).encode("utf-8"),
-                acks="all",
-                retries=3,
-            )
-        except Exception as e:
-            logger.error("Failed to initialize DLT analysis-queue producer", error=str(e))
-    return _dlt_producer
+    """Retained as a name so existing callers and tests keep working."""
+    return get_producer()
 
 
 def publish_to_dlt_analysis_queue(message: dict) -> bool:

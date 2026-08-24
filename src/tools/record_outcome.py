@@ -12,7 +12,6 @@ safely promoted and agent regressions are invisible (ENHANCEMENT_PLAN 4.1).
 """
 import argparse
 import getpass
-import json
 import sys
 
 from dotenv import load_dotenv
@@ -30,31 +29,48 @@ from src.utils.outcomes import (  # noqa: E402
     load_outcome,
     record_outcome,
 )
-from src.utils.paths import LOCAL_CASESHEETS_DIR  # noqa: E402
 
 
 def _list_pending():
-    """Terminal casebooks with no verdict yet -- the operator's work queue."""
-    if not LOCAL_CASESHEETS_DIR.exists():
+    """Terminal casebooks with no verdict yet -- the operator's work queue.
+
+    Enumerated through CasebookStorage, not by walking the local filesystem.
+    Walking it meant that under CASEBOOK_STORAGE_BACKEND=s3 this printed "No
+    casebooks found" no matter how many were waiting, so the operator's queue
+    looked empty and the accuracy dataset was never fed -- the same failure
+    G2 fixed in `outcomes.iter_outcomes`, left in place here.
+    """
+    from src.storage.factory import get_casebook_storage
+
+    storage = get_casebook_storage()
+    try:
+        event_ids = storage.list_events()
+    except Exception as e:
+        print(f"Could not enumerate casebooks: {type(e).__name__}: {e}")
+        return
+
+    if not event_ids:
         print("No casebooks found.")
         return
 
     pending = []
-    for directory in sorted(LOCAL_CASESHEETS_DIR.iterdir()):
-        casebook_file = directory / "casebook.json"
-        if not directory.is_dir() or not casebook_file.exists():
-            continue
+    for event_id in event_ids:
         try:
-            casebook = json.loads(casebook_file.read_text(encoding="utf-8"))
+            casebook = storage.load(event_id, filename="casebook.json")
         except Exception:
+            continue
+        if not casebook:
             continue
 
         status = (casebook.get("packet_status") or {}).get("status")
         if status not in TERMINAL_STATUSES:
             continue
 
-        event_id = (casebook.get("packet_metadata") or {}).get("eid")
-        if not event_id or load_outcome(event_id):
+        # The STORAGE KEY, not the casebook's `eid` field. Outcomes are saved
+        # under the key (`storage.save(event_id, outcome, ...)`), so looking up
+        # an existing verdict by `eid` would miss it wherever the two differ --
+        # and would then offer an already-judged packet again.
+        if load_outcome(event_id):
             continue
 
         resolution = casebook.get("resolution") or {}

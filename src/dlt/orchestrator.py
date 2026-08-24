@@ -16,6 +16,7 @@ cannot see.
 """
 import json
 import os
+import threading
 from typing import Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -33,6 +34,11 @@ from src.utils.resilience import llm_breaker, retry_transient
 logger = get_logger(__name__)
 
 _agent = None
+
+#: Guards the lazy build. `/analyze-dlt` is a sync endpoint dispatched on
+#: Starlette's threadpool, so two concurrent DLT cases can already reach the
+#: builder at once today -- this one was never masked by the event loop.
+_agent_lock = threading.Lock()
 
 MAX_EVIDENCE_CHARS = int(os.environ.get("DLT_MAX_EVIDENCE_CHARS", "40000"))
 
@@ -113,6 +119,16 @@ def get_dlt_agent():
     global _agent
     if _agent is not None:
         return _agent
+
+    with _agent_lock:
+        if _agent is not None:
+            return _agent
+        return _build_dlt_agent()
+
+
+def _build_dlt_agent():
+    """Construct the graph. Caller must hold `_agent_lock`."""
+    global _agent
 
     logger.info("Building the DLT agent graph")
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

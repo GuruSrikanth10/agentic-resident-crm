@@ -259,11 +259,19 @@ def test_routes_falls_back_to_truncated_logs_when_s3_unset(monkeypatch):
         assert res["status"] == "processed"
         storage = get_casebook_storage()
         casebook = storage.load(event_id)
+        # `rejection_logs` is a {"path", "gaps"} record, not a bare string:
+        # the log text itself lives in the raw_logs.txt artifact, and only its
+        # locator is embedded here. The old assertions read it as a string and
+        # raised AttributeError once that shape changed.
         logs_field = casebook["packet_status"]["rejection_data"]["rejection_logs"]
         assert logs_field is not None
-        assert logs_field.startswith("X" * 100)
-        assert "TRUNCATED" in logs_field
-        assert not logs_field.startswith("s3://")
+        path = logs_field["path"]
+        # With no bucket configured there is no resolvable URL to record, so
+        # the casebook says so plainly rather than persisting a fake one (1.12).
+        assert path == "Logs persisted to local storage (S3 unavailable)."
+        assert not path.startswith("s3://")
+        # No evidence gaps were injected, so none are claimed.
+        assert logs_field["gaps"] is None
     finally:
         _cleanup_casebook(event_id)
 

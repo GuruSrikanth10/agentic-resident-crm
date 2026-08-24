@@ -72,7 +72,7 @@ def _isolate(monkeypatch, tmp_path):
     for var in ("DLT_REFID_PATH", "DLT_REFID_KEYS", "DLT_REFID_PATHS_BY_TYPE",
                 "DLT_MAX_LOG_AGE_SECONDS", "CASEBOOK_STORAGE_BACKEND"):
         monkeypatch.delenv(var, raising=False)
-    monkeypatch.setattr("src.dlt.case_storage.LOCAL_CASESHEETS_DIR", tmp_path)
+    monkeypatch.setattr("src.utils.paths.LOCAL_CASESHEETS_DIR", tmp_path)
     monkeypatch.setenv("DLT_REGISTRY_PATH", "tests/fixtures/dlt/business_errors.csv")
     monkeypatch.setattr("src.api.dlt_routes.publish_to_dlt_analysis_queue",
                         lambda message: True)

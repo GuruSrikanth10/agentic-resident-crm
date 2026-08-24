@@ -177,11 +177,19 @@ def test_shutdown_marks_abandoned_investigations(tmp_path, monkeypatch):
     monkeypatch.setattr(routes, "get_casebook_storage", lambda: store)
     monkeypatch.setattr(routes, "API_SHUTDOWN_DRAIN_SECONDS", 0.1)
 
-    # Throwaway executor: drain_and_shutdown() shuts down whatever it is
-    # given, and the real one is module-level and shared by every other test
-    # in the suite -- shutting it down here would break all of them with
+    # Throwaway executors: drain_and_shutdown() shuts down whatever it is
+    # given, and the real ones are module-level and shared by every other test
+    # in the suite -- shutting them down here would break all of them with
     # "cannot schedule new futures after shutdown".
+    #
+    # BOTH pools, because the drain now also tears down the DLT analysis lane's
+    # sibling executor. Both are resolved by attribute at drain time precisely
+    # so this substitution works; see routes._extra_executor_getters.
+    from src.api import dlt_routes
+
     monkeypatch.setattr(routes, "_agent_invoke_executor",
+                        concurrent.futures.ThreadPoolExecutor(max_workers=1))
+    monkeypatch.setattr(dlt_routes, "_dlt_invoke_executor",
                         concurrent.futures.ThreadPoolExecutor(max_workers=1))
 
     store.save("stuck", {
@@ -190,14 +198,16 @@ def test_shutdown_marks_abandoned_investigations(tmp_path, monkeypatch):
     }, filename="status.json")
 
     with routes._in_flight_lock:
-        routes._in_flight_events.add("stuck")
+        # A Counter now, so a duplicate in-flight id stays visible to the
+        # drain until BOTH invocations have finished.
+        routes._in_flight_events["stuck"] += 1
 
     try:
         routes.drain_and_shutdown()
     finally:
         routes._draining.clear()
         with routes._in_flight_lock:
-            routes._in_flight_events.discard("stuck")
+            routes._in_flight_events.pop("stuck", None)
 
     assert store.terminal_status("stuck") == "FAILED_SHUTDOWN"
 
@@ -350,13 +360,30 @@ def test_retry_prompt_includes_the_logs():
 
 def test_paths_have_a_single_definition():
     from src.log_pipeline import config
-    from src.tools import build_runbooks
     from src.utils import paths
 
     assert config.DRAIN3_STATE_DIR == paths.DRAIN3_STATE_DIR
     assert config.CATALOG_PATH == paths.CATALOG_PATH
-    assert build_runbooks.CASESHEETS_DIR == paths.LOCAL_CASESHEETS_DIR
     assert paths.CONSUMER_HEARTBEAT_PATH.parent == paths.LOCAL_CHECKPOINTS_DIR
+
+
+def test_build_runbooks_derives_no_casesheets_path_at_all():
+    """This used to assert `build_runbooks.CASESHEETS_DIR ==
+    paths.LOCAL_CASESHEETS_DIR` -- one path, not two derivations (G13).
+
+    The tool now reads casebooks through CasebookStorage and holds no path
+    constant, which satisfies G13 more strongly than agreeing with it did: on
+    the S3 backend the local path was correct AND useless, since walking it
+    found nothing and the runbook learning loop silently produced no drafts.
+    """
+    import inspect
+
+    from src.tools import build_runbooks
+
+    assert not hasattr(build_runbooks, "CASESHEETS_DIR")
+    source = inspect.getsource(build_runbooks)
+    assert "LOCAL_CASESHEETS_DIR" not in source
+    assert "list_events()" in source
 
 
 def test_heartbeat_path_is_shared_between_api_and_consumer():

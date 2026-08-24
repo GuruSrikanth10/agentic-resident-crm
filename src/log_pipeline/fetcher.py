@@ -97,18 +97,38 @@ def _get_es_client(es_host: str, auth_args: dict):
 
 
 def fetch_logs(event_id: str, catalog: Optional[TemplateCatalog] = None,
-               window=None) -> list[dict]:
+               window=None, out_diagnostics: Optional[dict] = None) -> list[dict]:
     """Fetch logs from Elasticsearch for a given event_id.
 
-    Returns a list of dicts with keys: timestamp, level, message, app_name.
-    Sorted by @timestamp ASC with an _id tiebreaker.
+    Returns a list of dicts with keys: timestamp, level, message, app_name,
+    in @timestamp ASC order. The query itself scans DESC so that a fetch
+    capped by LOG_MAX_DOCUMENTS keeps the most RECENT lines; the list is
+    reversed before it is returned.
 
     `window` is accepted for LogSource protocol conformance but is NOT used to
     bound the query -- see the ES_SEARCH_WINDOW_DAYS comment below for why a
     kubelet-sized window must not be applied to the system of record.
+
+    `out_diagnostics`, when a caller passes a dict, is populated with facts
+    about the fetch that the returned list cannot express -- currently
+    `truncated` and `max_documents`. It is populated on every return path,
+    including the mock-CSV and unconfigured-host ones. An out-parameter rather
+    than a
+    changed return type because eight callers (build_catalog.py and the
+    fetcher's own tests) want exactly today's list and only
+    `ElasticLogSource` needs to build an EvidenceGap from the result.
+    Omitting it gives byte-for-byte the previous behaviour.
     """
     log = logger.bind(event_id=event_id)
     log.info("Elasticsearch fetch started")
+
+    # Seed the out-parameter immediately. Three branches below return before
+    # the paginated scan -- the mock-CSV path (twice) and the unconfigured-host
+    # path -- and leaving the dict untouched on those would make "not
+    # truncated" indistinguishable from "never reported".
+    if out_diagnostics is not None:
+        out_diagnostics["truncated"] = False
+        out_diagnostics["max_documents"] = _max_documents()
 
     # --- Testing/Mock Mode: Load logs from a local CSV file ---
     mock_file = os.environ.get("ES_MOCK_FILE")
@@ -224,10 +244,21 @@ def fetch_logs(event_id: str, catalog: Optional[TemplateCatalog] = None,
     # Source-filter: only pull the fields we need
     source_fields = ["@timestamp", "level", "message", "application_name"]
 
-    # Stable sort with _id tiebreaker (broadly compatible across ES versions)
+    # Stable sort with _id tiebreaker (broadly compatible across ES versions).
+    #
+    # DESCENDING, and reversed to ascending before returning. This used to sort
+    # ascending and, on hitting LOG_MAX_DOCUMENTS, keep `logs[:max_documents]`
+    # -- the OLDEST lines -- and discard the newest. The end of the trace is
+    # where the failure is, so a noisy event lost exactly the ERROR lines that
+    # `reducer.branch_on_error` keys off, and a stuck packet was classified as
+    # a clean rejection at full confidence.
+    #
+    # Slicing the tail of an ascending scan would not have fixed it: the loop
+    # stops as soon as the cap is reached, so the newest pages are never
+    # requested at all. The scan itself has to start from the recent end.
     sort_criteria = [
-        {"@timestamp": {"order": "asc"}},
-        {"_id": {"order": "asc"}},
+        {"@timestamp": {"order": "desc"}},
+        {"_id": {"order": "desc"}},
     ]
 
     # Paginate with search_after ---------------------------------------
@@ -235,6 +266,7 @@ def fetch_logs(event_id: str, catalog: Optional[TemplateCatalog] = None,
     search_after_values = None
     page_size = 500
     max_documents = _max_documents()
+    truncated = False
 
     while True:
         # No seq_no_primary_term: the sort tiebreaker is _id, not _seq_no, so
@@ -266,8 +298,14 @@ def fetch_logs(event_id: str, catalog: Optional[TemplateCatalog] = None,
             search_after_values = hit["sort"]
 
         if len(logs) >= max_documents:
-            log.warning("Hit the LOG_MAX_DOCUMENTS cap; truncating results", max_documents=max_documents)
+            # We are scanning newest-first, so the surplus at the end of this
+            # page is the oldest of what we read -- the right lines to drop.
+            # How many MORE exist beyond the cap is unknown and unknowable
+            # without a count query, hence `at least`.
+            log.warning("Hit the LOG_MAX_DOCUMENTS cap; keeping the most recent results",
+                        max_documents=max_documents)
             logs = logs[:max_documents]
+            truncated = True
             break
 
         # A short page means this was the last one -- no point issuing one
@@ -275,5 +313,15 @@ def fetch_logs(event_id: str, catalog: Optional[TemplateCatalog] = None,
         if len(hits) < page_size:
             break
 
-    log.info("Elasticsearch fetch completed", record_count=len(logs), index_pattern=index_pattern)
+    # Back to ascending. Every downstream stage -- branch_on_error's context
+    # window, cluster_logs' first_seen/last_seen, the flow-boundary guardrail
+    # -- reads these in flow order, so the descending scan is an implementation
+    # detail that must not escape this function.
+    logs.reverse()
+
+    log.info("Elasticsearch fetch completed", record_count=len(logs),
+             index_pattern=index_pattern, truncated=truncated)
+    if out_diagnostics is not None:
+        out_diagnostics["truncated"] = truncated
+        out_diagnostics["max_documents"] = max_documents
     return logs

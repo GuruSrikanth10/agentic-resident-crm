@@ -16,6 +16,7 @@ from src.log_pipeline.config import (
     DRAIN3_STATE_DIR,
     ERROR_CONTEXT_LINES,
     ERROR_TRAILING_LINES,
+    MAX_DECISION_VOCABULARY_LINES,
     RARE_TEMPLATE_THRESHOLD,
 )
 from src.log_pipeline.catalog import TemplateCatalog
@@ -226,6 +227,12 @@ def apply_evidence_guardrails(
                 "source": "decision_vocabulary_match",
             })
 
+    # Bound it. These are kept in full text, and the default vocabulary matches
+    # strings that appear on most lines in this domain -- so an unbounded list
+    # made the reduced output larger than the input it reduces.
+    decision_lines, decision_lines_omitted = _bound_head_and_tail(
+        decision_lines, MAX_DECISION_VOCABULARY_LINES)
+
     # -------------------------------------------------------------------
     # 2. Process each cluster
     # -------------------------------------------------------------------
@@ -274,6 +281,7 @@ def apply_evidence_guardrails(
     logger.info(
         "Reducer applied evidence guardrails",
         decision_vocabulary_lines=len(decision_lines),
+        decision_vocabulary_omitted=decision_lines_omitted,
         boundary_lines=len(boundary_lines),
         rare_templates=sum(1 for c in processed if c.get("classification") == "rare"),
     )
@@ -281,5 +289,24 @@ def apply_evidence_guardrails(
     return {
         "clusters": processed,
         "decision_vocabulary_lines": decision_lines,
+        # How many matches the bound dropped. Rendered explicitly by the
+        # formatter: an omission the model cannot see is an omission it will
+        # reason as though it never existed.
+        "decision_vocabulary_omitted": decision_lines_omitted,
         "boundary_lines": boundary_lines,
     }
+
+
+def _bound_head_and_tail(items: list, limit: int) -> tuple:
+    """Keep the first and last `limit // 2` items. Returns (kept, omitted).
+
+    Head-and-tail rather than a plain head slice because both ends of a
+    decision sequence carry information -- what the flow set out to do, and
+    what it concluded -- while the middle is where the repetition lives.
+    """
+    if limit <= 0 or len(items) <= limit:
+        return items, 0
+
+    head = limit // 2
+    tail = limit - head
+    return items[:head] + items[-tail:], len(items) - limit

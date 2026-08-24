@@ -1,33 +1,18 @@
-import json
-from kafka import KafkaProducer
 from src.utils.env import get_required_env
+from src.utils.kafka_producer import brokers as _brokers
+from src.utils.kafka_producer import get_producer
 from src.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
 
 dlq_topic = get_required_env("KAFKA_DLQ_TOPIC", "rejected-packets-dlq")
-brokers = [
-    b.strip() for b in get_required_env("KAFKA_CONSUMER_BROKERS", "localhost:9092").split(",") if b.strip()
-]
+# Kept as a module attribute: /ready and several tests read it.
+brokers = _brokers()
 
-_producer = None
-
-def get_producer():
-    global _producer
-    if _producer is None:
-        try:
-            _producer = KafkaProducer(
-                bootstrap_servers=brokers,
-                value_serializer=lambda v: json.dumps(v).encode("utf-8"),
-                # The DLQ is the last line of defence for a packet that failed
-                # everywhere else; losing the record because only the leader
-                # acked would defeat the point.
-                acks="all",
-                retries=3,
-            )
-        except Exception as e:
-            logger.error("Failed to initialize DLQ producer", error=str(e))
-    return _producer
+# `get_producer` is re-exported rather than redefined. This module used to
+# build its own KafkaProducer with settings identical to the two queue
+# publishers', so every process held three connection pools to one cluster
+# (see src/utils/kafka_producer.py).
 
 def publish_to_dlq(payload, error_message: str):
     producer = get_producer()

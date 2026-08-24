@@ -1,6 +1,7 @@
 import os
 import json
 import contextvars
+import threading
 from typing import TypedDict
 from langgraph.graph import StateGraph, START, END
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -91,6 +92,15 @@ class GraphState(TypedDict):
 
 _agent = None
 
+#: Guards the lazy build below. Two concurrent first-callers each built a full
+#: graph -- two LLM clients, four react agents, and two `get_checkpointer()`
+#: calls, the second of which opens another connection and re-runs setup()'s
+#: DDL. This was masked while `get_agent()` ran on the event loop, which
+#: serialised it; moving the call off the loop removes that accidental
+#: protection, so the lock has to be real. Same shape as
+#: `core/checkpointer.py` and `sources/k8s/client.py`.
+_agent_lock = threading.Lock()
+
 #: Hash of the prompts and policy the cached graph was built from.
 #: Written into every casebook so an accuracy movement can be attributed to a
 #: prompt change rather than merely coinciding with one. The rule side of this
@@ -140,9 +150,23 @@ def prompt_fingerprint() -> str:
 
 def get_agent():
     global _agent, _prompt_fingerprint
+
+    # Fast path without the lock: once built, `_agent` never changes, and an
+    # unsynchronised read of an already-published reference is safe.
     if _agent is not None:
         logger.info("Returning the cached agent graph")
         return _agent
+
+    with _agent_lock:
+        # Re-check: another thread may have built it while we waited.
+        if _agent is not None:
+            return _agent
+        return _build_agent()
+
+
+def _build_agent():
+    """Construct the graph. Caller must hold `_agent_lock`."""
+    global _agent, _prompt_fingerprint
 
     logger.info("Building the agent graph")
     base_dir = os.path.dirname(os.path.dirname(__file__))
@@ -550,6 +574,18 @@ def get_agent():
         event_id = state.get("payload", {}).get("eventId", "unknown")
         logger.bind(event_id=event_id).info("Generating escalation casebook", state="ESCALATING")
 
+        # Observed here as well as in synthesis_node. This node is reached
+        # exactly when retry_count >= MAX_INVESTIGATION_RETRIES -- the packets
+        # with the MOST Reviewer rejections -- and recording only the
+        # successful path gave the histogram a hard ceiling at max_retries - 1
+        # and hid the tail it exists to measure.
+        #
+        # `retry_count`, NOT `retry_count - 1`. The histogram counts Reviewer
+        # REJECTIONS, and `retry_count` counts reviews. On the synthesis path
+        # the final review approved, so rejections are one fewer than reviews.
+        # On this path every review rejected, so they are equal.
+        metrics.INVESTIGATOR_RETRIES.observe(max(0, state.get("retry_count", 0)))
+
         # We manually construct a fake synthesis payload that forces the routes.py to mark it NEEDS_MANUAL_REVIEW
         investigation = state.get("investigation", "")
         feedback = state.get("reviewer_feedback", "")
@@ -644,6 +680,11 @@ def get_agent():
         log.info("Synthesis finished")
         # How many Reviewer rejections this packet needed. A rising
         # distribution is the earliest signal of prompt or model regression.
+        #
+        # Minus one because reaching synthesis means the LAST review approved:
+        # `retry_count` counts reviews, and one of them was not a rejection.
+        # escalate_node observes `retry_count` undecremented, for the mirror
+        # reason -- see there.
         metrics.INVESTIGATOR_RETRIES.observe(max(0, state.get("retry_count", 1) - 1))
         
         # Shadow comparison. The verdict is RETURNED, not just logged.

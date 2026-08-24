@@ -319,8 +319,17 @@ def test_unparseable_output_preserves_the_evidence():
         )
         assert casebook["packet_status"]["status"] == "FAILED_SYNTHESIS_PARSE"
         rejection = casebook["packet_status"]["rejection_data"]
-        assert rejection["rejection_logs"] == "ERROR something went wrong"
+        # `rejection_logs` is a {"path", "gaps"} locator now, not the log text:
+        # the text goes to S3 or to the raw_logs.txt artifact, and the casebook
+        # records where. What this test cares about is that the record is still
+        # written on the failure path -- a contract breach must not also erase
+        # the pointer to the trace.
+        assert rejection["rejection_logs"]["path"]
         assert rejection["rejection_code"] is not None
+        # The trace that explains the breach: the model's verbatim output and
+        # the validator's complaint about it, both persisted alongside.
+        assert "rambled" in casebook["resolution"]["raw_output"]
+        assert casebook["resolution"]["parse_error"]
         assert casebook["packet_metadata"]["eid"] == event_id
     finally:
         _cleanup_casebook(event_id)

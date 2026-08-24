@@ -10,10 +10,12 @@ Flow:
     -> Normal path:  Stage 3 (cluster) -> Stage 4 (guardrails) -> format, return
 """
 import os
+import threading
 from typing import Optional
 
 from src.log_pipeline import redaction
 from src.log_pipeline.catalog import TemplateCatalog
+from src.log_pipeline.config import MAX_REDUCED_CHARS
 from src.log_pipeline.reducer import branch_on_error, cluster_logs, apply_evidence_guardrails
 from src.log_pipeline.sources import chain as source_chain
 from src.log_pipeline.sources.k8s import gaps as k8s_gaps
@@ -26,14 +28,21 @@ logger = get_logger(__name__)
 
 
 _cached_catalog = None
+# TemplateCatalog() reads and parses the catalog JSON, so racing callers each
+# paid for a full parse and all but one result was discarded.
+_catalog_lock = threading.Lock()
 
 
 def _get_catalog() -> TemplateCatalog:
     """Return a module-level cached catalog instance."""
     global _cached_catalog
-    if _cached_catalog is None:
-        _cached_catalog = TemplateCatalog()
-    return _cached_catalog
+    if _cached_catalog is not None:
+        return _cached_catalog
+
+    with _catalog_lock:
+        if _cached_catalog is None:
+            _cached_catalog = TemplateCatalog()
+        return _cached_catalog
 
 
 def _default_window() -> TimeWindow:
@@ -192,12 +201,38 @@ def reduce_logs(event_id: str, extra_identifiers: tuple = (),
 # ======================================================================
 
 def _with_banner(banner: str, body: str) -> str:
-    """Put the evidence-gap banner ahead of the trace.
+    """Put the evidence-gap banner ahead of the trace, then bound the whole.
 
     The LLM must see that the trace is incomplete before it reads the
-    trace, not after.
+    trace, not after -- so the banner is prepended, and the size ceiling below
+    trims the BODY rather than the banner.
     """
+    body = _bound_total_size(body)
     return f"{banner}\n\n{body}" if banner else body
+
+
+def _bound_total_size(body: str) -> str:
+    """Last-resort ceiling on the text handed to the LLM.
+
+    The per-section bounds cap the parts; this caps the whole. It exists for
+    the ERROR branch in particular, which is bounded in *lines*
+    (LOG_ERROR_CONTEXT_LINES + LOG_ERROR_TRAILING_LINES plus every ERROR in
+    between) and not in characters -- a stack-trace-heavy trace can blow the
+    context window on a few hundred lines.
+
+    Trims the middle and says so, for the same reason the decision-vocabulary
+    bound does: the head establishes what the flow attempted and the tail
+    holds how it ended.
+    """
+    if len(body) <= MAX_REDUCED_CHARS:
+        return body
+
+    marker = (f"\n\n... {len(body) - MAX_REDUCED_CHARS} characters omitted from "
+              f"the middle of this trace (LOG_MAX_REDUCED_CHARS) ...\n\n")
+    keep = max(0, (MAX_REDUCED_CHARS - len(marker)) // 2)
+    logger.warning("Reduced log output exceeded LOG_MAX_REDUCED_CHARS; trimming",
+                   original_chars=len(body), limit=MAX_REDUCED_CHARS)
+    return body[:keep] + marker + body[-keep:]
 
 
 def _origin(log: dict) -> str:
@@ -251,8 +286,22 @@ def _format_normal_path(event_id: str, assembled: dict,
 
     # Decision vocabulary matches
     if decision_lines:
-        lines.append(f"== Decision-Vocabulary Matches ({len(decision_lines)} lines) ==")
-        for dl in decision_lines:
+        omitted = assembled.get("decision_vocabulary_omitted", 0)
+        header = f"== Decision-Vocabulary Matches ({len(decision_lines)} lines) =="
+        if omitted:
+            header = (f"== Decision-Vocabulary Matches "
+                      f"({len(decision_lines)} of {len(decision_lines) + omitted} "
+                      f"lines; the middle was omitted) ==")
+        lines.append(header)
+
+        # The omission marker sits at the seam, not in the header alone: the
+        # model reads the lines in order, and two adjacent decision lines with
+        # a gap of thousands between them would otherwise read as consecutive.
+        half = len(decision_lines) // 2 if omitted else len(decision_lines)
+        for index, dl in enumerate(decision_lines):
+            if omitted and index == half:
+                lines.append(f"  ... {omitted} further decision-vocabulary lines "
+                             f"omitted (LOG_MAX_DECISION_LINES) ...")
             lines.append(f"  [{dl['timestamp']}] [{dl['level']}] {dl['message']}")
         lines.append("")
 

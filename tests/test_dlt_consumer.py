@@ -52,7 +52,7 @@ def _isolate(monkeypatch, tmp_path):
     for var in ("DLT_REFID_PATH", "DLT_REFID_KEYS", "CASEBOOK_STORAGE_BACKEND"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr("src.utils.paths.LOCAL_CASESHEETS_DIR", tmp_path)
-    monkeypatch.setattr("src.dlt.case_storage.LOCAL_CASESHEETS_DIR", tmp_path)
+    monkeypatch.setattr("src.utils.paths.LOCAL_CASESHEETS_DIR", tmp_path)
     case_storage.reset_cache()
     yield
     case_storage.reset_cache()

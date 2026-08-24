@@ -104,7 +104,7 @@ def test_retries_then_succeeds():
             raise ApiException(status=503)
         return "ok"
 
-    assert call_with_retry(flaky, sleep=lambda _s: None) == "ok"
+    assert call_with_retry(flaky, _sleep=lambda _s: None) == "ok"
     assert calls["n"] == 3
 
 
@@ -116,7 +116,7 @@ def test_non_retryable_fails_on_the_first_attempt():
         raise ApiException(status=403)
 
     with pytest.raises(ApiException):
-        call_with_retry(denied, sleep=lambda _s: None)
+        call_with_retry(denied, _sleep=lambda _s: None)
 
     assert calls["n"] == 1, "a 403 must not be retried"
 
@@ -129,14 +129,14 @@ def test_gives_up_after_max_attempts():
         raise ApiException(status=503)
 
     with pytest.raises(ApiException):
-        call_with_retry(always_down, max_attempts=4, sleep=lambda _s: None)
+        call_with_retry(always_down, _max_attempts=4, _sleep=lambda _s: None)
 
     assert calls["n"] == 4
 
 
 def test_no_sleep_on_success():
     slept = []
-    call_with_retry(lambda: "fine", sleep=slept.append)
+    call_with_retry(lambda: "fine", _sleep=slept.append)
     assert slept == []
 
 

@@ -1,32 +1,138 @@
 #!/usr/bin/env python3
-import os
-import json
-import requests
+"""Approve replays a human has to sign off on before they fire.
+
+`queue_for_replay` records each nomination through `CasebookStorage` under the
+`pending_replays` root, one document per packet id. This walks them.
+
+It used to read a local `pending_replays.jsonl`, which the tool also wrote
+locally -- so under CASEBOOK_STORAGE_BACKEND=s3 with more than one replica the
+queue was fragmented across pods and an operator saw only whichever slice
+their own pod had written. Any such legacy file is still drained here, so
+nothing queued before this change is stranded.
+"""
 import argparse
-from filelock import FileLock
+import json
+import os
+import sys
+from pathlib import Path
+
+import requests
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+
+from src.tools.tool_registry import (  # noqa: E402
+    PENDING_REPLAY_FILENAME,
+    PENDING_REPLAY_ROOT,
+)
+
+
+def _legacy_queue_path() -> Path:
+    """The pre-shared-storage local queue, if this pod still has one."""
+    return Path(__file__).resolve().parent.parent / "db" / "pending_replays.jsonl"
+
+
+def _load_legacy(entries: list) -> list:
+    """Read any local jsonl queue left over from before shared storage.
+
+    Returned alongside the storage-backed entries so a migration does not
+    strand replays an operator already approved queuing.
+    """
+    path = _legacy_queue_path()
+    if not path.exists():
+        return entries
+
+    from filelock import FileLock
+
+    print(f"Also draining the legacy local queue at {path}.")
+    with FileLock(str(path) + ".lock", timeout=10):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                record = json.loads(stripped)
+            except ValueError:
+                print(f"  Skipping an unparseable legacy line: {stripped[:80]}")
+                continue
+            record["_legacy_line"] = stripped
+            entries.append(record)
+    return entries
+
+
+def _rewrite_legacy(consumed_lines: set) -> None:
+    """Drop consumed entries from the legacy file, keeping everything else.
+
+    Re-read fresh rather than reusing the initial read, so anything appended
+    by a live investigation during this interactive session survives (1.8).
+    """
+    path = _legacy_queue_path()
+    if not path.exists() or not consumed_lines:
+        return
+
+    from filelock import FileLock
+
+    with FileLock(str(path) + ".lock", timeout=10):
+        current = path.read_text(encoding="utf-8").splitlines(keepends=True)
+        remaining = [ln for ln in current if ln.strip() not in consumed_lines]
+        path.write_text("".join(remaining), encoding="utf-8")
+
+
+def _load_pending() -> list:
+    """Every replay awaiting approval, from shared storage and any legacy file."""
+    from src.storage.factory import get_scoped_storage
+
+    storage = get_scoped_storage(PENDING_REPLAY_ROOT)
+    entries = []
+
+    try:
+        keys = storage.list_events()
+    except Exception as e:
+        print(f"Could not list pending replays: {type(e).__name__}: {e}")
+        keys = []
+
+    for key in keys:
+        try:
+            record = storage.load(key, filename=PENDING_REPLAY_FILENAME)
+        except Exception as e:
+            print(f"  Skipping {key}: {type(e).__name__}: {e}")
+            continue
+        if not record or record.get("status") != "pending":
+            continue
+        record["_key"] = key
+        entries.append(record)
+
+    return _load_legacy(entries)
+
+
+def _resolve(storage, entry: dict, outcome: str, legacy_consumed: set) -> None:
+    """Mark one entry done, wherever it came from."""
+    if "_legacy_line" in entry:
+        legacy_consumed.add(entry["_legacy_line"])
+        return
+
+    # Kept rather than deleted, and marked with what happened: an approval
+    # that fired a real replay against OIS is an audit record, not scratch.
+    record = {k: v for k, v in entry.items() if not k.startswith("_")}
+    record["status"] = outcome
+    storage.save(entry["_key"], record, filename=PENDING_REPLAY_FILENAME)
+
 
 def main():
     parser = argparse.ArgumentParser(description="Approve Human-in-the-Loop Replays")
-    parser.add_argument("--approve-all", action="store_true", help="Approve all matching replays without prompting")
-    parser.add_argument("--filter-category", type=str, help="Only process replays with this category")
+    parser.add_argument("--approve-all", action="store_true",
+                        help="Approve all matching replays without prompting")
+    parser.add_argument("--filter-category", type=str,
+                        help="Only process replays with this category")
     args = parser.parse_args()
 
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    queue_file = os.path.join(base_dir, "db", "pending_replays.jsonl")
-    lock_file = queue_file + ".lock"
-    
-    if not os.path.exists(queue_file):
-        print("No pending replays found.")
-        return
-
-    # Load environment variables for the URL
-    # Assuming python-dotenv is used, but we'll try to load it manually if not
     try:
         from dotenv import load_dotenv
-        load_dotenv(os.path.join(os.path.dirname(base_dir), ".env"))
+        load_dotenv()
     except ImportError:
         pass
-        
+
+    from src.storage.factory import get_scoped_storage
+
     base_url = os.environ.get("OIS_FEIGN_BASE_URL", "http://10.10.79.62:31261/ois/hold/v1")
     endpoint = f"{base_url}/api/v1/forceReplay"
     ois_api_key = os.environ.get("OIS_API_KEY")
@@ -34,82 +140,59 @@ def main():
     if not ois_api_key:
         print("Warning: OIS_API_KEY is not set; replay calls will be sent unauthenticated.")
 
-    print(f"Loading pending replays from {queue_file}...")
-
-    replays = []
-    replay_raw_lines = []
-    with FileLock(lock_file, timeout=10):
-        with open(queue_file, "r", encoding="utf-8") as f:
-            for line in f:
-                stripped = line.strip()
-                if stripped:
-                    replays.append(json.loads(stripped))
-                    replay_raw_lines.append(stripped)
-
+    replays = _load_pending()
     if not replays:
-        print("Queue is empty.")
-        return
+        print("No pending replays found.")
+        return 0
 
-    # Track which raw lines were actually consumed (successfully replayed,
-    # or explicitly discarded) so the final rewrite below only removes those
-    # -- anything appended to the queue file by a live investigation while
-    # this interactive loop is running must survive (1.7/1.8).
-    consumed_raw_lines = set()
+    storage = get_scoped_storage(PENDING_REPLAY_ROOT)
+    legacy_consumed = set()
 
-    for i, replay in enumerate(replays):
+    for index, replay in enumerate(replays):
         payload = replay.get("payload", {})
         packet_id = payload.get("id", "UNKNOWN")
-        category = payload.get("category", "")
-        raw_line = replay_raw_lines[i]
+        category = payload.get("category", "") or ""
 
         if args.filter_category and args.filter_category.lower() != category.lower():
             continue
 
-        print("\n" + "="*50)
-        print(f"Replay Request {i+1}/{len(replays)}")
+        print("\n" + "=" * 50)
+        print(f"Replay Request {index + 1}/{len(replays)}")
         print(f"Timestamp: {replay.get('timestamp')}")
         print(f"Packet ID: {packet_id}")
         print(f"Category: {category}")
         print(f"Priority: {payload.get('priority')}")
-        print("="*50)
+        print("=" * 50)
 
         if args.approve_all:
-            action = 'y'
+            action = "y"
             print("Auto-approving due to --approve-all flag.")
         else:
             action = input("Approve and execute this replay? (y/n/skip): ").strip().lower()
 
-        if action == 'y':
+        if action == "y":
             print(f"Firing HTTP POST to {endpoint}...")
             try:
-                # Sent as a JSON body with an auth header rather than query
-                # params -- query params land in server access logs, which
-                # would leak notificationEmail/notificationMobile there (1.8).
-                response = requests.post(endpoint, json=payload, headers=headers, timeout=10)
+                # A JSON body with an auth header rather than query params --
+                # query params land in server access logs (1.8).
+                response = requests.post(endpoint, json=payload, headers=headers,
+                                         timeout=10)
                 response.raise_for_status()
                 print(f"Success: {response.text}")
-                consumed_raw_lines.add(raw_line)
+                _resolve(storage, replay, "replayed", legacy_consumed)
             except Exception as e:
                 print(f"Failed: {e}")
-                print("Keeping in queue to try again later.")
-        elif action == 'n':
+                print("Keeping in the queue to try again later.")
+        elif action == "n":
             print("Discarding request.")
-            consumed_raw_lines.add(raw_line)
+            _resolve(storage, replay, "discarded", legacy_consumed)
         else:
             print("Skipping request.")
 
-    # Rewrite the queue, keeping every entry that wasn't consumed above.
-    # Re-read fresh (rather than reusing the stale `replays` from the
-    # initial read) so anything a live investigation queued via
-    # queue_for_replay while this interactive loop was running survives (1.8).
-    with FileLock(lock_file, timeout=10):
-        with open(queue_file, "r", encoding="utf-8") as f:
-            current_lines = f.readlines()
-        remaining_lines = [ln for ln in current_lines if ln.strip() not in consumed_raw_lines]
-        with open(queue_file, "w", encoding="utf-8") as f:
-            f.writelines(remaining_lines)
-
+    _rewrite_legacy(legacy_consumed)
     print("\nQueue processing complete.")
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

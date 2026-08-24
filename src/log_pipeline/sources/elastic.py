@@ -12,9 +12,11 @@ import time
 
 from src.log_pipeline.fetcher import fetch_logs
 from src.log_pipeline.types import (
+    EvidenceGap,
     FetchContext,
     FetchDiagnostics,
     FetchResult,
+    GapType,
     LogRecord,
     TimeWindow,
 )
@@ -50,13 +52,34 @@ class ElasticLogSource:
         retries.
         """
         started = time.monotonic()
-        raw_logs = es_breaker.call(fetch_logs, identifier, catalog=ctx.catalog)
+        diagnostics: dict = {}
+        raw_logs = es_breaker.call(fetch_logs, identifier, catalog=ctx.catalog,
+                                   out_diagnostics=diagnostics)
         latency_ms = (time.monotonic() - started) * 1000.0
 
         records = self._stamp_source(raw_logs or [])
 
+        # A capped fetch is an incomplete one, and design principle 2 says an
+        # incomplete fetch must say so. This returned ok=True with no gaps, so
+        # the LLM was handed a trace missing its oldest lines with nothing to
+        # indicate the omission -- and `apply_confidence_policy`, which caps
+        # confidence on a gapped trace, had nothing to act on.
+        gaps = []
+        if diagnostics.get("truncated"):
+            cap = diagnostics.get("max_documents")
+            gaps.append(EvidenceGap(
+                GapType.TRUNCATED,
+                f"the Elasticsearch query matched more than the "
+                f"{cap} document cap (LOG_MAX_DOCUMENTS); the {len(records)} "
+                f"most recent lines were kept and older ones were not read. "
+                f"Earlier activity for this identifier is absent below.",
+                {"cap": cap, "records_returned": len(records),
+                 "identifier": identifier},
+            ))
+
         return FetchResult(
             records=records,
+            gaps=gaps,
             diagnostics=FetchDiagnostics(
                 source=self.name,
                 records_returned=len(records),

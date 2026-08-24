@@ -2,6 +2,7 @@ import os
 import re
 import time
 import hmac
+import collections
 import asyncio
 import contextlib
 import functools
@@ -50,14 +51,50 @@ _agent_invoke_executor = concurrent.futures.ThreadPoolExecutor(
     max_workers=_MAX_CONCURRENT_INVESTIGATIONS, thread_name_prefix="agent-invoke"
 )
 
+# Bounded executors owned by OTHER modules that the shutdown drain must also
+# tear down. `dlt_routes` registers its sibling analysis pool here rather than
+# routes.py importing it, which would be a cycle.
+#
+# Registered as zero-argument GETTERS, not as executor references. A list of
+# references is captured at import time, so swapping the owning module's
+# attribute -- which is how a caller substitutes a throwaway pool instead of
+# tearing down the one the whole process shares -- would be silently ignored
+# and the real pool shut down anyway. A getter resolves the attribute at drain
+# time, so the substitution is honoured.
+#
+# `_agent_invoke_executor` is not in here; the drain names it directly, which
+# resolves the global at call time for the same reason.
+_extra_executor_getters = []
+
+
+def register_executor(getter) -> None:
+    """Have `drain_and_shutdown` tear down whatever `getter()` returns.
+
+    Pass a callable, not an executor -- see `_extra_executor_getters`.
+    """
+    if not callable(getter):
+        raise TypeError(
+            "register_executor expects a zero-argument callable returning the "
+            "executor, so a substituted module attribute is honoured at drain "
+            "time rather than a stale reference being shut down."
+        )
+    if getter not in _extra_executor_getters:
+        _extra_executor_getters.append(getter)
+
+
 # Set on SIGTERM so /ready starts failing and the orchestrator stops routing
 # new work here while in-flight investigations finish (G9).
 _draining = threading.Event()
 
 # Event ids currently inside agent.invoke(), so a shutdown can mark whatever
 # it could not finish rather than leaving IN_PROGRESS stubs behind.
+#
+# A Counter, not a set. The same event_id can legitimately be in flight twice
+# -- a redelivery that slips past the dedupe guard -- and with a set the first
+# invocation to finish `discard`ed the id while the second was still running,
+# so the drain no longer knew about it and left an IN_PROGRESS stub behind.
 _in_flight_lock = threading.Lock()
-_in_flight_events: set = set()
+_in_flight_events: collections.Counter = collections.Counter()
 
 # How long the API waits for in-flight investigations on shutdown. Kept under
 # a typical terminationGracePeriodSeconds so the drain completes before
@@ -66,8 +103,29 @@ API_SHUTDOWN_DRAIN_SECONDS = float(os.environ.get("API_SHUTDOWN_DRAIN_SECONDS", 
 
 
 def _in_flight_investigations() -> int:
+    """How many investigations are running, counting duplicates separately."""
     with _in_flight_lock:
-        return len(_in_flight_events)
+        return sum(_in_flight_events.values())
+
+
+def begin_draining() -> None:
+    """Start failing readiness NOW, without waiting for the lifespan hook.
+
+    `drain_and_shutdown` also sets `_draining`, but it only runs from uvicorn's
+    lifespan *shutdown*, which fires after uvicorn has already closed the
+    listening socket. By then no orchestrator can reach /ready at all, so the
+    "fail readiness, then drain" sequence the docstrings describe never
+    actually happened -- readiness failed by connection refusal instead, which
+    works by accident and tells the orchestrator nothing.
+
+    Installed as a SIGTERM handler by main_api.py so there is a real window in
+    which the pod answers 503 on /ready while still serving the requests it
+    already accepted.
+    """
+    if not _draining.is_set():
+        _draining.set()
+        logger.info("API marked draining on signal",
+                    in_flight=_in_flight_investigations())
 
 
 def drain_and_shutdown() -> None:
@@ -81,6 +139,8 @@ def drain_and_shutdown() -> None:
     MAX_IN_PROGRESS_AGE_SECONDS -- 30 minutes by default. A rolling deploy
     stalled every in-flight packet for half an hour (G9).
     """
+    # Usually already set by `begin_draining` on SIGTERM; set here too so a
+    # shutdown that arrives by another route still stops readiness.
     _draining.set()
     logger.info("API draining", in_flight=_in_flight_investigations(),
                 budget_seconds=API_SHUTDOWN_DRAIN_SECONDS)
@@ -93,7 +153,7 @@ def drain_and_shutdown() -> None:
     # abandoned rather than stopped. Its status.json must not be left at
     # IN_PROGRESS or the packet is unreprocessable until it goes stale.
     with _in_flight_lock:
-        stragglers = set(_in_flight_events)
+        stragglers = set(_in_flight_events)  # Counter iterates its keys
 
     if stragglers:
         logger.warning("Marking investigations abandoned at shutdown",
@@ -117,8 +177,18 @@ def drain_and_shutdown() -> None:
                              event_id=event_id,
                              error=f"{type(e).__name__}: {e}")
 
-    _agent_invoke_executor.shutdown(wait=False, cancel_futures=True)
-    logger.info("API shutdown complete")
+    # Both resolved at call time, so a substituted attribute is honoured.
+    executors = [_agent_invoke_executor]
+    for getter in _extra_executor_getters:
+        try:
+            executors.append(getter())
+        except Exception as e:
+            logger.warning("Could not resolve a registered executor",
+                           error=f"{type(e).__name__}: {e}")
+
+    for executor in executors:
+        executor.shutdown(wait=False, cancel_futures=True)
+    logger.info("API shutdown complete", executors=len(executors))
 
 # Kafka producer health, cached so a burst of /ready probes (an orchestrator
 # typically polls this every few seconds) doesn't each attempt a fresh
@@ -158,12 +228,16 @@ def _tracked_in_flight(event_id: str):
     timeout, DLQ, exception -- deregisters.
     """
     with _in_flight_lock:
-        _in_flight_events.add(event_id)
+        _in_flight_events[event_id] += 1
     try:
         yield
     finally:
         with _in_flight_lock:
-            _in_flight_events.discard(event_id)
+            # Decrement, never discard: a concurrent duplicate of this id is
+            # still running and must stay visible to the drain.
+            _in_flight_events[event_id] -= 1
+            if _in_flight_events[event_id] <= 0:
+                del _in_flight_events[event_id]
 
 
 @contextlib.contextmanager
@@ -196,6 +270,26 @@ def _packet_metrics(resolution_source: str = "agent"):
         metrics.PACKET_DURATION.labels(resolution_source=source_kind).observe(
             time.monotonic() - started
         )
+
+
+async def _off_loop(fn, *args, **kwargs):
+    """Run one blocking storage or network call off the event loop.
+
+    `_investigate_packet` is `async def`, and the LLM call is correctly handed
+    to `_agent_invoke_executor`. Everything AROUND it was not: two casebook
+    loads, `get_agent()`, `agent.get_state()`, an IN_PROGRESS write, an S3
+    upload of the whole log body, and two more storage round-trips on the way
+    out -- roughly eight filesystem or S3 operations per packet, all executed
+    directly on the single event-loop thread.
+
+    That loop also serves /health, /ready, /metrics, the `get_api_key` and
+    `rate_limiter` dependencies, and the dispatch of /fetch-logs. Under
+    CASEBOOK_STORAGE_BACKEND=s3 this reproduced exactly the head-of-line
+    blocking that the dedicated executor was introduced to remove (2.6): the
+    LLM call no longer blocked the loop, but the eight S3 calls surrounding it
+    did.
+    """
+    return await asyncio.to_thread(functools.partial(fn, *args, **kwargs))
 
 
 def _get_agent_invoke_timeout_seconds() -> float:
@@ -592,8 +686,8 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
     event_id = str(signal.eventId).strip()
 
     storage = get_casebook_storage()
-    existing_casebook = storage.load(event_id, filename="casebook.json")
-    existing_status = storage.load(event_id, filename="status.json")
+    existing_casebook = await _off_loop(storage.load, event_id, filename="casebook.json")
+    existing_status = await _off_loop(storage.load, event_id, filename="status.json")
 
     # Check terminal short-circuit before provisioning the agent or touching
     # the checkpoint DB -- an already-terminal packet has no business paying
@@ -604,9 +698,12 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
             logger.bind(event_id=event_id).info("Skipping event; a terminal casebook already exists", recorded_status=status)
             return {"status": "already_processed", "event_id": event_id}
 
-    agent = get_agent()
+    # get_agent() on its first call reads five prompt files, builds two LLM
+    # clients and four react agents, and opens the checkpoint store (running
+    # Postgres DDL). get_state() is a checkpoint-store read on every call.
+    agent = await _off_loop(get_agent)
     config = {"configurable": {"thread_id": event_id}}
-    state = agent.get_state(config)
+    state = await _off_loop(agent.get_state, config)
     has_active_checkpoint = bool(state and getattr(state, "next", None))
 
     if existing_status:
@@ -631,7 +728,7 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
                 return {"status": "already_processing", "event_id": event_id}
 
     # Write IN_PROGRESS stub before invoking graph to status.json
-    storage.save(event_id, {
+    await _off_loop(storage.save, event_id, {
         "packet_metadata": {"eid": event_id, "started_at": time.time()},
         "packet_status": {"status": "IN_PROGRESS"}
     }, filename="status.json")
@@ -674,7 +771,7 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
             # Both files move together, so the consumer (and any later
             # redelivery) sees the same verdict whichever one it reads (F4).
             outcome["status"] = "FAILED_TIMEOUT"
-            storage.save_terminal(event_id, {
+            await _off_loop(storage.save_terminal, event_id, {
                 "packet_metadata": {"eid": event_id},
                 "packet_status": {"status": "FAILED_TIMEOUT"},
                 "resolution": {"synthesis": f"Investigation exceeded the server-side budget of {agent_invoke_timeout_seconds}s."}
@@ -684,14 +781,15 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
         import traceback
         error_msg = traceback.format_exc()
         log.error("Unhandled exception during agent processing", exc_info=True, state="DLQ")
-        publish_to_dlq(signal_dict, error_msg)
+        # A Kafka produce with acks="all" and a flush() -- a network round trip.
+        await _off_loop(publish_to_dlq, signal_dict, error_msg)
 
         # Mark as DLQ in storage so it doesn't get re-run on redelivery. Both
         # files must move to a terminal status together -- leaving
         # status.json at IN_PROGRESS here previously left it stuck forever,
         # since only casebook.json was written (1.5).
         outcome["status"] = "DLQ"
-        storage.save_terminal(event_id, {
+        await _off_loop(storage.save_terminal, event_id, {
             "packet_metadata": {"eid": event_id},
             "packet_status": {"status": "DLQ"},
             "resolution": {"synthesis": f"Failed with {type(e).__name__}: {str(e)}"}
@@ -751,7 +849,9 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
     if not raw_logs or raw_logs == "Log fetching disabled.":
         processed_logs = {"path": "No logs found", "gaps": None}
     else:
-        uploaded_url = upload_logs_to_s3(event_id, raw_logs)
+        # The largest single blocking call in this function: a PUT of the
+        # entire log body, previously issued from the event loop.
+        uploaded_url = await _off_loop(upload_logs_to_s3, event_id, raw_logs)
         if uploaded_url:
             path_str = uploaded_url
         else:
@@ -853,7 +953,16 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
     # before this slow LLM call finally returned (0.8). Checks BOTH files:
     # the consumer's timeout handler used to write only casebook.json while
     # this guard read only status.json, so it never fired (F4).
-    current_status = storage.terminal_status(event_id)
+    #
+    # Reading only status.json is NOT a safe optimisation, despite costing one
+    # extra read. `save_terminal` writes casebook.json FIRST and status.json
+    # second, so status.json carrying the verdict implies casebook.json does --
+    # but not the reverse. An actor that died between its two writes leaves a
+    # terminal casebook.json and a stale status.json, and a guard reading only
+    # status.json sails past it and overwrites the verdict. That is F4 again by
+    # a narrower route, traded for one storage read on a path that has just
+    # spent minutes inside an LLM call.
+    current_status = await _off_loop(storage.terminal_status, event_id)
     if current_status in PROTECTED_TERMINAL_STATUSES:
         log.warning(
             "Discarding late result; a terminal status was already recorded by another actor",
@@ -865,7 +974,7 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
 
     # casebook.json and status.json reach the terminal status together, so a
     # crash between them can't leave status.json stuck at IN_PROGRESS.
-    storage.save_terminal(event_id, casebook_data)
+    await _off_loop(storage.save_terminal, event_id, casebook_data)
 
     final_status = casebook_data["packet_status"]["status"]
     resolution_source = casebook_data["resolution"]["source"] or "agent"

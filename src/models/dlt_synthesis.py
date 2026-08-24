@@ -93,8 +93,10 @@ def apply_dlt_confidence_policy(finding: DltFinding,
                                 logs: str = "") -> DltFinding:
     """Cap a finding's confidence at what its evidence supports.
 
-    Ceilings compose by taking the minimum, and every one that binds is named
-    in `ceilings_applied`. Reuses the rejection pipeline's evidence-gap ceiling
+    Ceilings compose by taking the minimum. `ceilings_applied` names every
+    ceiling this case triggered -- not only the tightest -- so the record
+    answers "why is this untrusted?" rather than "which single rule produced
+    the number?". Reuses the rejection pipeline's evidence-gap ceiling
     unchanged, so a DLT case built on a gapped trace is capped exactly as a
     rejection would be.
     """
@@ -105,9 +107,18 @@ def apply_dlt_confidence_policy(finding: DltFinding,
     ceiling = 1.0
 
     def cap(value: float, label: str):
+        """Lower the effective ceiling, and record that this one applied.
+
+        `applied` deliberately names every ceiling the case TRIGGERED, not
+        only the single tightest one. Recording just the tightest would make
+        the list order-dependent -- Class B (0.3) is evaluated before
+        UNVERIFIABLE (0.5), so an unverifiable Class B case would silently
+        stop reporting that it was unverifiable at all -- and a reader
+        auditing a capped confidence wants every reason it is untrusted, not
+        whichever reason happened to be checked first.
+        """
         nonlocal ceiling
-        if value < ceiling:
-            ceiling = value
+        ceiling = min(ceiling, value)
         applied.append(label)
 
     if failure_class in ("B", "U"):

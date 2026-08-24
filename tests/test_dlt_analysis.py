@@ -12,17 +12,28 @@ Three properties carry the phase:
 * Ceilings compose by minimum and every one that binds is named, so a capped
   score is auditable rather than mysteriously low.
 """
+import asyncio
 import json
 from pathlib import Path
 
 import pytest
 
 from src.api import dlt_routes
-from src.api.dlt_routes import FETCHED_LOGS_ARTIFACT, analyze_dlt
+from src.api.dlt_routes import FETCHED_LOGS_ARTIFACT
+from src.api.dlt_routes import analyze_dlt as _analyze_dlt_async
 from src.dlt import canned, case_storage, groups
 from src.dlt.corroborate import Corroboration, Verdict
 from src.models.dlt_schemas import DltMessage
 from src.models.dlt_synthesis import DltFinding, apply_dlt_confidence_policy
+
+
+# `/analyze-dlt` is a coroutine now: the LLM lane runs on a bounded executor
+# under a server-side budget, mirroring /process-rejection. These tests drive
+# the endpoint directly and synchronously, so they go through this shim rather
+# than sprouting an asyncio.run() at every call site.
+def analyze_dlt(message):
+    return asyncio.run(_analyze_dlt_async(message))
+
 
 FIXTURE = Path(__file__).parent / "fixtures" / "dlt" / "reference_business_exception.json"
 REFERENCE = json.loads(FIXTURE.read_text(encoding="utf-8"))["headers"]
@@ -46,8 +57,9 @@ def _isolate(monkeypatch, tmp_path):
                 "DLT_CONTRADICTED_CEILING", "DLT_REGISTRY_MISS_CEILING",
                 "DLT_REUSE_DECAY", "SYNTHESIS_GAP_CONFIDENCE_CEILING"):
         monkeypatch.delenv(var, raising=False)
-    monkeypatch.setattr("src.dlt.case_storage.LOCAL_CASESHEETS_DIR", tmp_path)
-    monkeypatch.setattr("src.dlt.groups.LOCAL_CHECKPOINTS_DIR", tmp_path / "ckpt")
+    monkeypatch.setattr("src.utils.paths.LOCAL_CASESHEETS_DIR", tmp_path)
+    # No group-lock directory to isolate any more: group updates go through
+    # CasebookStorage.update_json, whose atomicity lives in the backend.
     monkeypatch.setenv("DLT_REGISTRY_PATH", "tests/fixtures/dlt/business_errors.csv")
     case_storage.reset_cache()
     from src.dlt import registry

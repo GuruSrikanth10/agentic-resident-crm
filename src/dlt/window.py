@@ -79,14 +79,24 @@ class LogWindow:
         return datetime.fromtimestamp(self.end_ms / 1000, tz=timezone.utc).isoformat()
 
     def to_time_window(self, now_ms: Optional[int] = None) -> TimeWindow:
-        """As a look-back for the Kubernetes source.
+        """As a look-back for the Kubernetes source, plus the trailing bound.
 
-        `TimeWindow` is relative to *now* (it becomes `since_seconds`), so the
-        absolute start is converted here. The trailing bound is not expressible
-        in that shape and is applied during filtering instead.
+        `TimeWindow.hours` is relative to *now* (it becomes `since_seconds`,
+        the only thing the kubelet API accepts), so the absolute start is
+        converted here. The trailing bound is not expressible in that shape,
+        so it travels as `until` and is applied client-side.
+
+        It used to travel nowhere at all: this returned only the look-back and
+        a comment said the trailing bound was "applied during filtering
+        instead", which nothing did. A case anchored 20 hours ago therefore
+        kept every line from those 20 hours rather than the few minutes around
+        the failure.
         """
         now = now_ms if now_ms is not None else _now_ms()
-        return TimeWindow(hours=max(0.0, (now - self.start_ms) / 3_600_000))
+        return TimeWindow(
+            hours=max(0.0, (now - self.start_ms) / 3_600_000),
+            until=datetime.fromtimestamp(self.end_ms / 1000, tz=timezone.utc),
+        )
 
     def describe(self) -> str:
         return (f"{self.start_iso} .. {self.end_iso} "

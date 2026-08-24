@@ -81,9 +81,19 @@ def backoff_delay(attempt: int, base: float = DEFAULT_BASE_DELAY,
     return random.uniform(0, ceiling)
 
 
-def call_with_retry(func, *args, max_attempts: int = DEFAULT_MAX_ATTEMPTS,
-                    sleep=time.sleep, **kwargs):
-    """Invoke `func`, retrying only what is worth retrying."""
+def call_with_retry(func, *args, _max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+                    _sleep=time.sleep, **kwargs):
+    """Invoke `func`, retrying only what is worth retrying.
+
+    The two policy parameters are underscore-prefixed because every call site
+    splats a caller-built dict of Kubernetes API keyword arguments in here. A
+    plain `max_attempts` or `sleep` among them would silently rebind the retry
+    policy instead of reaching the API. The underscore convention is the
+    kubernetes client's own, for exactly this reason -- see `_request_timeout`
+    and `_preload_content`.
+    """
+    max_attempts = _max_attempts
+    sleep = _sleep
     last_exception = None
 
     for attempt in range(1, max_attempts + 1):
