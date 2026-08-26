@@ -103,7 +103,7 @@ ISOLATED_ENV_VARS = (
 TEST_ENV_DEFAULTS = {
     "LOG_SOURCE": "elastic",
     "KAFKA_CONSUMER_BROKERS": "localhost:9092",
-    "PACKET_CRM_API_KEY": "test-key",
+    "AGENTIC_RESIDENT_CRM_API_KEY": "test-key",
     "USE_MOCK_DB": "true",
     "CASEBOOK_STORAGE_BACKEND": "local",
     "CHECKPOINT_BACKEND": "sqlite",

@@ -66,7 +66,7 @@ async def lifespan(app: FastAPI):
     await asyncio.to_thread(drain_and_shutdown)
 
 app = FastAPI(
-    title="Packet-CRM API",
+    title="Agentic Resident CRM API",
     description="AI-driven, self-learning service to ingest, analyze, and resolve rejected biometric packets within the UIDAI ecosystem.",
     version="1.0.0",
     lifespan=lifespan

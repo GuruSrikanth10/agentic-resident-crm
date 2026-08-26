@@ -239,8 +239,8 @@ def test_dlt_metrics_are_registered():
     rendered = metrics.render_latest()
     if rendered is not None:
         text = rendered.decode("utf-8")
-        assert "packetcrm_dlt_cases_total" in text
-        assert "packetcrm_dlt_corroboration_total" in text
+        assert "agentic_resident_crm_dlt_cases_total" in text
+        assert "agentic_resident_crm_dlt_corroboration_total" in text
 
 
 def test_group_json_round_trips():

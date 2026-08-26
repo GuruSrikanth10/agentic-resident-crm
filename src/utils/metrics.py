@@ -67,7 +67,7 @@ def _gauge(name, documentation, labelnames=()):
 
 # Packet lifecycle -----------------------------------------------------
 PACKETS_TOTAL = _counter(
-    "packetcrm_packets_total",
+    "agentic_resident_crm_packets_total",
     "Packets processed, by terminal status and resolution source.",
     ("status", "resolution_source"),
 )
@@ -75,20 +75,20 @@ PACKETS_TOTAL = _counter(
 # Buckets run to 600s because an investigation is minutes, not milliseconds --
 # the prometheus defaults top out at 10s and would put every packet in +Inf.
 PACKET_DURATION = _histogram(
-    "packetcrm_packet_duration_seconds",
+    "agentic_resident_crm_packet_duration_seconds",
     "Wall-clock duration of a full investigation.",
     ("resolution_source",),
     buckets=(1, 5, 15, 30, 60, 120, 180, 300, 450, 600, float("inf")),
 )
 
 INVESTIGATOR_RETRIES = _histogram(
-    "packetcrm_investigator_retries",
+    "agentic_resident_crm_investigator_retries",
     "Reviewer rejections before a packet was approved or escalated.",
     buckets=(0, 1, 2, 3, 4, 5, float("inf")),
 )
 
 RUNBOOK_LOOKUPS = _counter(
-    "packetcrm_runbook_lookups_total",
+    "agentic_resident_crm_runbook_lookups_total",
     "Runbook lookups by outcome (hit, shadow, miss, no_reason_code, "
     "fingerprint_mismatch, error). Every outcome is recorded, so the hit rate "
     "has a denominator.",
@@ -96,53 +96,53 @@ RUNBOOK_LOOKUPS = _counter(
 )
 
 SHADOW_DIVERGENCE = _counter(
-    "packetcrm_shadow_divergence_total",
+    "agentic_resident_crm_shadow_divergence_total",
     "Shadowed runbooks whose action disagreed with the agents' verdict.",
     ("runbook_id",),
 )
 
 # Log pipeline ---------------------------------------------------------
 LOG_FETCHES = _counter(
-    "packetcrm_log_fetches_total",
+    "agentic_resident_crm_log_fetches_total",
     "Log fetches by source and outcome -- this is the source win rate.",
     ("source", "outcome"),
 )
 
 LOG_FETCH_DURATION = _histogram(
-    "packetcrm_log_fetch_duration_seconds",
+    "agentic_resident_crm_log_fetch_duration_seconds",
     "Log fetch latency by source.",
     ("source",),
     buckets=(0.1, 0.5, 1, 2, 5, 10, 30, 60, float("inf")),
 )
 
 LOG_RECORDS_FETCHED = _histogram(
-    "packetcrm_log_records_fetched",
+    "agentic_resident_crm_log_records_fetched",
     "Records returned per fetch, by source.",
     ("source",),
     buckets=(0, 10, 50, 100, 500, 1000, 5000, 10000, 50000, float("inf")),
 )
 
 EVIDENCE_GAPS = _counter(
-    "packetcrm_evidence_gaps_total",
+    "agentic_resident_crm_evidence_gaps_total",
     "Evidence gaps detected, by type.",
     ("gap_type",),
 )
 
 REDACTIONS = _counter(
-    "packetcrm_redactions_total",
+    "agentic_resident_crm_redactions_total",
     "PII values redacted, by pattern label.",
     ("pattern",),
 )
 
 # LLM ------------------------------------------------------------------
 LLM_TOKENS = _counter(
-    "packetcrm_llm_tokens_total",
+    "agentic_resident_crm_llm_tokens_total",
     "LLM tokens consumed, by agent node and direction.",
     ("node", "direction"),
 )
 
 LLM_CALLS = _counter(
-    "packetcrm_llm_calls_total",
+    "agentic_resident_crm_llm_calls_total",
     "LLM invocations by agent node and outcome (ok, error, invalid, ...).",
     ("node", "outcome"),
 )
@@ -155,36 +155,36 @@ LLM_CALLS = _counter(
 # DLT analysis (DLT_PLAN.md)
 # ---------------------------------------------------------------------------
 DLT_CASES = _counter(
-    "packetcrm_dlt_cases_total",
+    "agentic_resident_crm_dlt_cases_total",
     "Dead-lettered records processed, by failure class (A/B/C/U).",
     ("failure_class",),
 )
 
 DLT_CORROBORATION = _counter(
-    "packetcrm_dlt_corroboration_total",
+    "agentic_resident_crm_dlt_corroboration_total",
     "Trace-vs-log corroboration verdicts.",
     ("verdict",),
 )
 
 DLT_REUSE = _counter(
-    "packetcrm_dlt_reuse_total",
+    "agentic_resident_crm_dlt_reuse_total",
     "Reuse decisions: LLM_REQUIRED, REUSE_GROUP or CANNED.",
     ("decision",),
 )
 
 DLT_REGISTRY_MISSES = _counter(
-    "packetcrm_dlt_registry_misses_total",
+    "agentic_resident_crm_dlt_registry_misses_total",
     "BusinessException codes with no registry entry.",
 )
 
 DLT_WINDOW_AGE_HOURS = _histogram(
-    "packetcrm_dlt_window_age_hours",
+    "agentic_resident_crm_dlt_window_age_hours",
     "Age of the log window at fetch time. The reference sample sits at 43h.",
     buckets=(0.5, 1, 2, 4, 8, 12, 24, 48, 96),
 )
 
 DLT_AUTO_REPLAY = _counter(
-    "packetcrm_dlt_auto_replay_total",
+    "agentic_resident_crm_dlt_auto_replay_total",
     "Auto-replay outcomes: not_attempted (gate declined), queued, or failed.",
     ("outcome",),
 )
@@ -221,7 +221,7 @@ def record_dlt_auto_replay(outcome: str) -> None:
 
 
 BREAKER_STATE = _gauge(
-    "packetcrm_breaker_state",
+    "agentic_resident_crm_breaker_state",
     "Circuit breaker state: 0 closed, 1 half-open, 2 open.",
     ("breaker",),
 )

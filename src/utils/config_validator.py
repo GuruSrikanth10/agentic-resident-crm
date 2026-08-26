@@ -53,12 +53,12 @@ def validate_config():
     if not os.environ.get("PACKET_ANALYSIS_TOPIC_NAME", "packet-analysis-queue").strip():
         errors.append("PACKET_ANALYSIS_TOPIC_NAME must not be empty.")
 
-    # 3. PACKET_CRM_API_KEY is explicitly set in prod
-    api_key = os.environ.get("PACKET_CRM_API_KEY")
+    # 3. AGENTIC_RESIDENT_CRM_API_KEY is explicitly set in prod
+    api_key = os.environ.get("AGENTIC_RESIDENT_CRM_API_KEY")
     env = os.environ.get("ENV", "dev").lower()
     if env == "prod":
         if not api_key or api_key == "dev-secret-key":
-            errors.append("PACKET_CRM_API_KEY must be explicitly set to a secure value in production (cannot be empty or 'dev-secret-key').")
+            errors.append("AGENTIC_RESIDENT_CRM_API_KEY must be explicitly set to a secure value in production (cannot be empty or 'dev-secret-key').")
 
     # 4. Scale-out backends are fully configured when selected (4.7). A
     # half-configured backend must fail at boot, not on the first packet.

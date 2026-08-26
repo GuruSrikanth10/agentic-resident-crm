@@ -4,7 +4,7 @@ import os
 import requests
 from dotenv import load_dotenv
 
-# Without this, PACKET_CRM_API_KEY falls back to "dev-secret-key" while the
+# Without this, AGENTIC_RESIDENT_CRM_API_KEY falls back to "dev-secret-key" while the
 # API server -- which does load .env -- validates against the real key, so
 # every local run got a 403 that looked like a server problem.
 load_dotenv()
@@ -21,7 +21,7 @@ def run_local(file_path: str):
     
     try:
         # We need to pass the API key for the new security middleware
-        api_key = os.environ.get("PACKET_CRM_API_KEY", "dev-secret-key")
+        api_key = os.environ.get("AGENTIC_RESIDENT_CRM_API_KEY", "dev-secret-key")
         headers = {"X-API-Key": api_key}
         
         response = requests.post("http://localhost:8000/process-rejection", json=data, headers=headers)

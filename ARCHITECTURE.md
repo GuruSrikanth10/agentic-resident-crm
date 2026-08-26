@@ -1,7 +1,7 @@
-# Packet-CRM: Deep Dive and Architecture
+# Agentic Resident CRM: Deep Dive and Architecture
 
 ## Overview
-**Packet-CRM** is an AI-driven, self-learning service built to ingest, analyze, and resolve rejected biometric packets within the UIDAI ecosystem. 
+**Agentic Resident CRM** is an AI-driven, self-learning service built to ingest, analyze, and resolve rejected biometric packets within the UIDAI ecosystem. 
 
 When a packet fails enrollment or deduplication (e.g., due to a `RESIDENT_MAN_DEDUP_REJECT_TD` error), the system automatically spins up a suite of LangGraph-powered LLM agents. These agents investigate the error against a rules database, validate their findings, permanently learn from their mistakes, and format the output into structured JSON casebooks.
 
@@ -553,7 +553,7 @@ It self-heals on redelivery once the broker is reachable.
 The repository follows standard Python backend architecture for modularity and scalability:
 
 ```text
-packet-CRM/
+agentic-resident-crm/
 ├── .agents/
 │   └── AGENTS.md                   # Agentic configurations and behavioral rules
 ├── agent_policy_context.md         # Foundational business logic & rules mapping for AI agents
@@ -702,7 +702,7 @@ The system manages all operational feature flags, LLM credentials, MySQL databas
 - **Security:** The actual `.env` file is excluded via `.gitignore` to prevent secret leakage.
 
 ### 3.2 Environment & Local LLM Integration (`llm_utils.py`)
-Unlike generic AI projects bound to OpenAI, `packet-CRM` is designed for on-premise, secure environments.
+Unlike generic AI projects bound to OpenAI, `agentic-resident-crm` is designed for on-premise, secure environments.
 `get_llm(tier)` is a three-way factory selected by environment flags, in priority order:
 1. `USE_HF=true` -> `ChatHuggingFace` over `HuggingFaceEndpoint` (requires `HF_TOKEN`).
 2. `MOCK_LLM_WITH_MISTRAL=true` -> `ChatMistralAI` (development/demo path, requires `langchain-mistralai`).
@@ -954,7 +954,7 @@ needed since each consumer sets its own `CONSUMER_ROLE`. See section 4.
 
 2. **Configuration:**
    Copy `.env.example` to `.env` and set at minimum `USE_MOCK_DB`, `MOCK_DB_PATH`,
-   `LLM_BASE_URL_COMPLEX` / `LLM_MODEL_COMPLEX`, and `PACKET_CRM_API_KEY`.
+   `LLM_BASE_URL_COMPLEX` / `LLM_MODEL_COMPLEX`, and `AGENTIC_RESIDENT_CRM_API_KEY`.
    For fully offline runs, set `ES_MOCK_FILE` to a Kibana CSV export.
 
 3. **Start all three services:**

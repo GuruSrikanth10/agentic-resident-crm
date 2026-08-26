@@ -1,4 +1,4 @@
-"""Process supervisor for the Packet-CRM ecosystem.
+"""Process supervisor for the Agentic Resident CRM ecosystem.
 
 Spawns the API and both Kafka consumers -- fast_consumer.py (rejections ->
 POST /fetch-logs) and slow_consumer.py (the analysis queue -> POST
@@ -56,7 +56,7 @@ def _handle_signal(signum, _frame):
 
 
 def main():
-    print("Starting the Packet-CRM ecosystem.\n")
+    print("Starting the Agentic Resident CRM ecosystem.\n")
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, _handle_signal)

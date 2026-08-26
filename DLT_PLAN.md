@@ -1,4 +1,4 @@
- # Packet-CRM: Dead-Letter Topic (DLT) Analysis -- Engineering Design
+ # Agentic Resident CRM: Dead-Letter Topic (DLT) Analysis -- Engineering Design
 
 Design date: 2026-08-18. Last revised 2026-08-20 against a second real sample.
 Status: **Phases 1-9 implemented; Phase 0 outstanding.**

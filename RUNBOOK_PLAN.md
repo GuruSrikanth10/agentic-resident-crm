@@ -1,4 +1,4 @@
-# Packet-CRM: Standard Runbook Implementation Plan
+# Agentic Resident CRM: Standard Runbook Implementation Plan
 
 Design date: 2026-08-11. Status: **planned, not implemented.**
 

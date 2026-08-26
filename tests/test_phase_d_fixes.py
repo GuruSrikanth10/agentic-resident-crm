@@ -238,7 +238,7 @@ def test_metrics_endpoint_returns_exposition_or_501():
 
     if metrics.METRICS_AVAILABLE:
         response = routes.metrics_endpoint()
-        assert b"packetcrm_" in response.body
+        assert b"agentic_resident_crm_" in response.body
     else:
         from fastapi import HTTPException
         with pytest.raises(HTTPException) as excinfo:
@@ -371,11 +371,11 @@ def test_casesheets_path_has_one_definition():
 def test_casesheets_root_is_overridable(monkeypatch):
     """Needed for a container that mounts its data volume elsewhere."""
     import importlib
-    monkeypatch.setenv("LOCAL_CASESHEETS_DIR", "/tmp/packet-crm-test-root")
+    monkeypatch.setenv("LOCAL_CASESHEETS_DIR", "/tmp/agentic-resident-crm-test-root")
     from src.utils import paths
     importlib.reload(paths)
     try:
-        assert str(paths.LOCAL_CASESHEETS_DIR) == "/tmp/packet-crm-test-root"
+        assert str(paths.LOCAL_CASESHEETS_DIR) == "/tmp/agentic-resident-crm-test-root"
     finally:
         monkeypatch.delenv("LOCAL_CASESHEETS_DIR", raising=False)
         importlib.reload(paths)

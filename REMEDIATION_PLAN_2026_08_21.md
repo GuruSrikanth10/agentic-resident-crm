@@ -73,7 +73,7 @@ def _hermetic_env():
     # Defaults every test can rely on, matching the CI job.
     os.environ.setdefault("LOG_SOURCE", "elastic")
     os.environ.setdefault("KAFKA_CONSUMER_BROKERS", "localhost:9092")
-    os.environ.setdefault("PACKET_CRM_API_KEY", "test-key")
+    os.environ.setdefault("AGENTIC_RESIDENT_CRM_API_KEY", "test-key")
     os.environ.setdefault("USE_MOCK_DB", "true")
 ```
 

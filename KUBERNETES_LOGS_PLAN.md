@@ -1,4 +1,4 @@
-# Packet-CRM: Kubernetes Log Source -- Engineering Design
+# Agentic Resident CRM: Kubernetes Log Source -- Engineering Design
 
 Design date: 2026-08-11. Status: **Phases 1-10 implemented. Phase 0 (the
 Elasticsearch diagnostic) is still outstanding -- its tooling is built but has
@@ -1050,7 +1050,7 @@ diagnostic before reconsidering Phase 1.
 3. **What is the real `containerLogMaxSize` / `containerLogMaxFiles`?**
    Determines whether the K8s leg is worth leading the chain with. Confirm in
    Phase 0 and 5.
-4. **Where does packet-CRM run?** In-cluster deployment removes kubeconfig
+4. **Where does agentic-resident-crm run?** In-cluster deployment removes kubeconfig
    distribution entirely and is strongly preferable.
 5. **What is the p50/p95 lag between rejection and investigation?** Determines
    whether snapshot-first is an optimisation or the load-bearing mechanism.

@@ -310,7 +310,7 @@ def _get_agent_invoke_timeout_seconds() -> float:
 router = APIRouter()
 
 API_KEY_HEADER = APIKeyHeader(name="X-API-Key", auto_error=False)
-API_KEYS = [os.environ.get("PACKET_CRM_API_KEY", "dev-secret-key")]
+API_KEYS = [os.environ.get("AGENTIC_RESIDENT_CRM_API_KEY", "dev-secret-key")]
 
 # The rate limiter exists to blunt external abuse, not to throttle this
 # system's own Kafka consumer. It was doing the latter: every packet arrives

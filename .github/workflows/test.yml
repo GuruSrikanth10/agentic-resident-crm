@@ -37,7 +37,7 @@ jobs:
           # config_validator skips its LLM-key check under pytest, but the
           # consumer/DLQ modules read Kafka config at import time.
           KAFKA_CONSUMER_BROKERS: localhost:9092
-          PACKET_CRM_API_KEY: ci-test-key
+          AGENTIC_RESIDENT_CRM_API_KEY: ci-test-key
           USE_MOCK_DB: "true"
           # Keep the Kubernetes leg out of CI: no cluster, so the chain would
           # fail fast on every fetch and add noise.
