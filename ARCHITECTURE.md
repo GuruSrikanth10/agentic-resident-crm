@@ -1006,6 +1006,13 @@ python3 -m src.tools.fetch_pod_logs                    # direct Kubernetes pod l
 # Log pipeline
 python3 -m src.tools.build_catalog --refids-file refids.txt   # Stage 0 catalog builder
 python3 -m src.tools.eval_harness --test-cases test_cases.json # Stage 6 evaluation harness
+
+# DLT replay precheck (DLT_PLAN.md 14)
+python3 -m src.tools.code_check_probe --all --repo ENU/enu-biometric  # C0 feasibility gate
+python3 -m src.tools.dlt_report --parked                # packets waiting for a deploy
+python3 -m src.tools.dlt_report --code-check            # verdict distribution
+python3 -m src.tools.dlt_report --code-check-accuracy   # were the verdicts right?
+python3 -m src.tools.release_parked_replays --dry-run   # release what a deploy unblocked
 ```
 
 ---
@@ -1096,6 +1103,44 @@ python -m src.tools.dlt_report --top          # what is failing most
 python -m src.tools.dlt_sample --analyze <d>  # corpus measurements (Phase 0)
 python -m src.tools.parse_reason_codes        # regenerate reason_codes.csv
 ```
+
+### 4.4.1 Replay precheck (DLT_PLAN.md section 14, phases C0-C8)
+
+Before a dead-lettered packet is replayed, decide whether the code running in
+the pods can actually handle it. The join key is the **version number**: ~95%
+of changes bump it in `pom.xml`, the image tag carries the same value, and the
+pod's image tag is readable from Kubernetes -- which removes any need for
+Gitea, ArgoCD, Harbor digests or a Jenkins change.
+
+```
+fast lane      ... fetch logs -> capture running version  (deployed.json)
+analysis lane  ... corroborate -> group -> finding -> CODE CHECK -> replay gate
+offline        release_parked_replays -> queue_for_replay -> pending_replays
+```
+
+Four verdicts, written into every casebook's `code_check` block:
+
+| Verdict | Meaning | Consequence (C6 on) |
+|---|---|---|
+| `NO_CHANGE` | Nothing on `release` has touched the failure site since the packet failed | Replay withheld -- it would reproduce the dead letter |
+| `NOT_DEPLOYED` | A change exists; the version carrying it is not running | Replay withheld and the packet **parked** until the pods reach that version |
+| `FIX_DEPLOYED` | The version carrying the change is running | No effect -- the verdict is a veto only |
+| `UNKNOWN` | Nothing could be established | No effect, ever |
+
+Modules: `src/dlt/deployed.py` (C1, running version), `versions.py` (C3,
+ordering), `bitbucket.py` (C4, read-only source access), `code_check.py` (C5,
+the verdict), `parked.py` (C7, the waiting queue). The veto lives in
+`auto_replay.decide`.
+
+**Two flags, deliberately not one.** `DLT_CODE_CHECK_ENABLED` records a
+verdict and changes nothing; `DLT_CODE_CHECK_GATES_REPLAY` lets the verdict
+withhold a replay. Run the first alone until
+`dlt_report --code-check-accuracy` shows the verdicts are right.
+
+**Status.** Phases C0-C8 are implemented and unit-tested against fixtures.
+**C0 has never been run against a real Bitbucket or cluster**, so section
+14.3's five findings are all open -- `BITBUCKET_BASE_URL` left empty keeps the
+whole extension inert, and every verdict reads `UNKNOWN`.
 
 **Status.** Phases 1-9 are implemented and unit-tested against fixtures; Phase 0
 -- the corpus capture and its measurements -- has never been run against a real

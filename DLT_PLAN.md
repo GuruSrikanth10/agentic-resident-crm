@@ -80,8 +80,14 @@ Two reasons, and the second is the one that justifies the whole log lane:
   (`DLT_AUTO_REPLAY_ENABLED=false`). Everything else stated in this section
   still holds: no source access, no database access, no writes to any
   upstream service beyond that one tool call. See section 5.9.
-- **No source-code analysis.** `com.uidai.enu.biometric` is not accessible.
-  Class B failures (Section 4) are enriched and routed, never diagnosed.
+- **No source-code analysis, with one narrow, opt-in exception (2026-08-31).**
+  Section 14's replay precheck reads `release` in Bitbucket to answer one
+  question: has the code at the failure site changed since this packet failed,
+  and is that change running? It is read-only, off by default
+  (`DLT_CODE_CHECK_ENABLED=false`), and it produces a *deployment* verdict,
+  never a diagnosis. Class B failures are still enriched and routed, never
+  diagnosed: no source is read into an LLM prompt, and nothing in this
+  extension explains *why* a bug happened.
 - **No database access.** We cannot confirm why a row is missing, only that the
   code said it was.
 - **No production routing in v1.** Output goes to casebook storage. Jira/Slack/
@@ -1615,3 +1621,97 @@ into "replay it after Thursday's deploy".
 - **Out of scope:** mapping a parked entry's repository back to a Kubernetes
   service. The release worker reads one app's version, so a deployment with
   several DLT-producing services runs it once per app.
+
+---
+
+### Phase C8 -- Operator surface
+
+**Goal.** Make the verdict legible to the people who act on it, and to the
+people who have to trust it.
+
+- **Modified:** `src/tools/dlt_report.py` -- `--parked` (what is waiting, and
+  which version releases it), `--code-check` (verdict distribution, with the
+  `UNKNOWN` share as the real coverage number), `--code-check-accuracy`, and
+  the latest verdict shown inline under `--group`. `DLT_PLAN.md` section 2's
+  "no source-code analysis" non-goal, amended the way section 5.9 amends "no
+  remediation". `ARCHITECTURE.md` section 4.4.1. `.env.example`.
+- **The accuracy loop.** The only outcome this system can observe by itself is
+  whether a packet dead-lettered **again** after it was replayed. That is
+  exactly the signal that matters: a `FIX_DEPLOYED` verdict followed by a
+  recurrence is a false positive, and a `NO_CHANGE` verdict followed by one is
+  the verdict being right. Counterfactuals are not measurable and are not
+  guessed at -- which is why the report is worth running *before*
+  `DLT_CODE_CHECK_GATES_REPLAY` goes on, while replays still fire regardless
+  of the verdict. Without it there is no way to know whether Trap T9's 5% is
+  really 5%, and no evidence base for ever enabling C6.
+- **Tests:** `tests/test_dlt_report.py` -- `--parked` groups by the version
+  waited on; `--code-check` reports coverage and flags a mostly-`UNKNOWN`
+  corpus; the verdict appears inline under `--group`; the accuracy report
+  counts a recurrence as a false positive, counts rates over *replays* rather
+  than casebooks, ignores cases where no replay fired, and says how to start
+  when there is nothing to measure.
+- **Exit criteria:** an operator can answer "what is parked, and what deploy
+  releases it?" in one command.
+- **Out of scope:** dashboards and alerting.
+
+---
+
+### Dependency graph -- phases C0-C8
+
+```
+C0 (feasibility gate) ─────────────┐
+                                   │
+C1 (deployed version) ─────────────┤
+C2 (frame locations) ──────────────┼──> C5 ──> C6 ──> C7 ──> C8
+C3 (version algebra) ──────────────┤     │
+                                   │     └──> (validation period)
+C0 ──> C4 (bitbucket adapter) ─────┘
+```
+
+C1, C2 and C3 touch nothing external and were built while C0's questions were
+still open. C4 must not merge to `main` before section 14.3 reports. C6
+additionally waits on a validation period after C5, which is a calendar
+dependency rather than a code one.
+
+**C1 alone is worth keeping even if the rest is abandoned.** It closes Open
+Question 3 and lets a group record which build it was last seen on, which is
+what Risk R4 asks for.
+
+---
+
+### 14.4 Traps
+
+Numbered to continue section 3.2's series. Each fails silently and produces a
+confident wrong answer.
+
+| # | Trap | Where it is handled |
+|---|---|---|
+| T5 | A pom declares `<parent><version>` *before* its own, so the first `<version>` tag is the parent's | `bitbucket.parse_pom_version` parses the XML and reads `/project/version` |
+| T6 | The version may be bumped at release cut rather than in the fix commit, so reading it at the fix says a build that predates the fix contains it | `code_check._first_containing_version` walks forward to the next version-changing commit, unconditionally |
+| T7 | `"1.0.10" < "1.0.9"` as strings -- correct-looking, wrong ~10% of the time | `versions.py`, its own module with a brute-forced total-order test |
+| T8 | A frame in the shared `in.gov.uidai.common` library is a dependency bump, not a commit on the service's branch | An unmapped package resolves to no repository and yields `UNKNOWN` |
+| T9 | A fix merged with no version bump leaves the version reading the number already running -- a false `FIX_DEPLOYED` | A positive verdict requires the version to be *strictly ahead* of the failing build's |
+| T10 | C2 puts line numbers in the failure record for the first time; one reaching `compute_fingerprint` fragments every group (Risk R3) | The reference fixture's fingerprint is pinned as a literal and asserted byte-identical |
+
+---
+
+### 14.5 Open questions
+
+1. **Is `release` one branch or many?** `DLT_REPO_MAP` carries a per-repo
+   `branch` for this, but nobody has confirmed the branches are named
+   consistently across the service repositories.
+2. ~~**What happens during a rolling deploy?**~~ **Answered.** Pods are on two
+   versions at once; `deployed.py` reports the set and `versions.lowest` takes
+   the minimum, because a replay may land on any pod.
+3. **Does the replay even land on this service?** `queue_for_replay` posts to
+   OIS, which re-drives the packet through the pipeline from a stage this
+   system does not choose. If the replay re-enters *upstream* of the failing
+   service, the running version that matters belongs to a different service
+   than the pods C1 reads. **Worth confirming before C6 is enabled.**
+4. **Is the 5% uniform?** If one team never bumps versions, T9 is not a 5%
+   error rate but a 100% one for that team's repositories. C0's Q4 sample must
+   be stratified by repo, not pooled.
+5. **Which service does a parked entry belong to?** The release worker reads
+   one app's version, so a deployment with several DLT-producing services must
+   run it once per app. A parked entry records its repository but nothing maps
+   that back to a Kubernetes app.
