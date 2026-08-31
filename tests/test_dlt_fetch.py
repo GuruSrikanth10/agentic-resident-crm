@@ -388,3 +388,20 @@ def test_the_fetch_still_succeeds_when_the_version_cannot_be_read(monkeypatch):
     assert record["ok"] is False
     assert "cluster unreachable" in record["reason"]
     assert result["baseline_versions"] == []
+
+
+def test_build_failure_carries_locations_beside_the_frames(monkeypatch):
+    """Phase C2: file and line reach the failure record, and stay out of the
+    fingerprint that groups it."""
+    monkeypatch.setenv("DLT_REGISTRY_PATH", "tests/fixtures/dlt/business_errors.csv")
+    from src.dlt import registry
+    registry.clear_cache()
+
+    failure = build_failure(parse_headers(REFERENCE), REFERENCE.get("kafka_exception-message"))
+
+    assert len(failure["locations"]) == len(failure["frames"])
+    assert failure["locations"][0]["file"] == "BioDataBaseHelperServiceImpl.java"
+    assert failure["locations"][0]["line"] == 257
+    # The guard: the fingerprint is a function of frames, not locations.
+    assert failure["fingerprint"] == (
+        "2bc62d82761a7f19593aea92c2eef08e51bf481bef517aa8883eef61b51ee57b")

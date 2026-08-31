@@ -35,6 +35,7 @@ from src.dlt.headers import parse_headers
 from src.dlt.stacktrace import (
     build_signature,
     compute_fingerprint,
+    normalise_frame_locations,
     normalise_frames,
     parse_stacktrace,
 )
@@ -141,6 +142,9 @@ def build_failure(headers, exception_message: Optional[str]) -> dict:
     # The lookup is cached on the catalog's mtime, so this costs one `stat`.
     result = classify(trace, exception_message, code_class=registry.class_for)
     frames = normalise_frames(trace.root_frames)
+    # Index-parallel with `frames`, under the same filter -- but deliberately
+    # NOT an input to the fingerprint. See FrameLocation and Risk R3.
+    locations = normalise_frame_locations(trace.root_frames, trace.root_locations)
     root_fqcn = trace.root.fqcn if trace.root else None
     code = result.business_code or ""
     entry = registry.lookup_entry(result.business_code)
@@ -161,6 +165,10 @@ def build_failure(headers, exception_message: Optional[str]) -> dict:
         "fingerprint": compute_fingerprint(root_fqcn, frames, code),
         "signature": build_signature(root_fqcn, frames, code),
         "frames": list(frames),
+        # Parallel to `frames`, carrying the file and line the fingerprint
+        # must not see. A source lookup (phase C4) reads these; nothing else
+        # in the DLT lane does.
+        "locations": [location.as_dict() for location in locations],
         "truncated": trace.truncated,
         "chain": [
             {"fqcn": link.fqcn, "message": link.message, "frames": list(link.frames)}

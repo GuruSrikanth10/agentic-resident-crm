@@ -1302,3 +1302,42 @@ that consumes it -- so it is deliberately **not** behind a feature flag.
   an explicit empty list with a recorded reason. Existing suite green.
 - **Out of scope:** comparing versions, and any use of the value. C1 only
   observes.
+
+---
+
+### Phase C2 -- Frame locations
+
+**Goal.** Preserve the file and line the parser already captures and discards,
+without letting either near the fingerprint.
+
+- **Modified:** `src/dlt/stacktrace.py` -- `_parse_link` keeps the regex's
+  optional `location` group as a tuple index-parallel with `frames`; a new
+  `FrameLocation` dataclass carries `(target, file, line)` and derives the
+  repository path suffix; `normalise_frame_locations()` applies the same
+  keep/drop rule as `normalise_frames`, now factored into one shared
+  `_is_app_frame` predicate so the two can never disagree about which frames
+  are ours. `src/api/dlt_routes.py` -- `build_failure` returns a `locations`
+  list beside `frames`.
+- **Config:** none. The existing `DLT_APP_PACKAGES` and
+  `DLT_BOILERPLATE_FRAMES` govern both projections.
+- **Design notes:**
+  - **A bare frame holds a `None` slot rather than being skipped.** Skipping
+    it would shift every later location onto the wrong frame -- silently, and
+    only for traces that mix the two forms.
+  - **The path is built from the package plus the file name the JVM
+    reported**, not from the class name. A frame in `com.foo.Outer$Inner.run`
+    reports `Outer.java`, which is the file that exists; deriving the name
+    from the class would ask the repository for `Outer$Inner.java`.
+  - `compute_fingerprint` and `build_signature` keep their exact inputs.
+- **Tests:** `tests/test_dlt_stacktrace.py` -- the reference sample's
+  fingerprint is pinned as a literal and asserted byte-identical to its
+  pre-C2 value (Risk R3); locations parse off the reference trace
+  (`BioDataBaseHelperServiceImpl.java:257`); locations stay index-parallel
+  with the normalised frames; a frame with no location keeps its place;
+  `Native Method`, `Unknown Source` and a non-numeric suffix all yield a
+  `None` line rather than a guess; inner-class and lambda frames resolve to
+  the right file. `tests/test_dlt_fetch.py` -- `build_failure` carries them
+  and the fingerprint is unchanged.
+- **Exit criteria:** locations available downstream; every existing
+  fingerprint unchanged.
+- **Out of scope:** using them. C4 is the first consumer.
