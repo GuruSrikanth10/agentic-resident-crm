@@ -222,3 +222,168 @@ def test_a_replay_tool_failure_does_not_break_casebook_persistence(monkeypatch):
     casebook = case_storage.get_dlt_storage().load("dlt-T-63-3352")
     assert casebook["packet_status"]["status"]  # casebook still persisted
     assert "OIS unreachable" in casebook["replay"]["result"]
+
+
+# ======================================================================
+# Phase C5 -- the replay precheck, wired in and observing only
+# ======================================================================
+
+REPO_MAP = json.dumps({
+    "com.uidai.enu.biometric": {
+        "project": "ENU", "repo": "enu-biometric", "branch": "release",
+        "version_file": "pom.xml", "source_roots": ["src/main/java"],
+    },
+})
+
+
+def enable_code_check(monkeypatch, *, commits, changes=None, versions=None,
+                      path="src/main/java/com/uidai/enu/biometric/Svc.java"):
+    from src.dlt import bitbucket, deployed
+    monkeypatch.setenv("DLT_CODE_CHECK_ENABLED", "true")
+    monkeypatch.setenv("BITBUCKET_BASE_URL", "https://bitbucket.example")
+    monkeypatch.setenv("BITBUCKET_TOKEN", "read-only")
+    monkeypatch.setenv("DLT_REPO_MAP", REPO_MAP)
+    monkeypatch.setattr(bitbucket, "resolve_path", lambda repo, suffix: path)
+    monkeypatch.setattr(bitbucket, "commits_touching",
+                        lambda repo, p, since_ms=None, limit=None:
+                        (commits if p == path else []))
+    monkeypatch.setattr(bitbucket, "changed_paths",
+                        lambda repo, cid, limit=500: (changes or {}).get(cid))
+    monkeypatch.setattr(bitbucket, "version_at",
+                        lambda repo, ref=None, version_file=None:
+                        (versions or {}).get(ref))
+    bitbucket.reset_cache()
+    deployed.reset_cache()
+
+
+def stub_running(monkeypatch, running_versions):
+    from src.dlt import deployed
+    monkeypatch.setattr(
+        deployed, "running_version",
+        lambda app=None, namespace=None: deployed.DeployedVersions(
+            versions=tuple(running_versions), ok=bool(running_versions),
+            reason="" if running_versions else "stubbed as unavailable"))
+
+
+def seed_baseline(case_id, versions):
+    case_storage.get_dlt_storage().save_artifact(
+        case_id, dlt_routes.DEPLOYED_ARTIFACT,
+        json.dumps({"versions": list(versions), "ok": True}))
+
+
+def test_the_casebook_always_carries_a_code_check_block(monkeypatch):
+    """Even with the feature off. "We did not look" must be legible."""
+    result = analyze_dlt(message(trace=NPE_TRACE))
+
+    casebook = case_storage.get_dlt_storage().load("dlt-T-63-3352")
+    assert casebook["code_check"]["verdict"] == "UNKNOWN"
+    assert "DLT_CODE_CHECK_ENABLED" in casebook["code_check"]["reason"]
+    assert result["code_check"] == "UNKNOWN"
+
+
+def test_a_no_change_verdict_reaches_the_casebook(monkeypatch):
+    enable_code_check(monkeypatch, commits=[])
+    stub_running(monkeypatch, ["1.0.1"])
+    seed_baseline("dlt-T-63-3352", ["1.0.0"])
+
+    result = analyze_dlt(message(trace=NPE_TRACE))
+
+    assert result["code_check"] == "NO_CHANGE"
+    casebook = case_storage.get_dlt_storage().load("dlt-T-63-3352")
+    assert casebook["code_check"]["repo"] == "ENU/enu-biometric"
+    assert casebook["code_check"]["branch"] == "release"
+
+
+def test_the_baseline_is_read_from_the_artifact_not_from_today(monkeypatch):
+    """The version that was running when the packet failed, not the one
+    running now. Substituting today's would silently defeat the T9 guard."""
+    from src.dlt import bitbucket
+    path = "src/main/java/com/uidai/enu/biometric/Svc.java"
+    enable_code_check(
+        monkeypatch,
+        commits=[bitbucket.Commit(id="aaa", subject="Fix NPE",
+                                  timestamp_ms=1787019700000)],
+        changes={"aaa": ["pom.xml"]}, versions={"aaa": "1.0.1"}, path=path)
+    stub_running(monkeypatch, ["1.0.2"])
+    seed_baseline("dlt-T-63-3352", ["1.0.0"])
+
+    result = analyze_dlt(message(trace=NPE_TRACE))
+
+    casebook = case_storage.get_dlt_storage().load("dlt-T-63-3352")
+    assert casebook["code_check"]["baseline_version"] == "1.0.0"
+    assert casebook["code_check"]["running_version"] == "1.0.2"
+    assert result["code_check"] == "FIX_DEPLOYED"
+
+
+def test_a_missing_baseline_artifact_degrades_to_unknown(monkeypatch):
+    from src.dlt import bitbucket
+    path = "src/main/java/com/uidai/enu/biometric/Svc.java"
+    enable_code_check(
+        monkeypatch,
+        commits=[bitbucket.Commit(id="aaa", subject="Fix", timestamp_ms=1787019700000)],
+        changes={"aaa": ["pom.xml"]}, versions={"aaa": "1.0.1"}, path=path)
+    stub_running(monkeypatch, ["1.0.2"])
+
+    result = analyze_dlt(message(trace=NPE_TRACE))
+
+    assert result["code_check"] == "UNKNOWN"
+
+
+def test_the_verdict_is_recorded_on_the_group(monkeypatch):
+    """What `dlt_report --code-check` reads and the accuracy loop joins on."""
+    from src.dlt import groups
+    enable_code_check(monkeypatch, commits=[])
+    stub_running(monkeypatch, ["1.0.1"])
+    seed_baseline("dlt-T-63-3352", ["1.0.0"])
+
+    analyze_dlt(message(trace=NPE_TRACE))
+
+    casebook = case_storage.get_dlt_storage().load("dlt-T-63-3352")
+    group = groups.load_group(casebook["failure"]["fingerprint"])
+    assert group["code_check"]["verdict"] == "NO_CHANGE"
+    assert group["code_check_history"] == {"NO_CHANGE": 1}
+
+
+@pytest.mark.parametrize("commits,changes,versions,expected", [
+    ([], None, None, "NO_CHANGE"),
+    (None, None, None, "UNKNOWN"),
+])
+def test_c5_never_changes_the_replay_decision(monkeypatch, commits, changes,
+                                              versions, expected):
+    """C5 observes. Only C6 acts, and only behind its own second flag."""
+    monkeypatch.setenv("DLT_AUTO_REPLAY_ENABLED", "true")
+    enable_code_check(monkeypatch, commits=commits, changes=changes,
+                      versions=versions)
+    stub_running(monkeypatch, ["1.0.1"])
+    seed_baseline("dlt-T-63-3352", ["1.0.0"])
+    stub_llm(monkeypatch, DltFinding(
+        narrative="x", discrepancy="the logs show a timeout",
+        recommendation="redrive", action="REDRIVE_AFTER_RECOVERY",
+        confidence=0.9))
+    seed_logs("dlt-T-63-3352",
+              "[ERROR] java.net.SocketTimeoutException: Read timed out")
+
+    patcher, fake_tool = mock_replay_tool()
+    with patcher:
+        result = analyze_dlt(message())
+
+    assert result["code_check"] == expected
+    # The replay fired regardless of the verdict -- C5 is observe-only.
+    assert result["replay_attempted"] is True
+    assert result["replay_queued"] is True
+    fake_tool.invoke.assert_called_once()
+
+
+def test_a_bitbucket_outage_does_not_cost_the_case(monkeypatch):
+    from src.dlt import bitbucket
+    enable_code_check(monkeypatch, commits=[])
+    monkeypatch.setattr(bitbucket, "resolve_path",
+                        lambda repo, suffix: (_ for _ in ()).throw(
+                            ConnectionError("bitbucket unreachable")))
+    stub_running(monkeypatch, ["1.0.1"])
+    seed_baseline("dlt-T-63-3352", ["1.0.0"])
+
+    result = analyze_dlt(message(trace=NPE_TRACE))
+
+    assert result["status"] == "processed"
+    assert result["code_check"] == "UNKNOWN"

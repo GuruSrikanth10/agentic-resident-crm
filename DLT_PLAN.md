@@ -1446,3 +1446,63 @@ what the version file said at a commit.
   HEAD of `release`.
 - **Out of scope:** writes of any kind, diff parsing, and reading source into
   an LLM prompt.
+
+---
+
+### Phase C5 -- Verdict engine (observe only)
+
+**Goal.** Compose C1-C4 into one of the four verdicts and write it into the
+casebook. Changes nothing about replay.
+
+- **New:** `src/dlt/code_check.py` -- `evaluate(failure, failed_at_ms,
+  baseline_versions, running_versions) -> CodeCheck`, a frozen dataclass
+  carrying its own evidence, in the shape `corroborate.py` already uses.
+- **Modified:** `src/api/dlt_routes.py` -- runs in `analyze_dlt` after the
+  group is recorded and before the replay gate, off-loop via `_off_loop`; a
+  `code_check` block on the casebook; `DLT_CASEBOOK_SCHEMA_VERSION` -> `1.1`;
+  `_recorded_baseline` reads `deployed.json`. `src/dlt/groups.py` --
+  `attach_code_check` through `update_json`, plus `code_check` and
+  `code_check_history` on `_blank`. `src/utils/metrics.py` --
+  `record_dlt_code_check`.
+- **Config:** `DLT_CODE_CHECK_ENABLED` (default `false`),
+  `DLT_CODE_CHECK_FRAMES`, `DLT_CODE_CHECK_MAX_CANDIDATES`,
+  `DLT_CODE_CHECK_BRANCH`.
+- **Design notes:**
+  - **The verdict answers deployment, never relevance.** "This commit is
+    running" is not "this commit fixes your bug". The casebook keeps
+    `code_check` separate from `finding` so a reader can disagree with either.
+  - **Three asymmetries, all pointing the same way.** A wrong `FIX_DEPLOYED`
+    causes a replay that fails again; a wrong `NOT_DEPLOYED` only delays one.
+    So the *highest* candidate version is required (several commits touched
+    the site and we cannot tell which is the fix), the *lowest* running
+    version is compared (a replay may land on any pod mid-rollout), and a
+    positive verdict requires a baseline while a negative one does not.
+  - **Trap T6 is handled by walking forward, unconditionally.** The fix
+    commit's own change set is checked first; only when it did not touch the
+    version file does the check walk forward to the next commit on the branch
+    that did. Correct under either convention, which is why it is built
+    regardless of what C0's Q4 reports.
+  - **Trap T9 is handled by requiring the version to have moved.** If the
+    change's version is not strictly ahead of the failing build's, a bump was
+    probably skipped and the version carries no signal -- `UNKNOWN`, not
+    `FIX_DEPLOYED`.
+  - **`baseline` is read from the artifact, not from today.** Substituting the
+    current version for the one that was running would silently defeat the T9
+    guard.
+  - **The group record is a record, not a cache.** Cost control lives in
+    `bitbucket.py`, whose reads are already keyed on things that repeat within
+    a group; `code_check` on the group is what the operator CLI reads and what
+    the accuracy loop joins against.
+  - Runs for Class A and B only.
+- **Tests:** `tests/test_dlt_code_check.py` -- every failure mode yields
+  `UNKNOWN`; the flag off makes zero calls; an unreadable repository is
+  `UNKNOWN` and never `NO_CHANGE`; both T6 branches; T9 in both directions;
+  the highest-required and lowest-running asymmetries; `1.0.10` not behind
+  `1.0.9` end to end; a raised exception degrading rather than propagating.
+  `tests/test_dlt_analysis_replay.py` -- the casebook always carries the
+  block, the verdict reaches the group, and **the replay decision is
+  unchanged for every verdict**.
+- **Exit criteria:** verdicts appear in production casebooks with the flag on,
+  and no replay behaviour has changed. Then leave it running and collect
+  cases.
+- **Out of scope:** acting on the verdict. That is C6.

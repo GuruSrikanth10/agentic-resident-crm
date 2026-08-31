@@ -189,6 +189,14 @@ DLT_AUTO_REPLAY = _counter(
     ("outcome",),
 )
 
+DLT_CODE_CHECK = _counter(
+    "agentic_resident_crm_dlt_code_check_total",
+    "Replay-precheck verdicts: NO_CHANGE, NOT_DEPLOYED, FIX_DEPLOYED or "
+    "UNKNOWN. The UNKNOWN share is the feature's real coverage number "
+    "(DLT_PLAN.md 14, phase C5).",
+    ("verdict",),
+)
+
 DLT_DEPLOYED_VERSION_READS = _counter(
     "agentic_resident_crm_dlt_deployed_version_reads_total",
     "Readings of the running image version: ok, mixed (rolling deploy), or "
@@ -226,6 +234,11 @@ def record_dlt_window_age(age_seconds: float) -> None:
 def record_dlt_auto_replay(outcome: str) -> None:
     if DLT_AUTO_REPLAY is not None:
         DLT_AUTO_REPLAY.labels(outcome=outcome).inc()
+
+
+def record_dlt_code_check(verdict: str) -> None:
+    if DLT_CODE_CHECK is not None:
+        DLT_CODE_CHECK.labels(verdict=verdict).inc()
 
 
 def record_dlt_deployed_version_read(ok: bool, mixed: bool = False) -> None:

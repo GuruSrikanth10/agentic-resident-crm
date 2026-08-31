@@ -64,7 +64,11 @@ DEFAULT_SOURCE_ROOTS = ("src/main/java",)
 
 DEFAULT_TIMEOUT_SECONDS = 20.0
 DEFAULT_COMMIT_LIMIT = 50
-DEFAULT_CACHE_TTL_SECONDS = 900.0
+#: An hour. Every read here is keyed on something that repeats within a
+#: fingerprint group -- a repo, a path, a commit id -- so the TTL is what
+#: actually bounds API traffic at 2,000 messages/day. A commit landing on
+#: `release` does not need sub-hour detection for this purpose.
+DEFAULT_CACHE_TTL_SECONDS = 3600.0
 
 #: Ceiling on a fetched file. A pom is kilobytes; anything approaching this is
 #: not a version file, and parsing it would only spend memory to learn that.

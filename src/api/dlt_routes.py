@@ -27,7 +27,16 @@ from typing import Optional
 from fastapi import APIRouter, Depends
 
 from src.api.routes import _off_loop, get_api_key, rate_limiter, register_executor
-from src.dlt import auto_replay, canned, deployed, groups, orchestrator, registry, reuse
+from src.dlt import (
+    auto_replay,
+    canned,
+    code_check,
+    deployed,
+    groups,
+    orchestrator,
+    registry,
+    reuse,
+)
 from src.dlt.case_storage import get_dlt_storage
 from src.dlt.corroborate import corroborate
 from src.dlt.classify import classify
@@ -126,7 +135,8 @@ DEPLOYED_ARTIFACT = "deployed.json"
 
 #: Bumped when the DLT casebook shape changes. Independent of the rejection
 #: casebook's CASEBOOK_SCHEMA_VERSION -- different schema, different lifecycle.
-DLT_CASEBOOK_SCHEMA_VERSION = "1.0"
+# 1.1 adds the `code_check` block (DLT_PLAN.md 14, phase C5).
+DLT_CASEBOOK_SCHEMA_VERSION = "1.1"
 
 
 def build_failure(headers, exception_message: Optional[str]) -> dict:
@@ -336,10 +346,31 @@ def fetch_dlt_logs(message: DltMessage):
 # Phase 8 -- the analysis lane
 # ---------------------------------------------------------------------------
 
+def _recorded_baseline(storage, case_id: str) -> tuple:
+    """The versions the fast lane observed running when this packet failed.
+
+    Read back from `deployed.json` rather than trusted from the queue: this is
+    an observation about a moment that has passed, and by the time the
+    analysis lane runs the pods may be on something else. An absent or
+    unreadable artifact yields an empty tuple, which C5 reports as a missing
+    baseline rather than substituting today's version for it.
+    """
+    try:
+        raw = storage.load_artifact(case_id, DEPLOYED_ARTIFACT)
+        if not raw:
+            return ()
+        return tuple(json.loads(raw).get("versions") or ())
+    except Exception as e:
+        logger.warning("Could not read the recorded baseline version",
+                       case_id=case_id, error=f"{type(e).__name__}: {e}")
+        return ()
+
+
 def _casebook(message: DltMessage, headers, failure: dict, corroboration,
               finding, decision, group: Optional[dict], gaps: list,
               window_description: Optional[str], provenance_source: str,
-              replay: Optional[dict] = None) -> dict:
+              replay: Optional[dict] = None,
+              code_check_result=None) -> dict:
     """Assemble the terminal casebook. See DLT_PLAN.md 7.1."""
     return {
         "schema_version": DLT_CASEBOOK_SCHEMA_VERSION,
@@ -407,6 +438,15 @@ def _casebook(message: DltMessage, headers, failure: dict, corroboration,
             "group_occurrences": (group or {}).get("occurrence_count"),
             "recommendation_state": groups.STATE_DRAFT,
         },
+        # The replay precheck's verdict (DLT_PLAN.md 14). Always present, and
+        # always UNKNOWN when the feature is off -- "we did not look" and "we
+        # looked and found nothing" must not read alike here either.
+        #
+        # Kept separate from `finding` on purpose: this says whether the code
+        # at the failure site changed and whether that change is running. It
+        # does NOT say the change fixes this bug, and merging it into the
+        # narrative would blur a claim the evidence does not support.
+        "code_check": (code_check_result or code_check.CodeCheck()).as_dict(),
         # See src/dlt/auto_replay.py for the gate. `replay` is always present
         # once analysis has run -- "not attempted, and here is why" is exactly
         # as much a part of the casebook as "attempted, and here is what
@@ -484,6 +524,26 @@ async def analyze_dlt(message: DltMessage):
                             corroboration.verdict.value, group)
     metrics.record_dlt_reuse(decision.decision.value)
 
+    # The replay precheck. Bounded I/O with no LLM, so it belongs beside
+    # corroboration rather than in the fast lane -- this is where the replay
+    # gate lives and where the group record it feeds is already loaded.
+    #
+    # `baseline` comes from the artifact rather than the queue message, for
+    # the same reason `build_failure` re-parses the trace: the artifact is
+    # what the fast lane actually observed, and a queue field can be dropped
+    # by a schema change without anyone noticing.
+    baseline_versions = await _off_loop(_recorded_baseline, storage, case_id)
+    running = await _off_loop(deployed.running_version)
+    code_check_result = await _off_loop(
+        code_check.evaluate, failure, headers.last_attempt_ms,
+        baseline_versions, running.versions)
+    metrics.record_dlt_code_check(code_check_result.verdict)
+    if code_check_result.verdict != code_check.UNKNOWN:
+        log.info("Replay precheck", verdict=code_check_result.verdict,
+                 reason=code_check_result.reason)
+        group = await _off_loop(groups.attach_code_check, fingerprint,
+                                code_check_result.as_dict())
+
     parse_error = None
     if decision.decision is reuse.Decision.CANNED:
         finding = canned.build(failure["failure_class"], failure, corroboration, group)
@@ -558,7 +618,7 @@ async def analyze_dlt(message: DltMessage):
     casebook = _casebook(message, headers, failure, corroboration, finding,
                          decision, group, message.model_dump().get("evidence_gaps") or [],
                          message.model_dump().get("log_window"), provenance,
-                         replay=replay)
+                         replay=replay, code_check_result=code_check_result)
     if parse_error:
         casebook["finding"]["parse_error"] = parse_error
 
@@ -588,5 +648,6 @@ async def analyze_dlt(message: DltMessage):
             "action": finding.action, "confidence": finding.confidence,
             "corroboration": corroboration.verdict.value,
             "decision": decision.decision.value,
+            "code_check": code_check_result.verdict,
             "replay_attempted": replay["attempted"],
             "replay_queued": replay["queued"]}
