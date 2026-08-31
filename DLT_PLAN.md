@@ -1341,3 +1341,50 @@ without letting either near the fingerprint.
 - **Exit criteria:** locations available downstream; every existing
   fingerprint unchanged.
 - **Out of scope:** using them. C4 is the first consumer.
+
+---
+
+### Phase C3 -- Version algebra
+
+**Goal.** Parse and order the version strings that join a commit to a running
+pod. The single most likely place for this feature to be quietly wrong for
+months, because a bad comparison looks exactly like a good one.
+
+- **New:** `src/dlt/versions.py` -- `parse()`, `compare()`, `at_least()`,
+  `is_ahead()`, `lowest()`, and `version_of()` (image reference -> version
+  string). Pure.
+- **Modified:** `src/dlt/deployed.py` -- `version_of` now delegates here, so
+  the two copies of image-reference parsing cannot drift apart. **And a bug
+  C1 shipped is fixed:** sidecar containers were contributing their own image
+  versions to the set. Left in, an istio proxy's version would join the set
+  `lowest()` reduces on a rolling deploy, comparing the application against
+  the mesh proxy. Filtering now reuses `K8S_SIDECAR_DENYLIST` through the log
+  pipeline's own `select_containers`, so an operator maintains one list.
+- **Config:** `DLT_VERSION_PATTERN` -- optional regex with a `(?P<version>)`
+  group, for a repo whose tag puts the version somewhere other than the front.
+- **Rules:**
+  - Numeric core compared component-wise as integers, never lexically, and
+    zero-padded so `1.0` equals `1.0.0`.
+  - `-SNAPSHOT` sorts *before* the same release version.
+  - A trailing build counter (`release.42`) breaks ties on an equal core. A
+    name (`rc1`) does not -- only a counter orders.
+  - **Equal cores with an ambiguous qualifier compare equal, not ordered.**
+    `1.0.0` is the pom's number and `1.0.0-release.42` is a build of it;
+    nothing in either string says which came first. This is what lets C5
+    catch Trap T9 by requiring `is_ahead` rather than `at_least`.
+  - **Anything unparseable returns None, and None propagates through every
+    comparison.** C5 turns that into `UNKNOWN`. Never a guess.
+  - `lowest()` returns None if *any* entry is unparseable rather than skipping
+    it -- the unreadable version might be the low one, and skipping it would
+    report a higher floor than actually exists.
+- **Tests:** `tests/test_dlt_versions.py` -- `1.0.10 > 1.0.9`,
+  `release.9 < release.12`, `SNAPSHOT < release`; the ambiguous pairs compare
+  equal; every unparseable input yields None rather than an ordering; a
+  brute-forced **antisymmetry and transitivity check over the whole corpus**,
+  which a comparator with one branch backwards does not survive; `is_ahead`
+  and `at_least` differ exactly on equality; a broken `DLT_VERSION_PATTERN`
+  degrades to the default parser.
+- **Exit criteria:** every tag collected in C0 parses, or is explicitly
+  recorded as unparseable, and no comparison returns a wrong ordering for that
+  corpus.
+- **Out of scope:** deciding anything. C3 only orders.

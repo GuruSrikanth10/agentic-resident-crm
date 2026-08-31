@@ -24,15 +24,17 @@ whole day's traffic into roughly one call a minute.
 
 **No version ordering here.** A rolling deploy has pods on two versions at
 once, and this module reports the full set without deciding which is lowest.
-Ordering is `src/dlt/versions.py` (phase C3); doing it here would mean either
-importing C3 before it exists or comparing version strings lexically, which is
-Trap T7 and wrong roughly ten percent of the time.
+Ordering belongs to `src/dlt/versions.py` (phase C3), which this module uses
+only to *extract* a version from an image reference -- never to compare one.
+Comparing here would invite the lexical shortcut, and `"1.0.10" < "1.0.9"` is
+true as strings and wrong as versions (Trap T7).
 """
 import os
 import threading
 from dataclasses import dataclass, field
 from typing import Optional
 
+from src.dlt import versions
 from src.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -111,44 +113,46 @@ def ttl_seconds() -> float:
 # Image reference parsing
 # ---------------------------------------------------------------------------
 
-def version_of(reference: Optional[str]) -> str:
-    """Pull the version out of an image reference.
+#: Re-exported so `deployed.version_of` keeps working for existing callers.
+#: The implementation lives in `versions.py`, which owns everything about
+#: version strings -- two copies of this parsing would eventually disagree.
+version_of = versions.version_of
 
-    Two shapes are in use here and both must work:
 
-        mndc-prod.harbor.uidai.net.in/ankalan/enu-biometric/1.0.0-release.4
-        mndc-prod.harbor.uidai.net.in/ankalan/enu-biometric:1.0.0
+def _readable_containers(pod) -> set:
+    """Container names whose image describes *this service*.
 
-    A trailing `@sha256:...` digest is stripped first: it identifies the image
-    *content*, says nothing about which commit built it, and must never be
-    mistaken for a version. The colon is only read as a tag separator when it
-    appears in the last path segment, so a registry port (`host:5000/ns/app`)
-    is not misread as one.
+    Sidecars are excluded. Without this, an istio proxy on the same pod
+    contributes its own version to the set, and `versions.lowest()` -- which a
+    rolling deploy makes the safe reading -- would compare the application
+    against the mesh proxy and return whichever number happened to be smaller.
 
-    Returns "" rather than None for anything unusable, so the caller's set
-    arithmetic stays total.
+    Reuses `K8S_SIDECAR_DENYLIST` through the log pipeline's own selector, so
+    an operator maintains one list rather than two. An empty result means the
+    pod exposed no spec to filter on, and every status is kept: a version we
+    are unsure about beats no version at all.
     """
-    if not reference:
-        return ""
-    head = str(reference).split("@", 1)[0].strip()
-    if not head:
-        return ""
-    last = head.rsplit("/", 1)[-1]
-    if ":" in last:
-        return last.rsplit(":", 1)[-1]
-    return last
+    try:
+        from src.log_pipeline.sources.k8s.discovery import select_containers
+        return set(select_containers(pod) or ())
+    except Exception:
+        return set()
 
 
 def _rows_from_pods(pods) -> tuple:
-    """(pod, container, image) for every running container we can see."""
+    """(pod, container, image) for every application container we can see."""
     rows = []
     for pod in pods or []:
         name = getattr(getattr(pod, "metadata", None), "name", None) or "?"
         statuses = getattr(getattr(pod, "status", None), "container_statuses", None) or []
+        allowed = _readable_containers(pod)
         for status in statuses:
+            container = getattr(status, "name", "?")
+            if allowed and container not in allowed:
+                continue
             image = getattr(status, "image", None)
             if image:
-                rows.append((name, getattr(status, "name", "?"), str(image)))
+                rows.append((name, container, str(image)))
     return tuple(rows)
 
 

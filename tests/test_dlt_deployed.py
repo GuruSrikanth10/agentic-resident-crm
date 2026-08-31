@@ -40,12 +40,20 @@ class FakePodStatus:
         self.container_statuses = statuses
 
 
+class FakeSpec:
+    def __init__(self, names):
+        self.containers = [type("C", (), {"name": n})() for n in names]
+
+
 class FakePod:
-    def __init__(self, name, images, container="app"):
+    def __init__(self, name, images, containers=None):
         self.metadata = FakeMeta(name)
         if isinstance(images, str):
             images = [images]
-        self.status = FakePodStatus([FakeStatus(container, i) for i in images])
+        names = containers or ["app"] * len(images)
+        self.spec = FakeSpec(names)
+        self.status = FakePodStatus(
+            [FakeStatus(n, i) for n, i in zip(names, images)])
 
 
 HARBOR = "mndc-prod.harbor.uidai.net.in/ankalan/enu-biometric"
@@ -125,15 +133,32 @@ def test_a_rolling_deploy_reports_both_versions_and_no_single(monkeypatch):
     assert set(result.versions) == {"1.0.0-release.42", "1.0.0-release.43"}
 
 
-def test_sidecars_on_the_same_pod_contribute_their_own_images(monkeypatch):
+def test_a_sidecar_does_not_contribute_its_own_version(monkeypatch):
+    """An istio proxy's version is not this service's version.
+
+    Left in, it would join the set that `versions.lowest()` reduces on a
+    rolling deploy -- comparing the application against the mesh proxy and
+    returning whichever number happened to be smaller.
+    """
     _patch_pods(monkeypatch, [
-        FakePod("enu-biometric-1", [f"{HARBOR}/1.0.0", "docker.io/istio/proxyv2:1.20.0"]),
+        FakePod("enu-biometric-1",
+                [f"{HARBOR}/1.0.0", "docker.io/istio/proxyv2:1.20.0"],
+                containers=["app", "istio-proxy"]),
     ])
 
     result = deployed.running_version()
 
-    assert set(result.versions) == {"1.0.0", "1.20.0"}
-    assert result.mixed is True
+    assert result.versions == ("1.0.0",)
+    assert result.mixed is False
+
+
+def test_a_pod_with_no_spec_keeps_every_status(monkeypatch):
+    """Nothing to filter on: an uncertain version beats no version."""
+    pod = FakePod("enu-biometric-1", f"{HARBOR}/1.0.0")
+    del pod.spec
+    _patch_pods(monkeypatch, [pod])
+
+    assert deployed.running_version().versions == ("1.0.0",)
 
 
 # ---------------------------------------------------------------------------
