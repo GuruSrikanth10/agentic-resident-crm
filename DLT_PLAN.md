@@ -1388,3 +1388,61 @@ months, because a bad comparison looks exactly like a good one.
   recorded as unparseable, and no comparison returns a wrong ordering for that
   corpus.
 - **Out of scope:** deciding anything. C3 only orders.
+
+---
+
+### Phase C4 -- Bitbucket adapter
+
+**Goal.** Read-only access to `release`: which commits touched a file, and
+what the version file said at a commit.
+
+> **Gate.** This phase must not merge to `main` before section 14.3's findings
+> are filled in. Its API flavour, path resolution and version-file handling
+> all depend on what C0 reports, and `BITBUCKET_BASE_URL` left empty keeps it
+> completely inert in the meantime.
+
+- **New:** `src/dlt/bitbucket.py` -- `repo_for`, `resolve_path`,
+  `commits_touching`, `changed_paths`, `file_at`, `version_at`,
+  `parse_pom_version`, `touches_version_file`. Both API flavours.
+- **Modified:** `src/utils/resilience.py` -- a `bitbucket_breaker` beside the
+  existing four. `src/utils/metrics.py` -- it joins the breaker-state gauge.
+- **Config:** `BITBUCKET_BASE_URL`, `BITBUCKET_TOKEN`, `BITBUCKET_USERNAME`
+  (Cloud app passwords only), `BITBUCKET_API_FLAVOUR`,
+  `BITBUCKET_TIMEOUT_SECONDS`, `DLT_REPO_MAP`, `DLT_CODE_CHECK_TTL_SECONDS`,
+  `DLT_CODE_CHECK_MAX_COMMITS`.
+- **Design notes:**
+  - **`None` and `[]` mean different things, and the difference decides a
+    replay.** `[]` is "the server answered, and nothing has touched this
+    file", which C5 turns into `NO_CHANGE` and a withheld replay. `None` is
+    "we could not look". Collapsing them would let an unreachable Bitbucket
+    read as "the code definitely has not changed" and stop every replay in the
+    system on no evidence at all. Same distinction as `FetchResult.ok` and
+    `Corroboration.could_not_look`. A `None` is never cached.
+  - **Path resolution prefers construction over search.** C2 already knows the
+    path suffix, so the first strategy tries each configured source root and
+    checks whether the file exists: one call, identical on both flavours, and
+    a multi-module layout is a config change. Listing the repository is the
+    Server-only fallback, and **two matches resolve to `UNKNOWN`, not a coin
+    toss** -- picking either would attribute a commit to the wrong module.
+  - **Trap T5 is handled by parsing the XML, not by a regex.** A pom declares
+    `<parent><version>` *before* its own `<version>`, so the first `<version>`
+    tag is the parent's. `/project/version` is read specifically, falling back
+    to `/project/parent/version` only when the project declares none -- the
+    case Maven's own inheritance rule covers.
+  - An unmapped package resolves to no repository (Trap T8), a malformed
+    `DLT_REPO_MAP` maps nothing at all rather than half of it, and a file over
+    `MAX_FILE_BYTES` is refused rather than parsed.
+- **Tests:** `tests/test_dlt_bitbucket.py`, no network -- longest-prefix repo
+  matching; the shared-library package mapping to nothing; construction in one
+  call, root ordering, the listing fallback, and ambiguity yielding None;
+  Server and Cloud commit shapes including ISO-vs-epoch timestamps; a commit
+  with no timestamp kept rather than dropped; the parent-version trap, an
+  inheriting pom, a namespace-less pom, and unparseable input; 401/403/404/
+  500/502, a transport failure, a non-JSON body and a tripped breaker all
+  degrading rather than raising; Bearer vs Basic auth; the cache serving
+  repeats and refusing to cache a failure.
+- **Exit criteria:** the reference sample's top application frame resolves to
+  a real path in the real repository, and its version file reads correctly at
+  HEAD of `release`.
+- **Out of scope:** writes of any kind, diff parsing, and reading source into
+  an LLM prompt.

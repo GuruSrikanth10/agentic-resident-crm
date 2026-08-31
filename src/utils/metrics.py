@@ -255,7 +255,8 @@ def sample_breaker_states() -> None:
     try:
         from src.utils import resilience
 
-        for name in ("db_breaker", "es_breaker", "llm_breaker", "k8s_breaker"):
+        for name in ("db_breaker", "es_breaker", "llm_breaker", "k8s_breaker",
+                     "bitbucket_breaker"):
             breaker = getattr(resilience, name, None)
             if breaker is None:
                 continue
