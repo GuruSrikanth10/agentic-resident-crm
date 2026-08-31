@@ -1157,3 +1157,99 @@ show is whether the key is populated on *every* message or only on this topic.
 | R6 | 2,000/day overwhelms the fast stage | Log fetch backlog, pod logs rotate before capture | Same two-stage split that already protects the rejection path; fast stage is bounded I/O only; `MAX_CONCURRENT_INVESTIGATIONS` applies per role |
 | R7 | Registry arrives in an unexpected format | Phase 2 loader mismatch | Loader is isolated in `src/dlt/registry.py` behind a single lookup function; a format change touches one file |
 | R8 | Adapter refactor regresses the rejection path | Live pipeline breaks | `RejectionAdapter` moves today's logic verbatim; Phase 4 exit criteria requires the existing suite green and unchanged |
+
+---
+
+## 14. Replay precheck (phases C0-C8)
+
+An extension, not a revision. It amends one non-goal in section 2 -- "no
+source-code analysis" -- in the same narrow, opt-in way section 5.9 amends
+"no remediation", and it answers Open Question 3 along the way.
+
+**The question it answers.** `auto_replay.decide()` gates a replay on the
+finding alone: action, confidence, refId. Nothing in that decision knows
+whether the bug was fixed last Tuesday, or whether the fix reached the pods.
+So a replay is a guess, and a packet whose fix has not shipped simply
+dead-letters again.
+
+**The join key is the version number**, not a git SHA. ~95% of changes bump
+the version in `pom.xml` (or the service's equivalent), the image tag carries
+that same version, and the pod's image tag is readable from Kubernetes. That
+chain is what removes the need for Gitea, ArgoCD, Harbor digests and any
+change to the Jenkins pipeline.
+
+**Gitea is deliberately not used.** It holds the *desired* state. A replay
+executes against whatever the pods are running now, so a manifest updated but
+not yet synced would actively mislead the verdict. The pod's image tag is the
+only authority, and it doubles as the sync signal.
+
+### 14.1 Verdicts
+
+| Verdict | Condition | Consequence |
+|---|---|---|
+| `NO_CHANGE` | No commit on `release` has touched the failure site since this packet failed | Replay reproduces the same dead letter |
+| `NOT_DEPLOYED` | A candidate commit exists; its first-containing version is ahead of the running pod's | Park the packet; replay when the pods reach that version |
+| `FIX_DEPLOYED` | The running version is at or beyond the candidate's first-containing version | Replay is worth trying |
+| `UNKNOWN` | Frame unmappable, repo unreachable, version unparseable, or no running version captured | Fall through to today's behaviour, unchanged |
+
+`NOT_DEPLOYED` is the operative one: it turns "replay and see" into "replay
+after the next deploy", which is a scheduling decision the system can make and
+act on by itself.
+
+The verdict answers *deployment*, never *relevance*. "This commit is running"
+is not "this commit fixes your bug"; relevance comes from mapping the top
+application frame to a file. The casebook keeps the two claims separate so a
+reader can disagree with either.
+
+### 14.2 Two flags, not one
+
+Mirroring the split section 5.9 already makes between
+`DLT_AUTO_REPLAY_ENABLED` and `ENABLE_AUTO_REPLAY`:
+
+- `DLT_CODE_CHECK_ENABLED` -- do the lookup, write the verdict into the
+  casebook. Observe only, and safe from day one.
+- `DLT_CODE_CHECK_GATES_REPLAY` -- let the verdict veto or park a replay.
+
+This is the posture Open Question 2 already takes for the mis-cast detector:
+advisory until real samples validate it.
+
+---
+
+### Phase C0 -- Feasibility gate
+
+**Goal.** Confirm the five assumptions this design rests on, against the real
+systems, before any adapter code is written. Same shape as Phase 0.
+
+- **New:** `src/tools/code_check_probe.py` -- a throwaway CLI carrying its own
+  minimal Bitbucket client, deliberately *not* depending on C4 (whose shape
+  its output is meant to determine). `tests/test_code_check_probe.py` covers
+  the decisions it makes about what it reads, since those are copied forward
+  into C3 and C4.
+- **Run:** `python -m src.tools.code_check_probe --all --repo ENU/enu-biometric`
+- **Exit criteria:** all five questions in 14.3 answered in writing. If Q4
+  reports `AT-RELEASE-CUT`, C5 must implement the forward-walk (Trap T6)
+  rather than reading the version at the fix commit.
+- **Out of scope:** anything that writes. Any dependency on this tool from
+  shipped code.
+
+### 14.3 Phase C0 findings
+
+Filled in by whoever runs the probe against the real systems. Until then
+every row is open, and C4 must not merge.
+
+| # | Question | Answer |
+|---|---|---|
+| Q1 | Bitbucket reachable from the cluster, and Server/DC or Cloud? | *pending* |
+| Q2 | Is `release` the deployed branch, per repo? | *pending* |
+| Q3 | What does the image tag look like, and does it order? | *pending* |
+| Q4 | Version bumped in the fix commit, or at release cut? | *pending* |
+| Q5 | Multi-module layout; which pom is the image tagged from? | *pending* |
+
+**Q4 is the load-bearing one.** `IN-FIX-COMMIT` means the version at the fix
+commit is already the first-containing version. `AT-RELEASE-CUT` means reading
+it there is systematically wrong, in the direction that causes replays which
+fail again. `MIXED` means build the forward-walk, which is correct under either
+convention -- and is what C5 builds regardless.
+
+**Q4 must be stratified by repo, not pooled.** If one team never bumps
+versions, Trap T9 is not a 5% error rate for them but a 100% one.
