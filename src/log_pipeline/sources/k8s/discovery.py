@@ -361,6 +361,31 @@ def _list_pods(namespace: str, match_spec: PodMatchSpec, request_timeout: float)
     return pods
 
 
+def list_pods_for_service(app: Optional[str] = None,
+                          namespace: Optional[str] = None,
+                          request_timeout: Optional[float] = None):
+    """Raw pods for one service, or None when they cannot be listed.
+
+    A read-only view for callers that want pod *metadata* rather than log
+    targets -- the DLT lane reads the running image tag off these to record
+    which build was live when a packet failed (DLT_PLAN.md 14, phase C1).
+
+    Deliberately does not verify the namespace the way `discover_for_service`
+    does. That check exists so a log fetch fails loudly on a misconfigured
+    namespace rather than returning an empty trace the agent might read as
+    "no errors occurred"; here an empty result is simply an unknown version,
+    which every caller already has to handle, and the extra RBAC round-trip
+    would be paid on the packet path for nothing.
+    """
+    resolved_namespace, match_spec = resolve_service(app=app, namespace=namespace)
+    if not resolved_namespace:
+        return None
+
+    timeout = (request_timeout if request_timeout is not None
+               else float(os.environ.get("K8S_REQUEST_TIMEOUT_SECONDS", "30")))
+    return _list_pods(resolved_namespace, match_spec, timeout)
+
+
 def discover_for_service(app: Optional[str] = None,
                          namespace: Optional[str] = None,
                          verified: Optional[dict] = None) -> DiscoveryResult:

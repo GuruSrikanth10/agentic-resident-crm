@@ -1253,3 +1253,52 @@ convention -- and is what C5 builds regardless.
 
 **Q4 must be stratified by repo, not pooled.** If one team never bumps
 versions, Trap T9 is not a 5% error rate for them but a 100% one.
+
+---
+
+### Phase C1 -- Deployed version capture
+
+**Goal.** Record which build was running when the packet failed. Answers Open
+Question 3 and mitigates Risk R4 on its own, independently of the code check
+that consumes it -- so it is deliberately **not** behind a feature flag.
+
+- **New:** `src/dlt/deployed.py` -- `running_version(app, namespace)` lists the
+  service's pods and reads `status.container_statuses[].image`, returning a
+  `DeployedVersions` record: the distinct versions seen, the (pod, container,
+  image) rows behind them, and a reason when nothing could be read. Guarded by
+  `k8s_breaker`; the retry lives in `k8s/retry.py`, which the pod listing
+  already goes through.
+- **Modified:** `src/log_pipeline/sources/k8s/discovery.py` -- a public
+  `list_pods_for_service()` wrapping `resolve_service` + `_list_pods`, so the
+  DLT lane does not reach into a private function. Additive; no existing path
+  changes. `src/api/dlt_routes.py` -- capture in `fetch_dlt_logs`, persist as
+  `deployed.json`, carry `baseline_versions` on the queued message.
+  `src/utils/metrics.py` -- `record_dlt_deployed_version_read`.
+- **Config:** `DLT_DEPLOYED_VERSION_TTL_SECONDS` (default 60). Reuses
+  `K8S_DEFAULT_NAMESPACE`, `K8S_DEFAULT_APP`, `K8S_SERVICE_MAP`.
+- **Design notes:**
+  - **A separate Kubernetes call, not a change to the log pipeline.** Threading
+    an image field through `PodTarget` -> `DiscoveryResult` -> `FetchResult` ->
+    `reduce_logs` would touch code the rejection lane depends on (Risk R8), for
+    a value only the DLT lane wants.
+  - **No version ordering here.** A rolling deploy has pods on two versions at
+    once; this module reports the set and refuses to name a single winner.
+    Ordering is C3's, and doing it here would mean comparing version strings
+    lexically -- Trap T7.
+  - **Only successful reads are cached.** Caching a failure would hold a whole
+    TTL of cases at `UNKNOWN` after a transient blip.
+  - The pod is the authority, not the manifest. A version that ArgoCD has not
+    yet synced is not running, and is exactly the wrong answer for deciding
+    whether a replay will work.
+- **Tests:** `tests/test_dlt_deployed.py` -- both image-reference shapes, a
+  digest that must not be read as a version, a registry port that must not be
+  read as a tag; a rolling deploy reports both versions and no single one; a
+  dead cluster, an unresolved namespace and a pod with no container status each
+  return a reason rather than raising; the cache collapses repeats, a failure
+  is not cached, and a zero TTL disables it. `tests/test_dlt_fetch.py` -- the
+  artifact is written on every case, and the fetch still succeeds when the
+  version cannot be read.
+- **Exit criteria:** every new DLT case carries a `baseline_versions` value, or
+  an explicit empty list with a recorded reason. Existing suite green.
+- **Out of scope:** comparing versions, and any use of the value. C1 only
+  observes.

@@ -27,7 +27,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends
 
 from src.api.routes import _off_loop, get_api_key, rate_limiter, register_executor
-from src.dlt import auto_replay, canned, groups, orchestrator, registry, reuse
+from src.dlt import auto_replay, canned, deployed, groups, orchestrator, registry, reuse
 from src.dlt.case_storage import get_dlt_storage
 from src.dlt.corroborate import corroborate
 from src.dlt.classify import classify
@@ -121,6 +121,7 @@ TRACE_ARTIFACT = "trace.txt"
 PARSED_TRACE_ARTIFACT = "parsed_trace.json"
 PAYLOAD_SUMMARY_ARTIFACT = "payload_summary.txt"
 FETCHED_LOGS_ARTIFACT = "fetched_logs.txt"
+DEPLOYED_ARTIFACT = "deployed.json"
 
 #: Bumped when the DLT casebook shape changes. Independent of the rejection
 #: casebook's CASEBOOK_SCHEMA_VERSION -- different schema, different lifecycle.
@@ -283,6 +284,21 @@ def fetch_dlt_logs(message: DltMessage):
             storage.save_artifact(case_id, FETCHED_LOGS_ARTIFACT,
                                   f"Log fetch failed: {type(e).__name__}: {e}")
 
+    # Which build was running when this packet failed. Recorded here, in the
+    # fast lane, because it is an observation about *this moment* -- by the
+    # time the analysis lane runs, or a parked replay is reconsidered days
+    # later, the pods may be on something else entirely (DLT_PLAN.md 14, C1).
+    #
+    # Never gated on a feature flag: it answers Open Question 3 and mitigates
+    # Risk R4 on its own, independently of the code check that consumes it.
+    baseline = deployed.running_version()
+    metrics.record_dlt_deployed_version_read(baseline.ok, baseline.mixed)
+    if baseline.ok:
+        log.info("Recorded the running build for this case",
+                 versions=list(baseline.versions), mixed=baseline.mixed)
+    storage.save_artifact(case_id, DEPLOYED_ARTIFACT,
+                          json.dumps(baseline.as_dict(), indent=2, ensure_ascii=False))
+
     existing = storage.load(case_id, filename="status.json")
     existing_value = (existing or {}).get("packet_status", {}).get("status")
     if existing_value in (None, LOGS_FETCHED_STATUS):
@@ -295,12 +311,17 @@ def fetch_dlt_logs(message: DltMessage):
     queued = message.model_dump()
     queued["evidence_gaps"] = gaps
     queued["log_window"] = window.describe() if window else None
+    # Carried for visibility on the queue; the analysis lane reads the
+    # artifact rather than trusting this copy, on the same reasoning that
+    # makes it re-derive the failure from the headers.
+    queued["baseline_versions"] = list(baseline.versions)
     publish_to_dlt_analysis_queue(queued)
 
     log.info("Queued DLT case for analysis", state=LOGS_FETCHED_STATUS,
              failure_class=failure["failure_class"], gaps=gaps)
     return {"status": "queued_for_analysis", "case_id": case_id,
-            "failure_class": failure["failure_class"], "gaps": gaps}
+            "failure_class": failure["failure_class"], "gaps": gaps,
+            "baseline_versions": list(baseline.versions)}
 
 
 # ---------------------------------------------------------------------------
