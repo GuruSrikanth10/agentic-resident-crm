@@ -387,3 +387,29 @@ def test_a_bitbucket_outage_does_not_cost_the_case(monkeypatch):
 
     assert result["status"] == "processed"
     assert result["code_check"] == "UNKNOWN"
+
+
+def test_the_gate_flag_turns_the_verdict_into_a_withheld_replay(monkeypatch):
+    """C6, end to end. The same case that replays under C5 does not under C6."""
+    monkeypatch.setenv("DLT_AUTO_REPLAY_ENABLED", "true")
+    monkeypatch.setenv("DLT_CODE_CHECK_GATES_REPLAY", "true")
+    enable_code_check(monkeypatch, commits=[])
+    stub_running(monkeypatch, ["1.0.1"])
+    seed_baseline("dlt-T-63-3352", ["1.0.0"])
+    stub_llm(monkeypatch, DltFinding(
+        narrative="x", discrepancy="the logs show a timeout",
+        recommendation="redrive", action="REDRIVE_AFTER_RECOVERY",
+        confidence=0.9))
+    seed_logs("dlt-T-63-3352",
+              "[ERROR] java.net.SocketTimeoutException: Read timed out")
+
+    patcher, fake_tool = mock_replay_tool()
+    with patcher:
+        result = analyze_dlt(message())
+
+    assert result["code_check"] == "NO_CHANGE"
+    assert result["replay_attempted"] is False
+    fake_tool.invoke.assert_not_called()
+
+    casebook = case_storage.get_dlt_storage().load("dlt-T-63-3352")
+    assert "no change at the failure site" in casebook["replay"]["reason"]

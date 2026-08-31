@@ -34,7 +34,8 @@ def _isolate(monkeypatch):
     for var in ("DLT_AUTO_REPLAY_ENABLED", "DLT_REPLAY_CONFIDENCE_THRESHOLD",
                 "DLT_REPLAY_ACTIONS", "DLT_REPLAY_ID_TYPE",
                 "DLT_REPLAY_OPERATOR_NAME", "DLT_REPLAY_CATEGORY",
-                "DLT_REPLAY_PRIORITY", "DLT_REPLAY_FROM_SEDA_START"):
+                "DLT_REPLAY_PRIORITY", "DLT_REPLAY_FROM_SEDA_START",
+                "DLT_CODE_CHECK_GATES_REPLAY"):
         monkeypatch.delenv(var, raising=False)
     yield
 
@@ -199,3 +200,110 @@ def test_maybe_replay_attempts_when_the_gate_passes(monkeypatch):
     assert result["attempted"] is True
     assert result["queued"] is True
     fake_tool.invoke.assert_called_once()
+
+
+# ======================================================================
+# Phase C6 -- the replay precheck as a veto
+# ======================================================================
+
+from src.dlt import code_check as CC  # noqa: E402
+
+
+def verdict(name, **kwargs):
+    return CC.CodeCheck(verdict=name, reason="because the repository said so",
+                        **kwargs)
+
+
+def _qualifying(monkeypatch):
+    """The state in which `decide` says yes on its own."""
+    monkeypatch.setenv("DLT_AUTO_REPLAY_ENABLED", "true")
+
+
+def test_the_gate_flag_off_leaves_every_verdict_inert(monkeypatch):
+    """Two independent switches: recording a verdict must not act on one."""
+    _qualifying(monkeypatch)
+
+    for name in CC.VERDICTS:
+        assert auto_replay.decide(finding(), "REF-1", verdict(name)).should_replay
+
+
+def test_no_change_withholds_an_otherwise_qualifying_replay(monkeypatch):
+    _qualifying(monkeypatch)
+    monkeypatch.setenv("DLT_CODE_CHECK_GATES_REPLAY", "true")
+
+    decision = auto_replay.decide(finding(), "REF-1", verdict(CC.NO_CHANGE))
+
+    assert decision.should_replay is False
+    assert "no change at the failure site" in decision.reason
+    assert "because the repository said so" in decision.reason
+
+
+def test_not_deployed_withholds_and_names_the_version_to_wait_for(monkeypatch):
+    _qualifying(monkeypatch)
+    monkeypatch.setenv("DLT_CODE_CHECK_GATES_REPLAY", "true")
+
+    decision = auto_replay.decide(
+        finding(), "REF-1",
+        verdict(CC.NOT_DEPLOYED, required_version="1.0.0-release.43"))
+
+    assert decision.should_replay is False
+    assert "1.0.0-release.43" in decision.reason
+
+
+@pytest.mark.parametrize("name", [CC.FIX_DEPLOYED, CC.UNKNOWN])
+def test_a_verdict_that_establishes_nothing_changes_nothing(monkeypatch, name):
+    """UNKNOWN is the whole safety story: a Bitbucket outage, an unmapped
+    package or a disabled flag must not silently stop every replay."""
+    _qualifying(monkeypatch)
+    monkeypatch.setenv("DLT_CODE_CHECK_GATES_REPLAY", "true")
+
+    assert auto_replay.decide(finding(), "REF-1", verdict(name)).should_replay
+
+
+def test_no_verdict_at_all_changes_nothing(monkeypatch):
+    _qualifying(monkeypatch)
+    monkeypatch.setenv("DLT_CODE_CHECK_GATES_REPLAY", "true")
+
+    assert auto_replay.decide(finding(), "REF-1", None).should_replay
+
+
+def test_the_veto_can_only_subtract_a_replay_never_add_one(monkeypatch):
+    """FIX_DEPLOYED must not rescue a finding the existing gate declined.
+    Enabling that is what would make Class B replayable, and it is deferred
+    until the verdicts have been checked against reality."""
+    _qualifying(monkeypatch)
+    monkeypatch.setenv("DLT_CODE_CHECK_GATES_REPLAY", "true")
+
+    for declined in (finding(action="DATA_FIX_REQUIRED"),
+                     finding(confidence=None),
+                     finding(confidence=0.1)):
+        decision = auto_replay.decide(declined, "REF-1", verdict(CC.FIX_DEPLOYED))
+        assert decision.should_replay is False
+
+
+def test_the_existing_conditions_still_report_first(monkeypatch):
+    """The veto goes last, so a replay declined for its own reasons still
+    says why rather than blaming the precheck."""
+    _qualifying(monkeypatch)
+    monkeypatch.setenv("DLT_CODE_CHECK_GATES_REPLAY", "true")
+
+    decision = auto_replay.decide(finding(action="DATA_FIX_REQUIRED"), "REF-1",
+                                  verdict(CC.NO_CHANGE))
+
+    assert "not in the replay-worthy set" in decision.reason
+    assert "precheck" not in decision.reason
+
+
+def test_maybe_replay_withholds_without_calling_the_tool(monkeypatch):
+    _qualifying(monkeypatch)
+    monkeypatch.setenv("DLT_CODE_CHECK_GATES_REPLAY", "true")
+    fake_tool = MagicMock()
+
+    with patch("src.tools.tool_registry.get_tool_by_name", return_value=fake_tool):
+        result = auto_replay.maybe_replay("case-1", "REF-1", finding(),
+                                          verdict(CC.NO_CHANGE))
+
+    assert result["attempted"] is False
+    assert result["queued"] is False
+    assert "no change at the failure site" in result["reason"]
+    fake_tool.invoke.assert_not_called()

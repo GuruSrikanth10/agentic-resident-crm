@@ -1506,3 +1506,65 @@ casebook. Changes nothing about replay.
   and no replay behaviour has changed. Then leave it running and collect
   cases.
 - **Out of scope:** acting on the verdict. That is C6.
+
+---
+
+### Phase C6 -- Replay veto
+
+**Goal.** Let a `NO_CHANGE` or `NOT_DEPLOYED` verdict withhold a replay that
+would otherwise fire.
+
+> **Precondition.** Do not enable until C5 has run for at least two weeks and
+> the recorded verdicts have been checked against what replays actually did.
+> Same evidence bar Open Question 2 sets for the corroboration verdict.
+
+- **Modified:** `src/dlt/auto_replay.py` -- `decide(finding, ref_id,
+  code_check=None)` and `maybe_replay(..., code_check=None)`, with the new
+  check placed **last**, after the existing four. `src/api/dlt_routes.py`
+  passes the C5 verdict through.
+- **Config:** `DLT_CODE_CHECK_GATES_REPLAY` (default `false`), independent of
+  `DLT_CODE_CHECK_ENABLED`. The gate is inert unless both are on.
+- **Design notes:**
+  - **A veto only: it can subtract a replay, never add one.** That asymmetry
+    is the whole safety argument -- a wrong verdict can delay a packet, and
+    cannot cause a replay that fails again. Letting `FIX_DEPLOYED` *enable* a
+    replay the existing gate declined is a real capability, and is what would
+    finally make Class B replayable, but it is deferred (see below).
+  - **`UNKNOWN` changes nothing.** A Bitbucket outage, an unmapped package or
+    a disabled flag must not silently stop every replay in the system.
+  - **The veto goes last**, so a replay declined for its own reasons still
+    reports that reason rather than blaming the precheck.
+  - `NOT_DEPLOYED` withholds here and is *parked* in C7 -- withholding without
+    coming back to it would lose the packet.
+- **Tests:** extends `tests/test_dlt_auto_replay.py` -- the gate flag off
+  leaves all four verdicts inert; `NO_CHANGE` and `NOT_DEPLOYED` withhold and
+  name why, the latter naming the version to wait for; `FIX_DEPLOYED` and
+  `UNKNOWN` change nothing; the veto cannot rescue a declined finding; the
+  existing conditions still report first. `tests/test_dlt_analysis_replay.py`
+  -- the same case that replays under C5 does not under C6.
+- **Exit criteria:** a replay that would have failed is withheld, and the
+  casebook says exactly which commit-absence withheld it.
+- **Out of scope:** parking the withheld packet (C7), and any path that lets a
+  verdict cause a replay.
+
+---
+
+### Deferred -- Class B replay
+
+The capability this unlocks is replaying **Class B** -- the NPEs, index errors
+and cast failures that today get a canned `NEEDS_MANUAL_REVIEW` and never
+replay at all, because `canned.py` attaches no confidence and `decide()`
+rejects a finding without one. Class B is also the only class where "the code
+changed, so the replay may now work" is a coherent claim: Class A's typical
+`DATA_FIX_REQUIRED` means a row is missing, and no commit makes a row appear.
+
+Deferred rather than scheduled, because it is the one change that lets this
+feature *cause* replays rather than only withhold them. Preconditions, all of
+them:
+
+- C6 enabled and stable.
+- At least 30 `FIX_DEPLOYED` verdicts checked by hand against real replay
+  outcomes.
+- A measured false-positive rate from the C8 accuracy report, not an assumed
+  one.
+- Its own flag, defaulting off, on the pattern the other two already follow.

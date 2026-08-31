@@ -61,6 +61,7 @@ import os
 from dataclasses import dataclass
 from typing import Optional
 
+from src.dlt import code_check as code_check_module
 from src.dlt.classify import FailureClass  # noqa: F401  (kept for the module's readers -- see decide())
 from src.models.dlt_synthesis import DLT_ACTIONS
 from src.utils.env import get_bool_env
@@ -135,6 +136,18 @@ def from_seda_start() -> bool:
     return get_bool_env("DLT_REPLAY_FROM_SEDA_START", False)
 
 
+def code_check_gates_replay() -> bool:
+    """Whether a replay-precheck verdict may withhold a replay (phase C6).
+
+    The SECOND of two independent switches, and deliberately not the same one
+    as `DLT_CODE_CHECK_ENABLED`. That flag decides whether the lookup happens
+    and a verdict is recorded; this one decides whether the verdict is allowed
+    to do anything. Running the first alone for a few weeks is what produces
+    the evidence for turning this one on.
+    """
+    return get_bool_env("DLT_CODE_CHECK_GATES_REPLAY", False)
+
+
 @dataclass(frozen=True)
 class ReplayDecision:
     should_replay: bool
@@ -143,11 +156,19 @@ class ReplayDecision:
     reason: str
 
 
-def decide(finding, ref_id: Optional[str]) -> ReplayDecision:
+def decide(finding, ref_id: Optional[str], code_check=None) -> ReplayDecision:
     """Whether this finding qualifies for an automatic replay. Pure, no I/O.
 
     Order matters only for which reason is reported first; every one of these
     is independently sufficient to withhold replay.
+
+    `code_check` is the phase C5 verdict, and it is **a veto only**. It goes
+    last, after every existing condition, and it can subtract a replay but
+    never add one. That asymmetry is the whole safety argument: a wrong
+    verdict can delay a packet, and cannot cause a replay that fails again.
+    Letting `FIX_DEPLOYED` *enable* a replay the existing gate declined is a
+    real capability -- it is what would finally make Class B replayable -- but
+    it is deferred until the verdicts have been checked against reality.
     """
     if not auto_replay_enabled():
         return ReplayDecision(False, "DLT_AUTO_REPLAY_ENABLED is off")
@@ -174,9 +195,39 @@ def decide(finding, ref_id: Optional[str]) -> ReplayDecision:
             False, "no refId on this case; nothing to identify the packet "
                    "to OIS with")
 
+    veto = _code_check_veto(code_check)
+    if veto:
+        return ReplayDecision(False, veto)
+
     return ReplayDecision(
         True, f"action {finding.action} at confidence {finding.confidence:.2f} "
               f"clears the {threshold:.2f} threshold")
+
+
+def _code_check_veto(code_check) -> Optional[str]:
+    """The reason a verdict withholds this replay, or None.
+
+    Only two verdicts withhold. `FIX_DEPLOYED` says a replay is worth trying,
+    which the existing gate had already concluded; `UNKNOWN` says we could not
+    establish anything, and must therefore change nothing -- that is what
+    keeps a Bitbucket outage, an unmapped package or a disabled flag from
+    silently stopping every replay in the system.
+    """
+    if code_check is None or not code_check_gates_replay():
+        return None
+
+    verdict = getattr(code_check, "verdict", None)
+    reason = getattr(code_check, "reason", "") or ""
+
+    if verdict == code_check_module.NO_CHANGE:
+        return (f"the replay precheck found no change at the failure site: "
+                f"{reason}")
+    if verdict == code_check_module.NOT_DEPLOYED:
+        required = getattr(code_check, "required_version", None)
+        return (f"the replay precheck found a change that is not running yet"
+                + (f"; replay once the pods reach {required}" if required else "")
+                + f": {reason}")
+    return None
 
 
 def attempt(case_id: str, ref_id: str) -> dict:
@@ -208,12 +259,13 @@ def attempt(case_id: str, ref_id: str) -> dict:
                 "args": args}
 
 
-def maybe_replay(case_id: str, ref_id: Optional[str], finding) -> dict:
+def maybe_replay(case_id: str, ref_id: Optional[str], finding,
+                 code_check=None) -> dict:
     """The one entry point `/analyze-dlt` calls. Always returns a dict --
     attempted or not, and why either way -- meant to be embedded verbatim in
     the casebook's `replay` block.
     """
-    decision = decide(finding, ref_id)
+    decision = decide(finding, ref_id, code_check)
     if not decision.should_replay:
         return {"attempted": False, "reason": decision.reason,
                 "queued": False, "result": None}

@@ -607,7 +607,7 @@ async def analyze_dlt(message: DltMessage):
     # May POST to the OIS replay endpoint or append to the pending queue --
     # network or filesystem either way.
     replay = await _off_loop(auto_replay.maybe_replay, case_id, message.ref_id,
-                             finding)
+                             finding, code_check_result)
     metrics.record_dlt_auto_replay(
         "queued" if replay["queued"] else
         "failed" if replay["attempted"] else "not_attempted")
