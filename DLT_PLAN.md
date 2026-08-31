@@ -1568,3 +1568,50 @@ them:
 - A measured false-positive rate from the C8 accuracy report, not an assumed
   one.
 - Its own flag, defaulting off, on the pattern the other two already follow.
+
+---
+
+### Phase C7 -- Parked replays
+
+**Goal.** Hold a `NOT_DEPLOYED` packet, then replay it once the pods reach the
+version that carries the fix. This is the part that turns "replay it and see"
+into "replay it after Thursday's deploy".
+
+- **New:** `src/dlt/parked.py` -- a `dlt_parked_replays` storage root via
+  `get_scoped_storage`, one document per case; `maybe_park`, `list_parked`,
+  `release_ready`. `src/tools/release_parked_replays.py` -- an offline CLI
+  (`--list`, `--dry-run`, `--version`, `--json`), idempotent, run after a
+  deploy or on a schedule.
+- **Modified:** `src/api/dlt_routes.py` -- parks after the replay gate; a
+  `parked` block on the casebook, present whether or not anything was parked.
+- **Config:** `DLT_CODE_CHECK_PARK_ENABLED`,
+  `DLT_PARKED_REPLAY_TTL_SECONDS` (30 days), `DLT_PARKED_REPLAY_CAP` (500).
+- **Design notes:**
+  - **One document per case, not a shared file.** `_queue_pending_replay`
+    learned this the hard way: a `pending_replays.jsonl` lived on whichever
+    pod wrote it, so under the S3 backend with more than one replica the queue
+    fragmented. A parked queue is worse to lose -- nobody is watching it.
+  - **Parking requires everything a replay requires, minus the version.** A
+    packet parks only when `auto_replay.decide` would have said yes *without*
+    the veto. Otherwise the release worker becomes a second replay path that
+    bypasses `DLT_AUTO_REPLAY_ENABLED`, replaying packets the operator never
+    agreed to replay.
+  - **Releasing does not necessarily replay.** It calls `queue_for_replay`,
+    whose `ENABLE_AUTO_REPLAY` switch still decides whether the packet reaches
+    OIS or lands in `pending_replays` for a human.
+  - **An unreadable running version leaves everything parked.** Not being able
+    to read a version is not evidence that a fix shipped.
+  - **Expiry beats release.** A month-old packet is not obviously safe to
+    replay just because the version finally moved.
+- **Tests:** `tests/test_dlt_parked.py` -- only `NOT_DEPLOYED` parks; nothing
+  parks with auto-replay off, with the veto off, or for a finding the gate
+  declines on its own; an unusable case id is refused; the cap and TTL both
+  bind; release is numeric not lexical, is idempotent, and leaves an
+  unreadable version parked; a dry run changes nothing; expiry beats release.
+  `tests/test_dlt_analysis_replay.py` -- parked end to end, and the casebook
+  always carries the block.
+- **Exit criteria:** a packet parked before a deploy is queued for replay
+  after it, with no human involved in the timing decision.
+- **Out of scope:** mapping a parked entry's repository back to a Kubernetes
+  service. The release worker reads one app's version, so a deployment with
+  several DLT-producing services runs it once per app.

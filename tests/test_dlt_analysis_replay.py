@@ -413,3 +413,51 @@ def test_the_gate_flag_turns_the_verdict_into_a_withheld_replay(monkeypatch):
 
     casebook = case_storage.get_dlt_storage().load("dlt-T-63-3352")
     assert "no change at the failure site" in casebook["replay"]["reason"]
+
+
+def test_a_withheld_replay_is_parked_end_to_end(monkeypatch):
+    """C7. The packet is not lost when the veto withholds it for a version."""
+    from src.dlt import bitbucket, parked
+    monkeypatch.setenv("DLT_AUTO_REPLAY_ENABLED", "true")
+    monkeypatch.setenv("DLT_CODE_CHECK_GATES_REPLAY", "true")
+    monkeypatch.setenv("DLT_CODE_CHECK_PARK_ENABLED", "true")
+
+    path = "src/main/java/com/uidai/enu/biometric/Svc.java"
+    enable_code_check(
+        monkeypatch,
+        commits=[bitbucket.Commit(id="aaa", subject="Fix NPE",
+                                  timestamp_ms=1787019700000)],
+        changes={"aaa": ["pom.xml"]}, versions={"aaa": "1.0.5"}, path=path)
+    stub_running(monkeypatch, ["1.0.1"])
+    seed_baseline("dlt-T-63-3352", ["1.0.0"])
+    stub_llm(monkeypatch, DltFinding(
+        narrative="x", discrepancy="the logs show a timeout",
+        recommendation="redrive", action="REDRIVE_AFTER_RECOVERY",
+        confidence=0.9))
+    seed_logs("dlt-T-63-3352",
+              "[ERROR] java.net.SocketTimeoutException: Read timed out")
+
+    patcher, fake_tool = mock_replay_tool()
+    with patcher:
+        result = analyze_dlt(message())
+
+    assert result["code_check"] == "NOT_DEPLOYED"
+    assert result["replay_attempted"] is False
+    assert result["parked"] is True
+    fake_tool.invoke.assert_not_called()
+
+    casebook = case_storage.get_dlt_storage().load("dlt-T-63-3352")
+    assert casebook["parked"]["parked"] is True
+    assert casebook["parked"]["required_version"] == "1.0.5"
+
+    entries = parked.list_parked()
+    assert [e["case_id"] for e in entries] == ["dlt-T-63-3352"]
+    assert entries[0]["required_version"] == "1.0.5"
+
+
+def test_the_casebook_always_carries_a_parked_block(monkeypatch):
+    analyze_dlt(message(trace=NPE_TRACE))
+
+    casebook = case_storage.get_dlt_storage().load("dlt-T-63-3352")
+    assert casebook["parked"]["parked"] is False
+    assert "DLT_CODE_CHECK_PARK_ENABLED" in casebook["parked"]["reason"]

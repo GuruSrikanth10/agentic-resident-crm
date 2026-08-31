@@ -34,6 +34,7 @@ from src.dlt import (
     deployed,
     groups,
     orchestrator,
+    parked,
     registry,
     reuse,
 )
@@ -370,7 +371,7 @@ def _casebook(message: DltMessage, headers, failure: dict, corroboration,
               finding, decision, group: Optional[dict], gaps: list,
               window_description: Optional[str], provenance_source: str,
               replay: Optional[dict] = None,
-              code_check_result=None) -> dict:
+              code_check_result=None, park: Optional[dict] = None) -> dict:
     """Assemble the terminal casebook. See DLT_PLAN.md 7.1."""
     return {
         "schema_version": DLT_CASEBOOK_SCHEMA_VERSION,
@@ -455,6 +456,11 @@ def _casebook(message: DltMessage, headers, failure: dict, corroboration,
         "replay": replay or {"attempted": False,
                               "reason": "replay gate not evaluated",
                               "queued": False, "result": None},
+        # Present whether or not anything was parked, for the same reason
+        # `replay` is: "not parked, and here is why" is as much a part of the
+        # record as "parked, waiting for 1.0.1".
+        "parked": park or {"parked": False,
+                            "reason": "parking gate not evaluated"},
         "packet_status": {"status": _terminal_status(finding)},
     }
 
@@ -615,10 +621,21 @@ async def analyze_dlt(message: DltMessage):
         log.info("DLT auto-replay evaluated", queued=replay["queued"],
                  reason=replay["reason"])
 
+    # A replay withheld only because the fix has not deployed yet is parked,
+    # not dropped -- withholding without coming back to it would lose the
+    # packet. Parking requires everything a replay requires except the
+    # version, so this can never become a second replay path that bypasses
+    # DLT_AUTO_REPLAY_ENABLED (DLT_PLAN.md 14, phase C7).
+    park = await _off_loop(parked.maybe_park, case_id, message.ref_id,
+                           code_check_result, finding)
+    if park["parked"]:
+        log.info("Parked the replay until its fix deploys", reason=park["reason"])
+
     casebook = _casebook(message, headers, failure, corroboration, finding,
                          decision, group, message.model_dump().get("evidence_gaps") or [],
                          message.model_dump().get("log_window"), provenance,
-                         replay=replay, code_check_result=code_check_result)
+                         replay=replay, code_check_result=code_check_result,
+                         park=park)
     if parse_error:
         casebook["finding"]["parse_error"] = parse_error
 
@@ -650,4 +667,5 @@ async def analyze_dlt(message: DltMessage):
             "decision": decision.decision.value,
             "code_check": code_check_result.verdict,
             "replay_attempted": replay["attempted"],
-            "replay_queued": replay["queued"]}
+            "replay_queued": replay["queued"],
+            "parked": park["parked"]}
