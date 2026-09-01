@@ -583,7 +583,21 @@ agentic-resident-crm/
 │   ├── test_k8s_gaps.py            # Kubernetes evidence gap detection tests
 │   ├── test_k8s_parser.py          # Kubernetes log line parser tests
 │   ├── test_k8s_retrieval.py       # Kubernetes pod log retrieval tests
-│   └── test_k8s_retry.py           # Kubernetes HTTP retry logic tests
+│   ├── test_k8s_retry.py           # Kubernetes HTTP retry logic tests
+│   ├── test_dlt_stacktrace.py      # DLT lane: headers, `Caused by:` parsing, fingerprint
+│   ├── test_dlt_classify.py        # DLT lane: failure taxonomy A/B/C/U
+│   ├── test_dlt_fetch.py           # DLT lane: /fetch-dlt-logs, log window, evidence
+│   ├── test_dlt_corroborate.py     # DLT lane: trace-vs-log verdicts
+│   ├── test_dlt_analysis.py        # DLT lane: /analyze-dlt with a mocked LLM
+│   ├── test_dlt_analysis_replay.py # DLT lane: auto-replay and precheck, end to end
+│   ├── test_dlt_{payload,reuse,report,sample,reason_codes,...}.py  # remaining phases
+│   │                               #   -- Replay precheck (section 4.4.1) --
+│   ├── test_code_check_probe.py    # C0: the probe's own decisions about what it reads
+│   ├── test_dlt_deployed.py        # C1: running image version, and every way it degrades
+│   ├── test_dlt_versions.py        # C3: ordering, incl. a brute-forced total-order check
+│   ├── test_dlt_bitbucket.py       # C4: source adapter against recorded responses, no network
+│   ├── test_dlt_code_check.py      # C5: the four verdicts and all three asymmetries
+│   └── test_dlt_parked.py          # C7: parking, release, expiry, and the cap
 ├── src/
 │   ├── main_api.py                 # FastAPI entry point (uvicorn, port 8000)
 │   ├── slow_consumer.py            # Slow consumer entry point: analysis queue -> /analyze-rejection
@@ -596,7 +610,7 @@ agentic-resident-crm/
 │   │   └── agent_orchestrator.py   # LangGraph StateGraph build + LLM provisioning
 │   ├── dlt/                        # Dead-letter topic analysis (parallel flow; see DLT_PLAN.md)
 │   │   ├── headers.py              # Spring DLT header contract, hex epoch decoding
-│   │   ├── stacktrace.py           # `Caused by:` chain parsing, frames, fingerprint
+│   │   ├── stacktrace.py           # `Caused by:` chain parsing, frames, fingerprint, FrameLocation
 │   │   ├── classify.py             # Failure taxonomy A/B/C/U (pure; takes a catalog hook)
 │   │   ├── registry.py             # Reason-code catalog: description, category, failure class
 │   │   ├── identity.py             # case_id = dlt-{topic}-{partition}-{offset}
@@ -608,7 +622,13 @@ agentic-resident-crm/
 │   │   ├── canned.py               # Fixed treatments for Class B/C/U (no LLM)
 │   │   ├── orchestrator.py         # DLT analysis lane: Investigate -> Review -> Synthesise
 │   │   ├── case_storage.py         # DLT case + group storage, separate from casebooks
-│   │   └── auto_replay.py          # Opt-in auto-replay gate on a high-confidence redrive finding
+│   │   ├── auto_replay.py          # Opt-in auto-replay gate on a high-confidence redrive finding
+│   │   │                           #   -- Replay precheck (section 4.4.1, DLT_PLAN.md 14) --
+│   │   ├── deployed.py             # C1: which image version the pods are actually running
+│   │   ├── versions.py             # C3: version parsing and ordering (never lexical)
+│   │   ├── bitbucket.py            # C4: read-only source access, Server and Cloud APIs
+│   │   ├── code_check.py           # C5: the verdict -- NO_CHANGE/NOT_DEPLOYED/FIX_DEPLOYED/UNKNOWN
+│   │   └── parked.py               # C7: packets held until their fix deploys
 │   ├── models/
 │   │   ├── schemas.py              # Strict Pydantic data validation schemas
 │   │   ├── synthesis.py            # Rejection finding contract + confidence policy
@@ -645,8 +665,11 @@ agentic-resident-crm/
 │   │   ├── fetch_pod_logs.py       # CLI: Direct Kubernetes pod log retrieval
 │   │   ├── build_runbooks.py       # CLI: Mine casebooks to draft generic runbook templates
 │   │   ├── promote_runbooks.py     # CLI: Human-gate review and promotion of runbook drafts
-│   │   ├── dlt_report.py           # CLI: read DLT output (--top, --group, --case, --unreviewed)
+│   │   ├── dlt_report.py           # CLI: read DLT output (--top, --group, --case, --unreviewed,
+│   │   │                           #      --parked, --code-check, --code-check-accuracy)
 │   │   ├── dlt_sample.py           # CLI: capture/analyse a real DLT corpus (Phase 0 gate)
+│   │   ├── code_check_probe.py     # CLI: replay-precheck feasibility gate (C0; throwaway)
+│   │   ├── release_parked_replays.py # CLI: release packets whose fix has now deployed (C7)
 │   │   └── parse_reason_codes.py   # CLI: BusinessReasonCode Java source -> reason_codes.csv
 │   ├── log_pipeline/
 │   │   ├── config.py               # Pipeline constants and tunables
@@ -687,7 +710,12 @@ agentic-resident-crm/
 │       ├── s3_uploader.py          # Uploads large Elastic logs to S3
 │       ├── runbook_store.py        # Runbook load/save, TTL cache, fingerprinting, path guard
 │       └── runbook_validator.py    # Generic-text regex validator (no UUIDs/dates/SRNs)
-├── local_casesheets/               # Generated: casebook_<eventId>/{casebook,status}.json, logs
+├── local_casesheets/               # Generated. Five roots under one storage backend:
+│                                   #   casebook_<eventId>/  rejection casebooks + logs
+│                                   #   dlt_cases/           DLT casebooks + trace/header artifacts
+│                                   #   dlt_groups/          per-fingerprint records
+│                                   #   dlt_parked_replays/  packets waiting for a deploy (C7)
+│                                   #   pending_replays/     replays awaiting human approval
 └── local_checkpoints/              # Generated: checkpoints.db, drain3_state/, consumer heartbeat
 ```
 
@@ -700,6 +728,8 @@ The system manages all operational feature flags, LLM credentials, MySQL databas
 - **Template:** A reference file containing all placeholders is available at `.env.example`.
 - **Database Modes:** Set `USE_MOCK_DB=true` to parse rules locally from a CSV, or `USE_MOCK_DB=false` to dynamically query the live MySQL `rules` table via SQLAlchemy/PyMySQL.
 - **Security:** The actual `.env` file is excluded via `.gitignore` to prevent secret leakage.
+- **Credentials the process holds:** the LLM provider key, MySQL, Elasticsearch, a Kubernetes kubeconfig (or an in-cluster ServiceAccount), `OIS_API_KEY` for the replay endpoint, and -- when the replay precheck is configured -- `BITBUCKET_TOKEN`. The last is **read-only and scoped to the repositories named in `DLT_REPO_MAP`**: `src/dlt/bitbucket.py` has no code path that writes, and leaving `BITBUCKET_BASE_URL` empty disables every source lookup outright.
+- **Feature flags are layered, not global.** Several capabilities are gated by two or three independent switches rather than one, so "let the system nominate an action" and "let the action actually happen" are always separate decisions -- `DLT_AUTO_REPLAY_ENABLED` vs `ENABLE_AUTO_REPLAY`, and `DLT_CODE_CHECK_ENABLED` vs `DLT_CODE_CHECK_GATES_REPLAY` vs `DLT_CODE_CHECK_PARK_ENABLED` (section 4.4.1).
 
 ### 3.2 Environment & Local LLM Integration (`llm_utils.py`)
 Unlike generic AI projects bound to OpenAI, `agentic-resident-crm` is designed for on-premise, secure environments.
@@ -736,9 +766,9 @@ The architecture incorporates several resilience mechanisms to prevent runaway c
 - **Decoupled Fetch/Analyze Consumers, Bounded Concurrency, & At-Least-Once Delivery**: `fast_consumer.py` and `slow_consumer.py` (both thin entry points over `src/utils/kafkaConsumer.py`, selected by `CONSUMER_ROLE`; section 3.11) each isolate their own Kafka polling loop and submit tasks to a `ThreadPoolExecutor` bounded by a `Semaphore` (`MAX_CONCURRENT_INVESTIGATIONS`, sized independently per process). To guarantee At-Least-Once delivery and prevent consumer rebalances during slow AI processing, each consumer is configured with `KAFKA_MAX_POLL_RECORDS` and a high `KAFKA_MAX_POLL_INTERVAL_MS`. Offsets are never committed immediately upon dispatch; instead, an `OffsetTracker` records completions and each poll cycle commits only the safe low-water mark -- the highest offset below which every dispatched message on that partition has completed -- so a batch that finishes out of order can never commit past one still in flight. If a crash or 429 error occurs, the offset is not marked complete, and Kafka safely redelivers the packet.
 - **DLQ, Poison-pill, & Checkpointing**: LangGraph uses `SqliteSaver` (with WAL mode enabled) for scalable crash recovery. Structurally invalid Kafka messages (poison-pills) and unrecoverable pipeline crashes are immediately published to a Dead Letter Queue (`rejected-packets-dlq`) via `dlq_publisher.py`.
 - **Pipeline Timeouts**: `PACKET_TIMEOUT_SECONDS` bounds the **slow consumer's HTTP client** waiting on `/analyze-rejection` -- the LLM investigation budget, same variable and meaning this had before the fetch/analyze split. The fast consumer gets its own, much shorter `FAST_CONSUMER_TIMEOUT_SECONDS` for the bounded `/fetch-logs` call. The API side is independently bounded too: `routes.py` runs `agent.invoke()` (from `/analyze-rejection` or `/process-rejection`) on a dedicated executor thread with its own budget (`AGENT_INVOKE_TIMEOUT_SECONDS`, defaulting to `PACKET_TIMEOUT_SECONDS - 30s`) so the server is authoritative about its own failure and returns `FAILED_TIMEOUT` before the consumer's deadline fires. `/fetch-logs` has no equivalent dedicated executor -- it's bounded I/O (`K8S_TOTAL_FETCH_TIMEOUT_SECONDS`, `ES_REQUEST_TIMEOUT_SECONDS`), not a multi-minute LLM call, so it runs on Starlette's own sync-dispatch threadpool like `/health`/`/ready`. Both the LLM clients (`LLM_TIMEOUT_SECONDS`, `max_retries=0`) and `agent.invoke` are bounded. If a terminal `FAILED_TIMEOUT`/`DLQ` status is already recorded by the time a slow invocation finally returns, that late result is discarded rather than overwriting it.
-- **Human-in-the-Loop Replays**: Agents cannot fire destructive API requests directly. Unless `ENABLE_AUTO_REPLAY=true`, replay actions invoked by the LLM are queued to `src/db/pending_replays.jsonl` under a `filelock` and require an operator to approve via `approve_replays.py`. Both the auto-replay call and `approve_replays.py` send the replay payload as an authenticated (`OIS_API_KEY`) JSON body rather than query params, so PII like `notificationEmail`/`notificationMobile` doesn't land in server access logs. `approve_replays.py` re-reads the queue file fresh before its final rewrite so replays queued mid-review by a live investigation aren't erased.
+- **Human-in-the-Loop Replays**: Agents cannot fire destructive API requests directly. Unless `ENABLE_AUTO_REPLAY=true`, replay actions invoked by the LLM are queued for an operator to approve via `approve_replays.py`. The queue is **one document per packet id** under the `pending_replays` storage root (`get_scoped_storage`), not the `src/db/pending_replays.jsonl` file it used to be: that file lived on whichever pod happened to write it, so under `CASEBOOK_STORAGE_BACKEND=s3` with more than one replica an operator saw only their own pod's entries and the rest were invisible indefinitely. `approve_replays.py` still drains any leftover local jsonl for backwards compatibility. Both the auto-replay call and `approve_replays.py` send the replay payload as an authenticated (`OIS_API_KEY`) JSON body rather than query params, so PII like `notificationEmail`/`notificationMobile` doesn't land in server access logs. The packet id is pattern-guarded (`EVENT_ID_PATTERN`) before it is interpolated into a storage path.
 - **Safe Self-Learning & Drift Checks**: The Reviewer's `add_learning_rule` tool stages suggestions to `src/prompts/pending_rules.jsonl` using `filelock`. A human runs `src/tools/promote_rules.py` (which includes top-level locking and git-status safety checks) to approve and Git-commit the rules; only promoted entries are removed from the pending file, so skipped/errored/concurrently-appended entries survive. Additionally, `src/tools/check_drift.py` detects database schema/policy drift, and distinguishes a genuinely changed schema from a malformed single-column CSV export.
-- **External Call Resilience**: `tenacity` handles exponential backoff retries, and `pybreaker` provides circuit breakers for database, Elasticsearch, and LLM calls.
+- **External Call Resilience**: `tenacity` handles exponential backoff retries, and `pybreaker` provides circuit breakers for database, Elasticsearch, LLM, Kubernetes, and Bitbucket calls (`db_breaker`, `es_breaker`, `llm_breaker`, `k8s_breaker`, `bitbucket_breaker` -- all `fail_max=3`, `reset_timeout=60`). Every one is sampled onto the `breaker_state` gauge at scrape time rather than on transition, so a breaker that reset on a timeout doesn't leave a stale "open" reading behind. The two newest are read-only paths whose failure must only ever *degrade* a result: a tripped `k8s_breaker` makes the running image version unknown, and a tripped `bitbucket_breaker` makes a replay-precheck verdict `UNKNOWN` -- neither raises into the analysis lane.
 - **Storage Abstraction & Schema Versioning**: The `CasebookStorage` interface implements retried atomic `.tmp` writes (to safely handle concurrent readers/AV scanners holding the file on Windows) and enforces a `"schema_version"` field on every saved casebook for backwards compatibility.
 - **Structured Logging & Health Checks**: `agent_orchestrator.py`, `tool_registry.py`, `kafkaConsumer.py`, `dlq_publisher.py`, `analysis_queue_publisher.py`, `s3_uploader.py` and the entire `log_pipeline/` package log through the same `structlog` logger as `routes.py` (bound to `event_id` where available) rather than bare `print()`. Verbosity is set by `LOG_LEVEL`. The operator CLIs still print to stdout deliberately -- they are interactive tools, not services. The FastAPI server provides `/health` (reporting both the fast and slow consumers' heartbeats, under `fast_consumer`/`slow_consumer`, plus a top-level `last_heartbeat`/`consumer_alive` alias for the fast consumer that predates the split) and `/ready` (verifying SQLite and Kafka producer connectivity) endpoints; the Kafka producer check is cached for `PRODUCER_HEALTH_TTL_SECONDS` (default 30s) so a burst of readiness probes can't each force a fresh broker connection attempt. `validate_config()` provides fail-fast configuration validation at boot.
 - **Agent Caching**: Investigator, Synthesis, and Reviewer React agents are all created once at graph construction time and reused across invocations, avoiding per-packet (and, for the Reviewer, per-retry) LLM handshake overhead.
@@ -783,10 +813,38 @@ Outputs are stored in `local_casesheets/casebook_<event_id>/`. This directory co
 - `reduced_logs.txt`: The heavily compressed logs that were injected into the LLM.
 - `*.lock` / `*.tmp`: `filelock` and atomic-write scratch files.
 
+**Five roots share one backend.** `storage.factory.get_scoped_storage(root)`
+returns the same `CasebookStorage` implementation -- same locking, same atomic
+`.tmp` writes, same terminal-status handling -- scoped to a subdirectory
+(local) or key prefix (S3). This is configuration, not a second storage
+implementation:
+
+| Root | Written by | Holds |
+|---|---|---|
+| `casebook_<eventId>/` | the rejection lane | casebooks, status, raw/reduced logs |
+| `dlt_cases/` | `/fetch-dlt-logs`, `/analyze-dlt` | DLT casebooks, `headers.json`, `trace.txt`, `parsed_trace.json`, `payload_summary.txt`, `fetched_logs.txt`, `deployed.json` |
+| `dlt_groups/` | `dlt/groups.py` | one record per fingerprint: counts, members, recommendation, latest code-check verdict |
+| `dlt_parked_replays/` | `dlt/parked.py` | packets waiting for their fix to deploy (section 4.4.1) |
+| `pending_replays/` | `queue_for_replay` | replays awaiting human approval |
+
+Keeping DLT cases out of `casebook_<eventId>/` matters: `accuracy_report`,
+`prune_casesheets` and everything else that walks `list_events()` expects
+rejection casebooks, and a DLT case has a different schema, lifecycle and
+audience.
+
+Group and parked records are mutated through `CasebookStorage.update_json`,
+never load-then-save. Both are read-modify-write on a counter, and the DLT
+analysis role is meant to scale out -- a `filelock` under
+`LOCAL_CHECKPOINTS_DIR` coordinates processes on a shared filesystem and does
+nothing at all for two pods on different nodes, which is precisely the
+deployment it was written for. `update_json` puts the atomicity in the backend
+that can actually provide it: a held lock locally, a conditional write on S3.
+
 `eventId` is constrained by a Pydantic pattern (`^[A-Za-z0-9_.:-]{1,128}$`) before
 it is ever interpolated into a path, and `LocalFilesystemCasebookStorage`
 independently refuses to resolve a directory outside its storage root as
-defense in depth. Only `save()` creates a casebook directory as a side
+defense in depth. The DLT `case_id` and a parked entry's key carry the same
+guard. Only `save()` creates a casebook directory as a side
 effect -- `load()`/`exists()` are read-only and never create one, so probing
 for an event that doesn't exist (or was skipped) doesn't leave an empty
 directory behind.
@@ -926,6 +984,16 @@ as a completed fetch, never re-attempted.
 `fast_consumer.py`, `slow_consumer.py`); no special per-child environment is
 needed since each consumer sets its own `CONSUMER_ROLE`. See section 4.
 
+**The DLT lane repeats this split, not the code.** `dlt_consumer.py` and
+`dlt_analysis_consumer.py` are two more entry points over the same
+`kafkaConsumer.py` engine (`CONSUMER_ROLE=dlt` / `dlt_analysis`), feeding
+`POST /fetch-dlt-logs` and `POST /analyze-dlt`. The same reasoning applies for
+the same reason -- bounded I/O must not queue behind a multi-minute LLM call --
+and the DLT analysis route gets its own bounded executor
+(`MAX_CONCURRENT_DLT_ANALYSES`), a *sibling* of the rejection lane's rather
+than the same pool, so a DLT backlog cannot starve the rejection lane or vice
+versa. Section 4.4 covers what actually runs in each.
+
 ---
 
 ## 4. How to Run Locally
@@ -1022,9 +1090,22 @@ python3 -m src.tools.release_parked_replays --dry-run   # release what a deploy 
 A **parallel flow** to the rejection pipeline, specified in full in
 `DLT_PLAN.md`. It consumes a Spring `@RetryableTopic` dead-letter topic,
 fingerprints the failure from its stack trace, checks that trace against the
-service's own pod logs, and writes an advisory casebook. **It does not
-remediate**, with one narrow, opt-in exception (point 8 below) -- otherwise no
-replay, no redrive, no writes to any upstream system.
+service's own pod logs, and writes an advisory casebook.
+
+Two of the plan's original non-goals now have a narrow, opt-in exception, and
+both are off by default:
+
+- **"No remediation"** -- `auto_replay.py` may call `queue_for_replay` on a
+  high-confidence redrive finding (point 8 below).
+- **"No source-code analysis"** -- the replay precheck reads `release` in
+  Bitbucket to answer whether the code at the failure site changed and whether
+  that change is running (point 9, and section 4.4.1 in full). It is
+  **read-only**, and it produces a *deployment* verdict, never a diagnosis: no
+  source is read into an LLM prompt, and nothing in it explains why a bug
+  happened.
+
+Everything else still holds -- no writes to any upstream system beyond that one
+replay call, and no database access.
 
 It shares this system's log pipeline, storage abstraction, consumer
 scaffolding and confidence policy. It shares neither `MessagePayload`, the
@@ -1033,9 +1114,14 @@ rejection casebook schema, `rules.csv`, nor the runbook key space.
 ```
 dlt_consumer.py  -> POST /fetch-dlt-logs  -> dlt-analysis-queue
                  -> dlt_analysis_consumer.py -> POST /analyze-dlt -> casebook
+
+  fetch-dlt-logs:  parse headers -> classify -> fingerprint -> persist evidence
+                   -> fetch pod logs -> capture running version -> queue
+  analyze-dlt:     corroborate -> group/reuse -> finding -> CODE CHECK
+                   -> replay gate -> park -> casebook
 ```
 
-Eight things are worth knowing without reading the whole plan:
+Ten things are worth knowing without reading the whole plan:
 
 1. **The root cause is the last `Caused by:`, never the headers.**
    `kafka_exception-cause-fqcn` carries a Spring/JDK wrapper that is identical
@@ -1096,6 +1182,19 @@ Eight things are worth knowing without reading the whole plan:
    `ENABLE_AUTO_REPLAY` switch still governs what happens once called:
    straight to OIS, or queued for human approval via `approve_replays.py`.
 
+9. **The DLT casebook has its own schema version**, currently `"1.1"`
+   (`DLT_CASEBOOK_SCHEMA_VERSION`), independent of the rejection casebook's --
+   different schema, different lifecycle. `1.0` -> `1.1` added the
+   `code_check` and `parked` blocks.
+
+10. **The replay precheck answers deployment, never relevance.** Before a
+   packet is replayed, `code_check.py` asks whether the code at the failure
+   site changed since it failed, and whether that change is running. "This
+   commit is running" is not "this commit fixes your bug" -- relevance comes
+   only from the frame-to-file mapping, so the casebook keeps `code_check`
+   separate from `finding` and a reader can disagree with either. Section
+   4.4.1 has the whole thing.
+
 Operator entry points:
 
 ```bash
@@ -1106,46 +1205,117 @@ python -m src.tools.parse_reason_codes        # regenerate reason_codes.csv
 
 ### 4.4.1 Replay precheck (DLT_PLAN.md section 14, phases C0-C8)
 
-Before a dead-lettered packet is replayed, decide whether the code running in
-the pods can actually handle it. The join key is the **version number**: ~95%
-of changes bump it in `pom.xml`, the image tag carries the same value, and the
-pod's image tag is readable from Kubernetes -- which removes any need for
-Gitea, ArgoCD, Harbor digests or a Jenkins change.
+`auto_replay.decide()` used to gate a replay on the finding alone -- action,
+confidence, refId. Nothing in that decision knew whether the bug had been
+fixed last Tuesday, or whether the fix had reached the pods. So a replay was a
+guess, and a packet whose fix had not shipped simply dead-lettered again.
+
+**The version number is the join key.** ~95% of changes bump it in `pom.xml`
+(or the service's equivalent), the image tag carries the same value, and the
+pod's image tag is readable from Kubernetes. That chain is what removes the
+need for a git SHA, and with it Gitea, ArgoCD, Harbor digests and any change
+to the Jenkins pipeline.
+
+**Gitea is deliberately not used.** It holds the *desired* state. A replay
+executes against whatever the pods are running now, so a manifest updated but
+not yet synced by ArgoCD would report a version that is not running --
+precisely the wrong answer. The pod's image tag is the only authority, and it
+doubles as the sync signal: if the pod is on the new version, it synced.
 
 ```
-fast lane      ... fetch logs -> capture running version  (deployed.json)
-analysis lane  ... corroborate -> group -> finding -> CODE CHECK -> replay gate
-offline        release_parked_replays -> queue_for_replay -> pending_replays
+fast lane     parse -> classify -> fingerprint -> persist -> fetch logs
+                    -> capture running version            (deployed.json)
+
+analysis lane corroborate -> group/reuse -> finding
+                    -> CODE CHECK -> replay gate -> park  (casebook)
+
+offline       release_parked_replays -> queue_for_replay -> pending_replays
 ```
 
-Four verdicts, written into every casebook's `code_check` block:
+Four verdicts, written into every casebook's `code_check` block -- always
+present, and `UNKNOWN` when the feature is off, so "we did not look" and "we
+looked and found nothing" never read alike:
 
-| Verdict | Meaning | Consequence (C6 on) |
+| Verdict | Condition | Consequence, with C6 on |
 |---|---|---|
-| `NO_CHANGE` | Nothing on `release` has touched the failure site since the packet failed | Replay withheld -- it would reproduce the dead letter |
-| `NOT_DEPLOYED` | A change exists; the version carrying it is not running | Replay withheld and the packet **parked** until the pods reach that version |
-| `FIX_DEPLOYED` | The version carrying the change is running | No effect -- the verdict is a veto only |
-| `UNKNOWN` | Nothing could be established | No effect, ever |
+| `NO_CHANGE` | Nothing on `release` has touched the failure site since the packet failed | Replay withheld -- it would reproduce the same dead letter |
+| `NOT_DEPLOYED` | A change exists; the version carrying it is not running | Replay withheld, and the packet **parked** until the pods reach that version |
+| `FIX_DEPLOYED` | The running build is at or beyond the version carrying the change | No effect -- the verdict is a veto only |
+| `UNKNOWN` | Frame unmappable, repo unreachable, version unparseable, no baseline | No effect, ever |
 
-Modules: `src/dlt/deployed.py` (C1, running version), `versions.py` (C3,
-ordering), `bitbucket.py` (C4, read-only source access), `code_check.py` (C5,
-the verdict), `parked.py` (C7, the waiting queue). The veto lives in
-`auto_replay.decide`.
+`NOT_DEPLOYED` is the operative one: it turns "replay and see" into "replay
+after the next deploy", which is a scheduling decision the system makes and
+acts on by itself.
 
-**Two flags, deliberately not one.** `DLT_CODE_CHECK_ENABLED` records a
-verdict and changes nothing; `DLT_CODE_CHECK_GATES_REPLAY` lets the verdict
-withhold a replay. Run the first alone until
-`dlt_report --code-check-accuracy` shows the verdicts are right.
+**The modules.**
+
+| Phase | Module | Job |
+|---|---|---|
+| C1 | `dlt/deployed.py` | Reads `status.container_statuses[].image` off the service's pods. Sidecars excluded via `K8S_SIDECAR_DENYLIST`. Reports the *set* of versions and refuses to name a winner mid-rollout. |
+| C2 | `dlt/stacktrace.py` | `FrameLocation` keeps the file and line the parser already captured and discarded -- beside the fingerprint, never inside it. |
+| C3 | `dlt/versions.py` | Parses and orders `1.0.0-release.42`, `1.0.1-SNAPSHOT`, `1.0.0`. Unparseable means `None`, and `None` propagates through every comparison. |
+| C4 | `dlt/bitbucket.py` | Read-only, both API flavours. Four calls: commits touching a path, a commit's changed paths, a file at a ref, a repository listing. |
+| C5 | `dlt/code_check.py` | Composes the above into the verdict. |
+| C6 | `dlt/auto_replay.py` | The veto, in `decide()`, placed last. |
+| C7 | `dlt/parked.py` + `tools/release_parked_replays.py` | The waiting queue, and what comes back for it. |
+| C8 | `tools/dlt_report.py` | `--parked`, `--code-check`, `--code-check-accuracy`. |
+
+**Three asymmetries, all pointing the same way.** A wrong `FIX_DEPLOYED`
+causes a replay that fails again; a wrong `NOT_DEPLOYED` only delays one. So
+the *highest* candidate version is required (several commits touched the site
+and we cannot tell which is the fix), the *lowest* running version is compared
+(a replay may land on any pod mid-rollout), and a positive verdict needs a
+recorded baseline while a negative one does not.
+
+**`None` and `[]` mean different things**, and the difference decides a
+replay. `[]` from `bitbucket.commits_touching` is "the server answered, and
+nothing has touched this file", which becomes `NO_CHANGE` and a withheld
+replay. `None` is "we could not look", which becomes `UNKNOWN`. Collapsing
+them would let a Bitbucket outage read as "the code definitely has not
+changed" and stop every replay in the system on no evidence at all -- the same
+distinction `FetchResult.ok` and `Corroboration.could_not_look` already make
+in the log lane.
+
+**Six traps** are documented in DLT_PLAN.md 14.4, numbered T5-T10 to continue
+that document's existing series. The two most likely to bite a future editor:
+a Maven pom declares `<parent><version>` *before* its own, so the first
+`<version>` tag is the parent's (T5); and `"1.0.10" < "1.0.9"` is true as
+strings and wrong as versions, which is why `versions.py` is its own module
+with a brute-forced total-order test (T7).
+
+**Three flags, and none of them is the same switch.**
+
+| Flag | Default | What it decides |
+|---|---|---|
+| `DLT_CODE_CHECK_ENABLED` | `false` | Whether the lookup happens and a verdict is recorded. Changes no behaviour. |
+| `DLT_CODE_CHECK_GATES_REPLAY` | `false` | Whether the verdict may withhold a replay. |
+| `DLT_CODE_CHECK_PARK_ENABLED` | `false` | Whether a withheld `NOT_DEPLOYED` packet is parked for later. |
+
+Run the first alone until `dlt_report --code-check-accuracy` shows the
+verdicts are right. That report joins each verdict to whether the packet
+dead-lettered **again** after its replay -- the only outcome this system can
+observe by itself, and the reason it is worth running *before* the gate goes
+on, while replays still fire regardless of the verdict.
+
+Parking cannot become a second replay path: a packet parks only when
+`auto_replay.decide` would have said yes *without* the veto, so with
+`DLT_AUTO_REPLAY_ENABLED` off nothing parks. And releasing still calls
+`queue_for_replay`, so `ENABLE_AUTO_REPLAY` still decides whether the packet
+reaches OIS or lands in `pending_replays` for a human.
 
 **Status.** Phases C0-C8 are implemented and unit-tested against fixtures.
-**C0 has never been run against a real Bitbucket or cluster**, so section
-14.3's five findings are all open -- `BITBUCKET_BASE_URL` left empty keeps the
-whole extension inert, and every verdict reads `UNKNOWN`.
+**C0 has never been run against a real Bitbucket or cluster**, so DLT_PLAN.md
+14.3's five findings are all open and C4 should not merge to `main` until they
+are filled in. `BITBUCKET_BASE_URL` left empty keeps the whole extension
+inert and every verdict reads `UNKNOWN`. C1 is the exception worth keeping
+regardless: it closes DLT_PLAN.md Open Question 3 and mitigates Risk R4 on its
+own, and it is deliberately not behind a feature flag.
 
-**Status.** Phases 1-9 are implemented and unit-tested against fixtures; Phase 0
--- the corpus capture and its measurements -- has never been run against a real
-broker or cluster. Whether `enu-biometric` pod log lines actually carry `refId`
-remains a hard gate on the log lane being useful at all.
+**Status (the DLT lane as a whole).** Phases 1-9 are implemented and
+unit-tested against fixtures; Phase 0 -- the corpus capture and its
+measurements -- has never been run against a real broker or cluster. Whether
+`enu-biometric` pod log lines actually carry `refId` remains a hard gate on
+the log lane being useful at all.
 
 ---
 
@@ -1153,6 +1323,29 @@ remains a hard gate on the log lane being useful at all.
 
 This section records where the running code diverges from the design intent above.
 It is maintained deliberately so the document stays a truthful source of truth.
+
+**Update 2026-09-01:** The DLT lane gained a **replay precheck** (section
+4.4.1; `DLT_PLAN.md` section 14, phases C0-C8). It decides, before a packet is
+replayed, whether the code running in the pods can handle it, by joining the
+stack trace to `release` in Bitbucket through the version number. Read-only,
+three flags, all defaulting off.
+
+Open items, in the order they should be closed:
+
+| # | Item | Why it matters |
+|---|------|----------------|
+| 1 | **C0 has never been run.** `DLT_PLAN.md` 14.3's five findings are all `*pending*` | `src/dlt/bitbucket.py` should not merge to `main` until they are filled in: its API flavour, path resolution and version-file handling all depend on the answers. Run `python -m src.tools.code_check_probe --all --repo <PROJECT>/<REPO>`. |
+| 2 | **Does the replay even land on this service?** (`DLT_PLAN.md` 14.5 Q3) | `queue_for_replay` posts to OIS, which re-drives the packet from a stage this system does not choose. If it re-enters *upstream* of the failing service, the running version that matters belongs to a different service than the pods `deployed.py` reads -- which would invalidate the comparison rather than merely weaken it. **Settle this before enabling `DLT_CODE_CHECK_GATES_REPLAY`.** |
+| 3 | **The verdicts have not been validated against reality** | `dlt_report --code-check-accuracy` exists precisely to produce that evidence, and it needs replays that actually fired. Run C5 alone (`DLT_CODE_CHECK_ENABLED=true`, gate off) for at least two weeks first. |
+| 4 | **Is the 5% uniform?** (Trap T9) | A fix merged with no version bump yields a false `FIX_DEPLOYED`. Mitigated by requiring the version to be *strictly ahead*, but if one team never bumps versions the error rate for their repos is 100%, not 5%. C0's Q4 sample must be stratified by repo, not pooled. |
+| 5 | **One service per release worker** | `release_parked_replays.py` reads one app's version. A parked entry records its repository but nothing maps that back to a Kubernetes app, so a deployment with several DLT-producing services must run it once per app. |
+
+Deferred deliberately: letting `FIX_DEPLOYED` *enable* a replay the existing
+gate declined. That is what would finally make **Class B** replayable -- the
+NPEs and cast failures that today get a canned `NEEDS_MANUAL_REVIEW` and never
+replay at all -- and it is the one change that lets this feature *cause*
+replays rather than only withhold them. `DLT_PLAN.md` section 14 lists its
+preconditions, including at least 30 hand-checked `FIX_DEPLOYED` verdicts.
 
 **Update 2026-08-20:** DLT gained an opt-in auto-replay path
 (`src/dlt/auto_replay.py`, section 4.4 point 8; `DLT_AUTO_REPLAY_ENABLED`,
