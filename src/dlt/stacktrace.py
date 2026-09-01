@@ -111,6 +111,58 @@ def fingerprint_frame_count() -> int:
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
+class FrameLocation:
+    """Where one application frame sits in the source (phase C2).
+
+    Kept beside the fingerprint's frame list, never inside it. `BioDeDup-
+    licationServiceImpl` is a 4,000-line class whose line numbers shift on
+    every release, so a line number in the fingerprint would fragment a group
+    that should be stable (9.3, Risk R3). A line number is nonetheless exactly
+    what a source lookup wants, hence two projections of one parse.
+    """
+
+    #: The full frame target, e.g. `com.foo.BarService.doWork`.
+    target: str
+    #: `BarService.java`, or None for `Native Method` / `Unknown Source`.
+    file: Optional[str] = None
+    #: None when the trace was written without one, or the frame is native.
+    line: Optional[int] = None
+
+    @property
+    def class_fqcn(self) -> str:
+        """The declaring class, inner-class marker included."""
+        return self.target.rsplit(".", 1)[0] if "." in self.target else self.target
+
+    @property
+    def package(self) -> str:
+        outer = self.class_fqcn.split("$", 1)[0]
+        return outer.rsplit(".", 1)[0] if "." in outer else ""
+
+    @property
+    def source_path_suffix(self) -> str:
+        """`com/foo/BarService.java` -- the tail of the repository path.
+
+        Built from the package plus the *file name the JVM reported*, not from
+        the class name, because those differ for an inner class: a frame in
+        `com.foo.Outer$Inner.run` reports `Outer.java`, which is the file that
+        actually exists. Falls back to the outer class name when the trace
+        carried no file (a native or synthetic frame).
+        """
+        name = self.file
+        if not name or not name.endswith(".java"):
+            outer = self.class_fqcn.split("$", 1)[0]
+            simple = outer.rsplit(".", 1)[-1] if "." in outer else outer
+            if not simple:
+                return ""
+            name = f"{simple}.java"
+        package = self.package
+        return f"{package.replace('.', '/')}/{name}" if package else name
+
+    def as_dict(self) -> dict:
+        return {"target": self.target, "file": self.file, "line": self.line}
+
+
+@dataclass(frozen=True)
 class ExceptionLink:
     """One `Caused by:` level."""
 
@@ -120,6 +172,10 @@ class ExceptionLink:
     frames: tuple
     #: The `... N more` count, when the link ends with one.
     elided: Optional[int] = None
+    #: Raw `(File.java:42)` text per frame, index-parallel with `frames`. A
+    #: frame written without a location holds None, so the two tuples stay
+    #: aligned rather than silently shifting.
+    locations: tuple = ()
 
     @property
     def simple_name(self) -> str:
@@ -144,6 +200,12 @@ class ParsedTrace:
         return root.frames if root else ()
 
     @property
+    def root_locations(self) -> tuple:
+        """Index-parallel with `root_frames`. Phase C2."""
+        root = self.root
+        return root.locations if root else ()
+
+    @property
     def depth(self) -> int:
         return len(self.chain)
 
@@ -165,6 +227,7 @@ def _parse_link(block: str) -> ExceptionLink:
     """
     header_lines = []
     frames = []
+    locations = []
     elided = None
     in_frames = False
 
@@ -173,6 +236,11 @@ def _parse_link(block: str) -> ExceptionLink:
         if frame_match:
             in_frames = True
             frames.append(_strip_module(frame_match.group("target")))
+            # Kept index-parallel with `frames`. The location group is
+            # optional, so a frame written without one appends None rather
+            # than nothing -- otherwise the two lists drift apart and every
+            # location after the first bare frame refers to the wrong frame.
+            locations.append(frame_match.group("location"))
             continue
 
         elided_match = _ELIDED_RE.match(line)
@@ -196,7 +264,8 @@ def _parse_link(block: str) -> ExceptionLink:
             fqcn, message = header, ""
 
     return ExceptionLink(fqcn=fqcn, message=message,
-                         frames=tuple(frames), elided=elided)
+                         frames=tuple(frames), elided=elided,
+                         locations=tuple(locations))
 
 
 def parse_stacktrace(text: Optional[str]) -> ParsedTrace:
@@ -243,15 +312,66 @@ def normalise_frames(frames: Sequence,
     (DLT_PLAN.md 9.3, an accepted tradeoff: two distinct bugs in one method
     will merge).
     """
+    prefixes, noise = _filters(packages, boilerplate)
+    return tuple(frame for frame in frames if _is_app_frame(frame, prefixes, noise))
+
+
+def _filters(packages: Optional[Sequence],
+             boilerplate: Optional[Sequence]) -> tuple:
     prefixes = tuple(packages) if packages else app_packages()
     noise = tuple(boilerplate) if boilerplate is not None else boilerplate_frames()
-    return tuple(
-        frame for frame in frames
-        if frame
+    return prefixes, noise
+
+
+def _is_app_frame(frame: Optional[str], prefixes: tuple, noise: tuple) -> bool:
+    """The single keep/drop rule. Shared so the frame list the fingerprint is
+    built from and the location list a source lookup uses can never disagree
+    about which frames are ours."""
+    return bool(
+        frame
         and frame.startswith(prefixes)
         and not is_synthetic(frame)
         and not (noise and frame.startswith(noise))
     )
+
+
+def split_location(text: Optional[str]) -> tuple:
+    """`BarService.java:42` -> `("BarService.java", 42)`.
+
+    `Native Method`, `Unknown Source` and a bare file name all yield a None
+    line rather than a guess. A non-numeric suffix is kept as part of the file
+    name, since inventing a line number is worse than having none.
+    """
+    if not text:
+        return None, None
+    value = text.strip()
+    if not value:
+        return None, None
+    name, separator, tail = value.rpartition(":")
+    if separator and tail.isdigit():
+        return (name or None), int(tail)
+    return value, None
+
+
+def normalise_frame_locations(frames: Sequence,
+                              locations: Sequence,
+                              packages: Optional[Sequence] = None,
+                              boilerplate: Optional[Sequence] = None) -> tuple:
+    """`FrameLocation` per application frame, in the same order and under the
+    same filter as `normalise_frames` (phase C2).
+
+    The result is index-parallel with `normalise_frames(frames)`, so
+    `locations[0]` describes the failure site that `build_signature` names.
+    """
+    prefixes, noise = _filters(packages, boilerplate)
+    kept = []
+    for index, frame in enumerate(frames):
+        if not _is_app_frame(frame, prefixes, noise):
+            continue
+        raw = locations[index] if index < len(locations) else None
+        file_name, line = split_location(raw)
+        kept.append(FrameLocation(target=frame, file=file_name, line=line))
+    return tuple(kept)
 
 
 def compute_fingerprint(root_fqcn: Optional[str],

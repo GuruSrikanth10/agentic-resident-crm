@@ -65,6 +65,13 @@ def _blank(fingerprint: str) -> dict:
         "recommendation": None,
         "recommendation_state": STATE_NONE,
         "corroboration_history": {},
+        # The most recent code-check verdict for this failure mode (phase C5).
+        # A record, not a cache: cost control lives in `bitbucket.py`, whose
+        # reads are already keyed on things that repeat within a group. This
+        # is what `dlt_report --code-check` reads and what the accuracy loop
+        # joins against, so it must reflect the last verdict, not the first.
+        "code_check": None,
+        "code_check_history": {},
     }
 
 
@@ -138,6 +145,27 @@ def attach_recommendation(fingerprint: str, recommendation: dict,
         group = dict(current or _blank(fingerprint))
         group["recommendation"] = recommendation
         group["recommendation_state"] = state
+        return group
+
+    return get_group_storage().update_json(fingerprint, "group.json", mutate)
+
+
+def attach_code_check(fingerprint: str, record: dict) -> dict:
+    """Record this group's latest code-check verdict, and count the verdicts
+    it has seen. Phase C5.
+
+    Goes through `update_json` like the other two mutators. A plain
+    load-then-save would lose increments exactly as `record_occurrence` used
+    to, and the DLT analysis role is meant to scale out.
+    """
+    def mutate(current: Optional[dict]) -> dict:
+        group = dict(current or _blank(fingerprint))
+        group["code_check"] = record
+        verdict = (record or {}).get("verdict")
+        if verdict:
+            history = dict(group.get("code_check_history") or {})
+            history[verdict] = int(history.get(verdict, 0)) + 1
+            group["code_check_history"] = history
         return group
 
     return get_group_storage().update_json(fingerprint, "group.json", mutate)

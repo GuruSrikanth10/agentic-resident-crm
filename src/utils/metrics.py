@@ -189,6 +189,22 @@ DLT_AUTO_REPLAY = _counter(
     ("outcome",),
 )
 
+DLT_CODE_CHECK = _counter(
+    "agentic_resident_crm_dlt_code_check_total",
+    "Replay-precheck verdicts: NO_CHANGE, NOT_DEPLOYED, FIX_DEPLOYED or "
+    "UNKNOWN. The UNKNOWN share is the feature's real coverage number "
+    "(DLT_PLAN.md 14, phase C5).",
+    ("verdict",),
+)
+
+DLT_DEPLOYED_VERSION_READS = _counter(
+    "agentic_resident_crm_dlt_deployed_version_reads_total",
+    "Readings of the running image version: ok, mixed (rolling deploy), or "
+    "failed. A sustained `failed` rate means every code-check verdict is "
+    "UNKNOWN (DLT_PLAN.md 14, phase C1).",
+    ("outcome",),
+)
+
 
 def record_dlt_case(failure_class: str) -> None:
     if DLT_CASES is not None:
@@ -220,6 +236,19 @@ def record_dlt_auto_replay(outcome: str) -> None:
         DLT_AUTO_REPLAY.labels(outcome=outcome).inc()
 
 
+def record_dlt_code_check(verdict: str) -> None:
+    if DLT_CODE_CHECK is not None:
+        DLT_CODE_CHECK.labels(verdict=verdict).inc()
+
+
+def record_dlt_deployed_version_read(ok: bool, mixed: bool = False) -> None:
+    """`mixed` is reported separately from `ok`: pods disagreeing about what
+    is running is a real state an operator wants to see, not a failure."""
+    if DLT_DEPLOYED_VERSION_READS is not None:
+        outcome = "failed" if not ok else ("mixed" if mixed else "ok")
+        DLT_DEPLOYED_VERSION_READS.labels(outcome=outcome).inc()
+
+
 BREAKER_STATE = _gauge(
     "agentic_resident_crm_breaker_state",
     "Circuit breaker state: 0 closed, 1 half-open, 2 open.",
@@ -239,7 +268,8 @@ def sample_breaker_states() -> None:
     try:
         from src.utils import resilience
 
-        for name in ("db_breaker", "es_breaker", "llm_breaker", "k8s_breaker"):
+        for name in ("db_breaker", "es_breaker", "llm_breaker", "k8s_breaker",
+                     "bitbucket_breaker"):
             breaker = getattr(resilience, name, None)
             if breaker is None:
                 continue

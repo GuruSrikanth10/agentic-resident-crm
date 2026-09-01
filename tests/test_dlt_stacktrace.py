@@ -389,3 +389,146 @@ def test_garbage_input_does_not_raise():
 
 def test_fingerprint_of_an_empty_trace_does_not_raise():
     assert len(S.compute_fingerprint(None, (), "")) == 64
+
+
+# ======================================================================
+# Phase C2 -- frame locations, kept beside the fingerprint and out of it
+# ======================================================================
+
+#: The reference sample's fingerprint, computed before C2 existed. C2 adds a
+#: line number to the failure record for the first time; if one ever reaches
+#: `compute_fingerprint`, every group in the store fragments and every cached
+#: recommendation is orphaned. That is Risk R3, realised in one line of code,
+#: and this literal is the guard against it.
+REFERENCE_FINGERPRINT = "2bc62d82761a7f19593aea92c2eef08e51bf481bef517aa8883eef61b51ee57b"
+
+
+def test_the_reference_fingerprint_is_unchanged_by_c2(headers):
+    """Byte-identical to its pre-C2 value. Do not update this literal to make
+    a failing test pass -- a change here means live groups just fragmented."""
+    parsed = S.parse_stacktrace(headers.stacktrace)
+    frames = S.normalise_frames(parsed.root_frames)
+
+    assert S.compute_fingerprint(parsed.root.fqcn, frames,
+                                 "UID_ORIGIN_TRACKER_DATA_NOT_FOUND") == REFERENCE_FINGERPRINT
+
+
+def test_locations_are_parsed_from_the_reference_trace(headers):
+    parsed = S.parse_stacktrace(headers.stacktrace)
+    locations = S.normalise_frame_locations(parsed.root_frames, parsed.root_locations)
+
+    top = locations[0]
+    assert top.target.endswith("BioDataBaseHelperServiceImpl.getUidOriginTrackerData")
+    assert top.file == "BioDataBaseHelperServiceImpl.java"
+    assert top.line == 257
+
+    assert locations[1].file == "BioDeDuplicationServiceImpl.java"
+    assert locations[1].line == 4067
+
+
+def test_locations_are_index_parallel_with_the_normalised_frames(headers):
+    """`locations[0]` must describe the frame `build_signature` names."""
+    parsed = S.parse_stacktrace(headers.stacktrace)
+    frames = S.normalise_frames(parsed.root_frames)
+    locations = S.normalise_frame_locations(parsed.root_frames, parsed.root_locations)
+
+    assert len(frames) == len(locations)
+    assert [location.target for location in locations] == list(frames)
+
+
+def test_the_boilerplate_filter_applies_to_locations_too(headers):
+    """CommonErrorFactory is dropped from frames; it must not survive here."""
+    parsed = S.parse_stacktrace(headers.stacktrace)
+    locations = S.normalise_frame_locations(parsed.root_frames, parsed.root_locations)
+
+    assert not any("CommonErrorFactory" in location.target for location in locations)
+
+
+# -- alignment ---------------------------------------------------------------
+
+def test_a_frame_without_a_location_keeps_its_place(headers):
+    """A bare frame must hold a None slot, not be skipped.
+
+    Skipping it would shift every location after it onto the wrong frame --
+    silently, and only for traces that mix the two forms.
+    """
+    trace = (
+        "java.lang.IllegalStateException: boom\n"
+        "\tat com.uidai.enu.biometric.A.first\n"
+        "\tat com.uidai.enu.biometric.B.second(B.java:42)\n"
+    )
+    locations = S.normalise_frame_locations(*_root_of(trace))
+
+    assert [location.target.rsplit(".", 1)[-1] for location in locations] == ["first", "second"]
+    assert locations[0].file is None and locations[0].line is None
+    assert locations[1].file == "B.java" and locations[1].line == 42
+
+
+def _root_of(text):
+    parsed = S.parse_stacktrace(text)
+    return parsed.root_frames, parsed.root_locations
+
+
+@pytest.mark.parametrize("location,expected", [
+    ("Foo.java:42", ("Foo.java", 42)),
+    ("Foo.java", ("Foo.java", None)),
+    ("Native Method", ("Native Method", None)),
+    ("Unknown Source", ("Unknown Source", None)),
+    ("", (None, None)),
+    (None, (None, None)),
+])
+def test_a_location_string_splits_into_file_and_line(location, expected):
+    assert S.split_location(location) == expected
+
+
+def test_a_non_numeric_suffix_is_not_read_as_a_line_number():
+    """Inventing a line number is worse than reporting none."""
+    assert S.split_location("Foo.java:abc") == ("Foo.java:abc", None)
+
+
+# -- source paths ------------------------------------------------------------
+
+def test_a_frame_maps_to_its_repository_path_suffix():
+    location = S.FrameLocation(
+        target="com.uidai.enu.biometric.service.impl.BioDeDuplicationServiceImpl.prepare",
+        file="BioDeDuplicationServiceImpl.java", line=4016)
+
+    assert location.package == "com.uidai.enu.biometric.service.impl"
+    assert location.source_path_suffix == (
+        "com/uidai/enu/biometric/service/impl/BioDeDuplicationServiceImpl.java")
+
+
+def test_an_inner_class_maps_to_the_outer_file_the_jvm_reported():
+    """`com.foo.Outer$Inner.run` lives in Outer.java -- the file that exists.
+
+    Deriving the name from the class instead would ask the repository for
+    `Outer$Inner.java`, which never exists.
+    """
+    location = S.FrameLocation(target="com.uidai.enu.biometric.Outer$Inner.run",
+                               file="Outer.java", line=12)
+
+    assert location.class_fqcn == "com.uidai.enu.biometric.Outer$Inner"
+    assert location.source_path_suffix == "com/uidai/enu/biometric/Outer.java"
+
+
+def test_a_frame_with_no_file_falls_back_to_the_outer_class_name():
+    location = S.FrameLocation(target="com.uidai.enu.biometric.Outer$Inner.run")
+
+    assert location.source_path_suffix == "com/uidai/enu/biometric/Outer.java"
+
+
+def test_a_lambda_frame_resolves_to_its_declaring_class():
+    location = S.FrameLocation(
+        target="com.uidai.enu.biometric.messagingQueue.consumer."
+               "AbstractBaseConsumer.lambda$executeConsumption$0",
+        file="AbstractBaseConsumer.java", line=29)
+
+    assert location.class_fqcn.endswith("AbstractBaseConsumer")
+    assert location.source_path_suffix.endswith(
+        "com/uidai/enu/biometric/messagingQueue/consumer/AbstractBaseConsumer.java")
+
+
+def test_a_location_serialises_to_json_safe_primitives():
+    location = S.FrameLocation(target="com.uidai.A.b", file="A.java", line=7)
+
+    assert location.as_dict() == {"target": "com.uidai.A.b", "file": "A.java", "line": 7}

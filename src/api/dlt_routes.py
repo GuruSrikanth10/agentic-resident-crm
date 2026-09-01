@@ -27,7 +27,17 @@ from typing import Optional
 from fastapi import APIRouter, Depends
 
 from src.api.routes import _off_loop, get_api_key, rate_limiter, register_executor
-from src.dlt import auto_replay, canned, groups, orchestrator, registry, reuse
+from src.dlt import (
+    auto_replay,
+    canned,
+    code_check,
+    deployed,
+    groups,
+    orchestrator,
+    parked,
+    registry,
+    reuse,
+)
 from src.dlt.case_storage import get_dlt_storage
 from src.dlt.corroborate import corroborate
 from src.dlt.classify import classify
@@ -35,6 +45,7 @@ from src.dlt.headers import parse_headers
 from src.dlt.stacktrace import (
     build_signature,
     compute_fingerprint,
+    normalise_frame_locations,
     normalise_frames,
     parse_stacktrace,
 )
@@ -121,10 +132,12 @@ TRACE_ARTIFACT = "trace.txt"
 PARSED_TRACE_ARTIFACT = "parsed_trace.json"
 PAYLOAD_SUMMARY_ARTIFACT = "payload_summary.txt"
 FETCHED_LOGS_ARTIFACT = "fetched_logs.txt"
+DEPLOYED_ARTIFACT = "deployed.json"
 
 #: Bumped when the DLT casebook shape changes. Independent of the rejection
 #: casebook's CASEBOOK_SCHEMA_VERSION -- different schema, different lifecycle.
-DLT_CASEBOOK_SCHEMA_VERSION = "1.0"
+# 1.1 adds the `code_check` block (DLT_PLAN.md 14, phase C5).
+DLT_CASEBOOK_SCHEMA_VERSION = "1.1"
 
 
 def build_failure(headers, exception_message: Optional[str]) -> dict:
@@ -140,6 +153,9 @@ def build_failure(headers, exception_message: Optional[str]) -> dict:
     # The lookup is cached on the catalog's mtime, so this costs one `stat`.
     result = classify(trace, exception_message, code_class=registry.class_for)
     frames = normalise_frames(trace.root_frames)
+    # Index-parallel with `frames`, under the same filter -- but deliberately
+    # NOT an input to the fingerprint. See FrameLocation and Risk R3.
+    locations = normalise_frame_locations(trace.root_frames, trace.root_locations)
     root_fqcn = trace.root.fqcn if trace.root else None
     code = result.business_code or ""
     entry = registry.lookup_entry(result.business_code)
@@ -160,6 +176,10 @@ def build_failure(headers, exception_message: Optional[str]) -> dict:
         "fingerprint": compute_fingerprint(root_fqcn, frames, code),
         "signature": build_signature(root_fqcn, frames, code),
         "frames": list(frames),
+        # Parallel to `frames`, carrying the file and line the fingerprint
+        # must not see. A source lookup (phase C4) reads these; nothing else
+        # in the DLT lane does.
+        "locations": [location.as_dict() for location in locations],
         "truncated": trace.truncated,
         "chain": [
             {"fqcn": link.fqcn, "message": link.message, "frames": list(link.frames)}
@@ -283,6 +303,21 @@ def fetch_dlt_logs(message: DltMessage):
             storage.save_artifact(case_id, FETCHED_LOGS_ARTIFACT,
                                   f"Log fetch failed: {type(e).__name__}: {e}")
 
+    # Which build was running when this packet failed. Recorded here, in the
+    # fast lane, because it is an observation about *this moment* -- by the
+    # time the analysis lane runs, or a parked replay is reconsidered days
+    # later, the pods may be on something else entirely (DLT_PLAN.md 14, C1).
+    #
+    # Never gated on a feature flag: it answers Open Question 3 and mitigates
+    # Risk R4 on its own, independently of the code check that consumes it.
+    baseline = deployed.running_version()
+    metrics.record_dlt_deployed_version_read(baseline.ok, baseline.mixed)
+    if baseline.ok:
+        log.info("Recorded the running build for this case",
+                 versions=list(baseline.versions), mixed=baseline.mixed)
+    storage.save_artifact(case_id, DEPLOYED_ARTIFACT,
+                          json.dumps(baseline.as_dict(), indent=2, ensure_ascii=False))
+
     existing = storage.load(case_id, filename="status.json")
     existing_value = (existing or {}).get("packet_status", {}).get("status")
     if existing_value in (None, LOGS_FETCHED_STATUS):
@@ -295,22 +330,48 @@ def fetch_dlt_logs(message: DltMessage):
     queued = message.model_dump()
     queued["evidence_gaps"] = gaps
     queued["log_window"] = window.describe() if window else None
+    # Carried for visibility on the queue; the analysis lane reads the
+    # artifact rather than trusting this copy, on the same reasoning that
+    # makes it re-derive the failure from the headers.
+    queued["baseline_versions"] = list(baseline.versions)
     publish_to_dlt_analysis_queue(queued)
 
     log.info("Queued DLT case for analysis", state=LOGS_FETCHED_STATUS,
              failure_class=failure["failure_class"], gaps=gaps)
     return {"status": "queued_for_analysis", "case_id": case_id,
-            "failure_class": failure["failure_class"], "gaps": gaps}
+            "failure_class": failure["failure_class"], "gaps": gaps,
+            "baseline_versions": list(baseline.versions)}
 
 
 # ---------------------------------------------------------------------------
 # Phase 8 -- the analysis lane
 # ---------------------------------------------------------------------------
 
+def _recorded_baseline(storage, case_id: str) -> tuple:
+    """The versions the fast lane observed running when this packet failed.
+
+    Read back from `deployed.json` rather than trusted from the queue: this is
+    an observation about a moment that has passed, and by the time the
+    analysis lane runs the pods may be on something else. An absent or
+    unreadable artifact yields an empty tuple, which C5 reports as a missing
+    baseline rather than substituting today's version for it.
+    """
+    try:
+        raw = storage.load_artifact(case_id, DEPLOYED_ARTIFACT)
+        if not raw:
+            return ()
+        return tuple(json.loads(raw).get("versions") or ())
+    except Exception as e:
+        logger.warning("Could not read the recorded baseline version",
+                       case_id=case_id, error=f"{type(e).__name__}: {e}")
+        return ()
+
+
 def _casebook(message: DltMessage, headers, failure: dict, corroboration,
               finding, decision, group: Optional[dict], gaps: list,
               window_description: Optional[str], provenance_source: str,
-              replay: Optional[dict] = None) -> dict:
+              replay: Optional[dict] = None,
+              code_check_result=None, park: Optional[dict] = None) -> dict:
     """Assemble the terminal casebook. See DLT_PLAN.md 7.1."""
     return {
         "schema_version": DLT_CASEBOOK_SCHEMA_VERSION,
@@ -378,6 +439,15 @@ def _casebook(message: DltMessage, headers, failure: dict, corroboration,
             "group_occurrences": (group or {}).get("occurrence_count"),
             "recommendation_state": groups.STATE_DRAFT,
         },
+        # The replay precheck's verdict (DLT_PLAN.md 14). Always present, and
+        # always UNKNOWN when the feature is off -- "we did not look" and "we
+        # looked and found nothing" must not read alike here either.
+        #
+        # Kept separate from `finding` on purpose: this says whether the code
+        # at the failure site changed and whether that change is running. It
+        # does NOT say the change fixes this bug, and merging it into the
+        # narrative would blur a claim the evidence does not support.
+        "code_check": (code_check_result or code_check.CodeCheck()).as_dict(),
         # See src/dlt/auto_replay.py for the gate. `replay` is always present
         # once analysis has run -- "not attempted, and here is why" is exactly
         # as much a part of the casebook as "attempted, and here is what
@@ -386,6 +456,11 @@ def _casebook(message: DltMessage, headers, failure: dict, corroboration,
         "replay": replay or {"attempted": False,
                               "reason": "replay gate not evaluated",
                               "queued": False, "result": None},
+        # Present whether or not anything was parked, for the same reason
+        # `replay` is: "not parked, and here is why" is as much a part of the
+        # record as "parked, waiting for 1.0.1".
+        "parked": park or {"parked": False,
+                            "reason": "parking gate not evaluated"},
         "packet_status": {"status": _terminal_status(finding)},
     }
 
@@ -455,6 +530,26 @@ async def analyze_dlt(message: DltMessage):
                             corroboration.verdict.value, group)
     metrics.record_dlt_reuse(decision.decision.value)
 
+    # The replay precheck. Bounded I/O with no LLM, so it belongs beside
+    # corroboration rather than in the fast lane -- this is where the replay
+    # gate lives and where the group record it feeds is already loaded.
+    #
+    # `baseline` comes from the artifact rather than the queue message, for
+    # the same reason `build_failure` re-parses the trace: the artifact is
+    # what the fast lane actually observed, and a queue field can be dropped
+    # by a schema change without anyone noticing.
+    baseline_versions = await _off_loop(_recorded_baseline, storage, case_id)
+    running = await _off_loop(deployed.running_version)
+    code_check_result = await _off_loop(
+        code_check.evaluate, failure, headers.last_attempt_ms,
+        baseline_versions, running.versions)
+    metrics.record_dlt_code_check(code_check_result.verdict)
+    if code_check_result.verdict != code_check.UNKNOWN:
+        log.info("Replay precheck", verdict=code_check_result.verdict,
+                 reason=code_check_result.reason)
+        group = await _off_loop(groups.attach_code_check, fingerprint,
+                                code_check_result.as_dict())
+
     parse_error = None
     if decision.decision is reuse.Decision.CANNED:
         finding = canned.build(failure["failure_class"], failure, corroboration, group)
@@ -518,7 +613,7 @@ async def analyze_dlt(message: DltMessage):
     # May POST to the OIS replay endpoint or append to the pending queue --
     # network or filesystem either way.
     replay = await _off_loop(auto_replay.maybe_replay, case_id, message.ref_id,
-                             finding)
+                             finding, code_check_result)
     metrics.record_dlt_auto_replay(
         "queued" if replay["queued"] else
         "failed" if replay["attempted"] else "not_attempted")
@@ -526,10 +621,21 @@ async def analyze_dlt(message: DltMessage):
         log.info("DLT auto-replay evaluated", queued=replay["queued"],
                  reason=replay["reason"])
 
+    # A replay withheld only because the fix has not deployed yet is parked,
+    # not dropped -- withholding without coming back to it would lose the
+    # packet. Parking requires everything a replay requires except the
+    # version, so this can never become a second replay path that bypasses
+    # DLT_AUTO_REPLAY_ENABLED (DLT_PLAN.md 14, phase C7).
+    park = await _off_loop(parked.maybe_park, case_id, message.ref_id,
+                           code_check_result, finding)
+    if park["parked"]:
+        log.info("Parked the replay until its fix deploys", reason=park["reason"])
+
     casebook = _casebook(message, headers, failure, corroboration, finding,
                          decision, group, message.model_dump().get("evidence_gaps") or [],
                          message.model_dump().get("log_window"), provenance,
-                         replay=replay)
+                         replay=replay, code_check_result=code_check_result,
+                         park=park)
     if parse_error:
         casebook["finding"]["parse_error"] = parse_error
 
@@ -559,5 +665,7 @@ async def analyze_dlt(message: DltMessage):
             "action": finding.action, "confidence": finding.confidence,
             "corroboration": corroboration.verdict.value,
             "decision": decision.decision.value,
+            "code_check": code_check_result.verdict,
             "replay_attempted": replay["attempted"],
-            "replay_queued": replay["queued"]}
+            "replay_queued": replay["queued"],
+            "parked": park["parked"]}

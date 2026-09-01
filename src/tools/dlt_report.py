@@ -13,6 +13,19 @@ Also:
                         person will eventually work, and the reason nothing
                         writes `final` in v1
     --stats             corpus-level counts, including the LLM-call reduction
+
+And the replay precheck (DLT_PLAN.md 14):
+
+    --parked            packets waiting for a deploy, and which version each
+                        is waiting for
+    --code-check        verdict distribution across every group
+    --code-check-accuracy
+                        did the verdicts turn out to be right? Joins each
+                        verdict to whether the packet dead-lettered AGAIN
+                        after its replay. This is the evidence bar for
+                        turning DLT_CODE_CHECK_GATES_REPLAY on, and without
+                        it there is no way to know whether Trap T9's 5% is
+                        really 5%.
 """
 import argparse
 import json
@@ -26,7 +39,7 @@ load_dotenv()
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from src.dlt import groups  # noqa: E402
+from src.dlt import groups, parked  # noqa: E402
 from src.dlt.case_storage import get_dlt_storage  # noqa: E402
 from src.dlt.reuse import llm_calls_avoided  # noqa: E402
 
@@ -98,6 +111,23 @@ def cmd_group(prefix: str) -> None:
         if history.get("CONTRADICTED"):
             print("  NOTE: some occurrences contradicted the declared exception.")
 
+    check = group.get("code_check")
+    if check:
+        print("\nReplay precheck (latest):")
+        print(f"  verdict  : {check.get('verdict')}")
+        print(f"  reason   : {(check.get('reason') or '')[:300]}")
+        if check.get("repo"):
+            print(f"  file     : {check.get('repo')}:{check.get('path')} "
+                  f"@ {check.get('branch')}")
+        if check.get("required_version"):
+            print(f"  needs    : {check['required_version']}  "
+                  f"(running {check.get('running_version') or '?'})")
+        history = group.get("code_check_history") or {}
+        if history:
+            print("  history  : " + ", ".join(
+                f"{verdict} x{count}"
+                for verdict, count in sorted(history.items(), key=lambda kv: -kv[1])))
+
     recommendation = group.get("recommendation")
     print(f"\nRecommendation ({group.get('recommendation_state', 'none')}):")
     if recommendation:
@@ -150,6 +180,171 @@ def cmd_unreviewed() -> None:
               f"{group.get('signature', '')[:55]}")
     print("\nEach of these is being reused unreviewed. A wrong one is served "
           "to every subsequent occurrence.")
+
+
+def cmd_parked() -> None:
+    """Packets held back because their fix is on `release` but not running."""
+    entries = parked.list_parked()
+    if not entries:
+        print("Nothing is parked.")
+        print("\nPackets appear here when the replay precheck finds a fix that "
+              "has\nnot deployed yet, and leave when the pods reach its version.")
+        return
+
+    print(f"{'CASE':<28} {'REF':<20} {'WAITING FOR':<22} {'PARKED':<17} REPO")
+    print("-" * 110)
+    for entry in entries:
+        print(f"{(entry.get('case_id') or '-')[:27]:<28} "
+              f"{(entry.get('ref_id') or '-')[:19]:<20} "
+              f"{(entry.get('required_version') or '-')[:21]:<22} "
+              f"{_when(entry.get('parked_at')):<17} "
+              f"{(entry.get('repo') or '-')[:30]}")
+
+    waiting_for = {}
+    for entry in entries:
+        version = entry.get("required_version") or "?"
+        waiting_for[version] = waiting_for.get(version, 0) + 1
+
+    print(f"\n{len(entries)} packet(s) parked, waiting on:")
+    for version, count in sorted(waiting_for.items(), key=lambda kv: -kv[1]):
+        print(f"  {count:>5}  {version}")
+    print("\nRelease them with: python -m src.tools.release_parked_replays")
+
+
+def cmd_code_check() -> None:
+    """Verdict distribution. The UNKNOWN share is the real coverage number."""
+    all_groups = groups.list_groups()
+    checked = [g for g in all_groups if g.get("code_check_history")]
+    if not checked:
+        print("No code-check verdicts recorded yet.")
+        print("\nSet DLT_CODE_CHECK_ENABLED=true to start recording them. "
+              "Nothing\nabout replay changes until DLT_CODE_CHECK_GATES_REPLAY "
+              "is also on.")
+        return
+
+    totals = {}
+    for group in checked:
+        for verdict, count in (group.get("code_check_history") or {}).items():
+            totals[verdict] = totals.get(verdict, 0) + count
+    overall = sum(totals.values())
+
+    print("Verdicts across every group:")
+    for verdict, count in sorted(totals.items(), key=lambda kv: -kv[1]):
+        share = f"{100 * count / overall:.1f}%" if overall else "-"
+        print(f"  {verdict:<14} {count:>7}  {share:>7}")
+
+    unknown = totals.get("UNKNOWN", 0)
+    if overall:
+        print(f"\nCoverage: {100 * (overall - unknown) / overall:.0f}% of checks "
+              f"reached a verdict.")
+        if unknown > overall * 0.5:
+            print("  Most checks establish nothing. Usually an unmapped package "
+                  "in\n  DLT_REPO_MAP, or no baseline version captured.")
+
+    print(f"\n{'COUNT':>6}  {'LATEST':<14}  SIGNATURE")
+    print("-" * 100)
+    ranked = sorted(checked, key=lambda g: -(g.get("occurrence_count") or 0))
+    for group in ranked[:20]:
+        latest = (group.get("code_check") or {}).get("verdict", "-")
+        print(f"{group.get('occurrence_count', 0):>6}  {latest:<14}  "
+              f"{group.get('signature', '')[:60]}")
+
+
+def cmd_code_check_accuracy() -> None:
+    """Did the verdicts turn out to be right?
+
+    The only outcome this system can observe by itself is whether a packet
+    dead-lettered AGAIN after it was replayed. That is exactly the signal
+    that matters: a `FIX_DEPLOYED` verdict followed by a recurrence is a false
+    positive, and a `NO_CHANGE` verdict followed by a recurrence is the
+    verdict being right.
+
+    Counterfactuals are not measurable and are not guessed at. Once
+    DLT_CODE_CHECK_GATES_REPLAY is on, a withheld replay produces no outcome
+    at all -- which is why this report is worth running BEFORE turning the
+    gate on, while replays still fire regardless of the verdict.
+    """
+    storage = get_dlt_storage()
+    try:
+        case_ids = storage.list_events()
+    except Exception as e:
+        raise SystemExit(f"Could not list DLT cases: {e}")
+
+    cases = []
+    for case_id in case_ids:
+        casebook = storage.load(case_id)
+        if casebook:
+            cases.append(casebook)
+
+    if not cases:
+        print("No DLT casebooks recorded yet.")
+        return
+
+    by_ref = {}
+    for casebook in cases:
+        ref_id = (casebook.get("packet") or {}).get("ref_id")
+        if ref_id:
+            by_ref.setdefault(ref_id, []).append(casebook)
+    for entries in by_ref.values():
+        entries.sort(key=lambda c: c.get("detected_at") or 0)
+
+    #: verdict -> [replayed, recurred]
+    tally = {}
+    examples = []
+    for casebook in cases:
+        verdict = (casebook.get("code_check") or {}).get("verdict")
+        replay = casebook.get("replay") or {}
+        if not verdict or not replay.get("queued"):
+            continue
+
+        ref_id = (casebook.get("packet") or {}).get("ref_id")
+        detected = casebook.get("detected_at") or 0
+        recurred = any(
+            later.get("detected_at", 0) > detected
+            for later in by_ref.get(ref_id, [])
+        )
+
+        row = tally.setdefault(verdict, [0, 0])
+        row[0] += 1
+        row[1] += 1 if recurred else 0
+        if recurred and verdict == "FIX_DEPLOYED" and len(examples) < 10:
+            examples.append(casebook.get("case_id"))
+
+    if not tally:
+        print("No replayed case carries a code-check verdict yet.")
+        print("\nThis report needs replays that actually fired. Run with\n"
+              "DLT_CODE_CHECK_ENABLED=true and DLT_CODE_CHECK_GATES_REPLAY=false "
+              "so\nverdicts are recorded while replays still happen regardless.")
+        return
+
+    print("Of the packets that were replayed, how many dead-lettered again?\n")
+    print(f"{'VERDICT':<14} {'REPLAYED':>9} {'RECURRED':>9} {'RATE':>8}")
+    print("-" * 45)
+    for verdict, (replayed, recurred) in sorted(tally.items()):
+        rate = f"{100 * recurred / replayed:.0f}%" if replayed else "-"
+        print(f"{verdict:<14} {replayed:>9} {recurred:>9} {rate:>8}")
+
+    fixed = tally.get("FIX_DEPLOYED")
+    if fixed and fixed[0]:
+        false_positive = 100 * fixed[1] / fixed[0]
+        print(f"\nFIX_DEPLOYED false-positive rate: {false_positive:.0f}% "
+              f"({fixed[1]} of {fixed[0]}).")
+        print("This is the number Trap T9 predicts should be near 5%. "
+              "It is also\nthe evidence bar for DLT_CODE_CHECK_GATES_REPLAY.")
+        if fixed[0] < 30:
+            print(f"\n  Only {fixed[0]} sample(s). The deferred Class B replay "
+                  f"path asks for\n  at least 30 before it is considered.")
+        if examples:
+            print("\n  Replayed on FIX_DEPLOYED and dead-lettered again:")
+            for case_id in examples:
+                print(f"    {case_id}")
+
+    unchanged = tally.get("NO_CHANGE")
+    if unchanged and unchanged[0]:
+        print(f"\nNO_CHANGE recurrence rate: "
+              f"{100 * unchanged[1] / unchanged[0]:.0f}%. A HIGH number here "
+              f"means the\nverdict is right -- those replays were always going "
+              f"to fail, and the\ngate would have withheld them.")
 
 
 def cmd_stats() -> None:
@@ -206,6 +401,14 @@ def main():
     group.add_argument("--unreviewed", action="store_true",
                        help="Draft recommendations awaiting human review")
     group.add_argument("--stats", action="store_true", help="Corpus-level counts")
+    group.add_argument("--parked", action="store_true",
+                       help="Packets waiting for their fix to deploy")
+    group.add_argument("--code-check", action="store_true",
+                       dest="code_check",
+                       help="Replay-precheck verdict distribution")
+    group.add_argument("--code-check-accuracy", action="store_true",
+                       dest="code_check_accuracy",
+                       help="Did the verdicts turn out to be right?")
     parser.add_argument("--limit", type=int, default=20, help="Rows for --top")
     args = parser.parse_args()
 
@@ -217,6 +420,12 @@ def main():
         cmd_case(args.case)
     elif args.unreviewed:
         cmd_unreviewed()
+    elif args.parked:
+        cmd_parked()
+    elif args.code_check:
+        cmd_code_check()
+    elif args.code_check_accuracy:
+        cmd_code_check_accuracy()
     else:
         cmd_stats()
 

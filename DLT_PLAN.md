@@ -80,8 +80,14 @@ Two reasons, and the second is the one that justifies the whole log lane:
   (`DLT_AUTO_REPLAY_ENABLED=false`). Everything else stated in this section
   still holds: no source access, no database access, no writes to any
   upstream service beyond that one tool call. See section 5.9.
-- **No source-code analysis.** `com.uidai.enu.biometric` is not accessible.
-  Class B failures (Section 4) are enriched and routed, never diagnosed.
+- **No source-code analysis, with one narrow, opt-in exception (2026-08-31).**
+  Section 14's replay precheck reads `release` in Bitbucket to answer one
+  question: has the code at the failure site changed since this packet failed,
+  and is that change running? It is read-only, off by default
+  (`DLT_CODE_CHECK_ENABLED=false`), and it produces a *deployment* verdict,
+  never a diagnosis. Class B failures are still enriched and routed, never
+  diagnosed: no source is read into an LLM prompt, and nothing in this
+  extension explains *why* a bug happened.
 - **No database access.** We cannot confirm why a row is missing, only that the
   code said it was.
 - **No production routing in v1.** Output goes to casebook storage. Jira/Slack/
@@ -1157,3 +1163,556 @@ show is whether the key is populated on *every* message or only on this topic.
 | R6 | 2,000/day overwhelms the fast stage | Log fetch backlog, pod logs rotate before capture | Same two-stage split that already protects the rejection path; fast stage is bounded I/O only; `MAX_CONCURRENT_INVESTIGATIONS` applies per role |
 | R7 | Registry arrives in an unexpected format | Phase 2 loader mismatch | Loader is isolated in `src/dlt/registry.py` behind a single lookup function; a format change touches one file |
 | R8 | Adapter refactor regresses the rejection path | Live pipeline breaks | `RejectionAdapter` moves today's logic verbatim; Phase 4 exit criteria requires the existing suite green and unchanged |
+
+---
+
+## 14. Replay precheck (phases C0-C8)
+
+An extension, not a revision. It amends one non-goal in section 2 -- "no
+source-code analysis" -- in the same narrow, opt-in way section 5.9 amends
+"no remediation", and it answers Open Question 3 along the way.
+
+**The question it answers.** `auto_replay.decide()` gates a replay on the
+finding alone: action, confidence, refId. Nothing in that decision knows
+whether the bug was fixed last Tuesday, or whether the fix reached the pods.
+So a replay is a guess, and a packet whose fix has not shipped simply
+dead-letters again.
+
+**The join key is the version number**, not a git SHA. ~95% of changes bump
+the version in `pom.xml` (or the service's equivalent), the image tag carries
+that same version, and the pod's image tag is readable from Kubernetes. That
+chain is what removes the need for Gitea, ArgoCD, Harbor digests and any
+change to the Jenkins pipeline.
+
+**Gitea is deliberately not used.** It holds the *desired* state. A replay
+executes against whatever the pods are running now, so a manifest updated but
+not yet synced would actively mislead the verdict. The pod's image tag is the
+only authority, and it doubles as the sync signal.
+
+### 14.1 Verdicts
+
+| Verdict | Condition | Consequence |
+|---|---|---|
+| `NO_CHANGE` | No commit on `release` has touched the failure site since this packet failed | Replay reproduces the same dead letter |
+| `NOT_DEPLOYED` | A candidate commit exists; its first-containing version is ahead of the running pod's | Park the packet; replay when the pods reach that version |
+| `FIX_DEPLOYED` | The running version is at or beyond the candidate's first-containing version | Replay is worth trying |
+| `UNKNOWN` | Frame unmappable, repo unreachable, version unparseable, or no running version captured | Fall through to today's behaviour, unchanged |
+
+`NOT_DEPLOYED` is the operative one: it turns "replay and see" into "replay
+after the next deploy", which is a scheduling decision the system can make and
+act on by itself.
+
+The verdict answers *deployment*, never *relevance*. "This commit is running"
+is not "this commit fixes your bug"; relevance comes from mapping the top
+application frame to a file. The casebook keeps the two claims separate so a
+reader can disagree with either.
+
+### 14.2 Two flags, not one
+
+Mirroring the split section 5.9 already makes between
+`DLT_AUTO_REPLAY_ENABLED` and `ENABLE_AUTO_REPLAY`:
+
+- `DLT_CODE_CHECK_ENABLED` -- do the lookup, write the verdict into the
+  casebook. Observe only, and safe from day one.
+- `DLT_CODE_CHECK_GATES_REPLAY` -- let the verdict veto or park a replay.
+
+This is the posture Open Question 2 already takes for the mis-cast detector:
+advisory until real samples validate it.
+
+---
+
+### Phase C0 -- Feasibility gate
+
+**Goal.** Confirm the five assumptions this design rests on, against the real
+systems, before any adapter code is written. Same shape as Phase 0.
+
+- **New:** `src/tools/code_check_probe.py` -- a throwaway CLI carrying its own
+  minimal Bitbucket client, deliberately *not* depending on C4 (whose shape
+  its output is meant to determine). `tests/test_code_check_probe.py` covers
+  the decisions it makes about what it reads, since those are copied forward
+  into C3 and C4.
+- **Run:** `python -m src.tools.code_check_probe --all --repo ENU/enu-biometric`
+- **Exit criteria:** all five questions in 14.3 answered in writing. If Q4
+  reports `AT-RELEASE-CUT`, C5 must implement the forward-walk (Trap T6)
+  rather than reading the version at the fix commit.
+- **Out of scope:** anything that writes. Any dependency on this tool from
+  shipped code.
+
+### 14.3 Phase C0 findings
+
+Filled in by whoever runs the probe against the real systems. Until then
+every row is open, and C4 must stay unconfigured.
+
+| # | Question | Answer |
+|---|---|---|
+| Q1 | Bitbucket reachable from the cluster, and Server/DC or Cloud? | *pending* |
+| Q2 | Is `release` the deployed branch, per repo? | *pending* |
+| Q3 | What does the image tag look like, and does it order? | *pending* |
+| Q4 | Version bumped in the fix commit, or at release cut? | *pending* |
+| Q5 | Multi-module layout; which pom is the image tagged from? | *pending* |
+
+**Q4 is the load-bearing one.** `IN-FIX-COMMIT` means the version at the fix
+commit is already the first-containing version. `AT-RELEASE-CUT` means reading
+it there is systematically wrong, in the direction that causes replays which
+fail again. `MIXED` means build the forward-walk, which is correct under either
+convention -- and is what C5 builds regardless.
+
+**Q4 must be stratified by repo, not pooled.** If one team never bumps
+versions, Trap T9 is not a 5% error rate for them but a 100% one.
+
+---
+
+### Phase C1 -- Deployed version capture
+
+**Goal.** Record which build was running when the packet failed. Answers Open
+Question 3 and mitigates Risk R4 on its own, independently of the code check
+that consumes it -- so it is deliberately **not** behind a feature flag.
+
+- **New:** `src/dlt/deployed.py` -- `running_version(app, namespace)` lists the
+  service's pods and reads `status.container_statuses[].image`, returning a
+  `DeployedVersions` record: the distinct versions seen, the (pod, container,
+  image) rows behind them, and a reason when nothing could be read. Guarded by
+  `k8s_breaker`; the retry lives in `k8s/retry.py`, which the pod listing
+  already goes through.
+- **Modified:** `src/log_pipeline/sources/k8s/discovery.py` -- a public
+  `list_pods_for_service()` wrapping `resolve_service` + `_list_pods`, so the
+  DLT lane does not reach into a private function. Additive; no existing path
+  changes. `src/api/dlt_routes.py` -- capture in `fetch_dlt_logs`, persist as
+  `deployed.json`, carry `baseline_versions` on the queued message.
+  `src/utils/metrics.py` -- `record_dlt_deployed_version_read`.
+- **Config:** `DLT_DEPLOYED_VERSION_TTL_SECONDS` (default 60). Reuses
+  `K8S_DEFAULT_NAMESPACE`, `K8S_DEFAULT_APP`, `K8S_SERVICE_MAP`.
+- **Design notes:**
+  - **A separate Kubernetes call, not a change to the log pipeline.** Threading
+    an image field through `PodTarget` -> `DiscoveryResult` -> `FetchResult` ->
+    `reduce_logs` would touch code the rejection lane depends on (Risk R8), for
+    a value only the DLT lane wants.
+  - **No version ordering here.** A rolling deploy has pods on two versions at
+    once; this module reports the set and refuses to name a single winner.
+    Ordering is C3's, and doing it here would mean comparing version strings
+    lexically -- Trap T7.
+  - **Only successful reads are cached.** Caching a failure would hold a whole
+    TTL of cases at `UNKNOWN` after a transient blip.
+  - The pod is the authority, not the manifest. A version that ArgoCD has not
+    yet synced is not running, and is exactly the wrong answer for deciding
+    whether a replay will work.
+- **Tests:** `tests/test_dlt_deployed.py` -- both image-reference shapes, a
+  digest that must not be read as a version, a registry port that must not be
+  read as a tag; a rolling deploy reports both versions and no single one; a
+  dead cluster, an unresolved namespace and a pod with no container status each
+  return a reason rather than raising; the cache collapses repeats, a failure
+  is not cached, and a zero TTL disables it. `tests/test_dlt_fetch.py` -- the
+  artifact is written on every case, and the fetch still succeeds when the
+  version cannot be read.
+- **Exit criteria:** every new DLT case carries a `baseline_versions` value, or
+  an explicit empty list with a recorded reason. Existing suite green.
+- **Out of scope:** comparing versions, and any use of the value. C1 only
+  observes.
+
+---
+
+### Phase C2 -- Frame locations
+
+**Goal.** Preserve the file and line the parser already captures and discards,
+without letting either near the fingerprint.
+
+- **Modified:** `src/dlt/stacktrace.py` -- `_parse_link` keeps the regex's
+  optional `location` group as a tuple index-parallel with `frames`; a new
+  `FrameLocation` dataclass carries `(target, file, line)` and derives the
+  repository path suffix; `normalise_frame_locations()` applies the same
+  keep/drop rule as `normalise_frames`, now factored into one shared
+  `_is_app_frame` predicate so the two can never disagree about which frames
+  are ours. `src/api/dlt_routes.py` -- `build_failure` returns a `locations`
+  list beside `frames`.
+- **Config:** none. The existing `DLT_APP_PACKAGES` and
+  `DLT_BOILERPLATE_FRAMES` govern both projections.
+- **Design notes:**
+  - **A bare frame holds a `None` slot rather than being skipped.** Skipping
+    it would shift every later location onto the wrong frame -- silently, and
+    only for traces that mix the two forms.
+  - **The path is built from the package plus the file name the JVM
+    reported**, not from the class name. A frame in `com.foo.Outer$Inner.run`
+    reports `Outer.java`, which is the file that exists; deriving the name
+    from the class would ask the repository for `Outer$Inner.java`.
+  - `compute_fingerprint` and `build_signature` keep their exact inputs.
+- **Tests:** `tests/test_dlt_stacktrace.py` -- the reference sample's
+  fingerprint is pinned as a literal and asserted byte-identical to its
+  pre-C2 value (Risk R3); locations parse off the reference trace
+  (`BioDataBaseHelperServiceImpl.java:257`); locations stay index-parallel
+  with the normalised frames; a frame with no location keeps its place;
+  `Native Method`, `Unknown Source` and a non-numeric suffix all yield a
+  `None` line rather than a guess; inner-class and lambda frames resolve to
+  the right file. `tests/test_dlt_fetch.py` -- `build_failure` carries them
+  and the fingerprint is unchanged.
+- **Exit criteria:** locations available downstream; every existing
+  fingerprint unchanged.
+- **Out of scope:** using them. C4 is the first consumer.
+
+---
+
+### Phase C3 -- Version algebra
+
+**Goal.** Parse and order the version strings that join a commit to a running
+pod. The single most likely place for this feature to be quietly wrong for
+months, because a bad comparison looks exactly like a good one.
+
+- **New:** `src/dlt/versions.py` -- `parse()`, `compare()`, `at_least()`,
+  `is_ahead()`, `lowest()`, and `version_of()` (image reference -> version
+  string). Pure.
+- **Modified:** `src/dlt/deployed.py` -- `version_of` now delegates here, so
+  the two copies of image-reference parsing cannot drift apart. **And a bug
+  C1 shipped is fixed:** sidecar containers were contributing their own image
+  versions to the set. Left in, an istio proxy's version would join the set
+  `lowest()` reduces on a rolling deploy, comparing the application against
+  the mesh proxy. Filtering now reuses `K8S_SIDECAR_DENYLIST` through the log
+  pipeline's own `select_containers`, so an operator maintains one list.
+- **Config:** `DLT_VERSION_PATTERN` -- optional regex with a `(?P<version>)`
+  group, for a repo whose tag puts the version somewhere other than the front.
+- **Rules:**
+  - Numeric core compared component-wise as integers, never lexically, and
+    zero-padded so `1.0` equals `1.0.0`.
+  - `-SNAPSHOT` sorts *before* the same release version.
+  - A trailing build counter (`release.42`) breaks ties on an equal core. A
+    name (`rc1`) does not -- only a counter orders.
+  - **Equal cores with an ambiguous qualifier compare equal, not ordered.**
+    `1.0.0` is the pom's number and `1.0.0-release.42` is a build of it;
+    nothing in either string says which came first. This is what lets C5
+    catch Trap T9 by requiring `is_ahead` rather than `at_least`.
+  - **Anything unparseable returns None, and None propagates through every
+    comparison.** C5 turns that into `UNKNOWN`. Never a guess.
+  - `lowest()` returns None if *any* entry is unparseable rather than skipping
+    it -- the unreadable version might be the low one, and skipping it would
+    report a higher floor than actually exists.
+- **Tests:** `tests/test_dlt_versions.py` -- `1.0.10 > 1.0.9`,
+  `release.9 < release.12`, `SNAPSHOT < release`; the ambiguous pairs compare
+  equal; every unparseable input yields None rather than an ordering; a
+  brute-forced **antisymmetry and transitivity check over the whole corpus**,
+  which a comparator with one branch backwards does not survive; `is_ahead`
+  and `at_least` differ exactly on equality; a broken `DLT_VERSION_PATTERN`
+  degrades to the default parser.
+- **Exit criteria:** every tag collected in C0 parses, or is explicitly
+  recorded as unparseable, and no comparison returns a wrong ordering for that
+  corpus.
+- **Out of scope:** deciding anything. C3 only orders.
+
+---
+
+### Phase C4 -- Bitbucket adapter
+
+**Goal.** Read-only access to `release`: which commits touched a file, and
+what the version file said at a commit.
+
+> **Gate.** This phase must not be *configured* before section 14.3's findings
+> are filled in. Its API flavour, path resolution and version-file handling
+> all depend on what C0 reports. `BITBUCKET_BASE_URL` left empty keeps it
+> completely inert, which is what makes it safe to merge unanswered -- the
+> gate is on turning it on, not on the code existing.
+
+- **New:** `src/dlt/bitbucket.py` -- `repo_for`, `resolve_path`,
+  `commits_touching`, `changed_paths`, `file_at`, `version_at`,
+  `parse_pom_version`, `touches_version_file`. Both API flavours.
+- **Modified:** `src/utils/resilience.py` -- a `bitbucket_breaker` beside the
+  existing four. `src/utils/metrics.py` -- it joins the breaker-state gauge.
+- **Config:** `BITBUCKET_BASE_URL`, `BITBUCKET_TOKEN`, `BITBUCKET_USERNAME`
+  (Cloud app passwords only), `BITBUCKET_API_FLAVOUR`,
+  `BITBUCKET_TIMEOUT_SECONDS`, `DLT_REPO_MAP`, `DLT_CODE_CHECK_TTL_SECONDS`,
+  `DLT_CODE_CHECK_MAX_COMMITS`.
+- **Design notes:**
+  - **`None` and `[]` mean different things, and the difference decides a
+    replay.** `[]` is "the server answered, and nothing has touched this
+    file", which C5 turns into `NO_CHANGE` and a withheld replay. `None` is
+    "we could not look". Collapsing them would let an unreachable Bitbucket
+    read as "the code definitely has not changed" and stop every replay in the
+    system on no evidence at all. Same distinction as `FetchResult.ok` and
+    `Corroboration.could_not_look`. A `None` is never cached.
+  - **Path resolution prefers construction over search.** C2 already knows the
+    path suffix, so the first strategy tries each configured source root and
+    checks whether the file exists: one call, identical on both flavours, and
+    a multi-module layout is a config change. Listing the repository is the
+    Server-only fallback, and **two matches resolve to `UNKNOWN`, not a coin
+    toss** -- picking either would attribute a commit to the wrong module.
+  - **Trap T5 is handled by parsing the XML, not by a regex.** A pom declares
+    `<parent><version>` *before* its own `<version>`, so the first `<version>`
+    tag is the parent's. `/project/version` is read specifically, falling back
+    to `/project/parent/version` only when the project declares none -- the
+    case Maven's own inheritance rule covers.
+  - An unmapped package resolves to no repository (Trap T8), a malformed
+    `DLT_REPO_MAP` maps nothing at all rather than half of it, and a file over
+    `MAX_FILE_BYTES` is refused rather than parsed.
+- **Tests:** `tests/test_dlt_bitbucket.py`, no network -- longest-prefix repo
+  matching; the shared-library package mapping to nothing; construction in one
+  call, root ordering, the listing fallback, and ambiguity yielding None;
+  Server and Cloud commit shapes including ISO-vs-epoch timestamps; a commit
+  with no timestamp kept rather than dropped; the parent-version trap, an
+  inheriting pom, a namespace-less pom, and unparseable input; 401/403/404/
+  500/502, a transport failure, a non-JSON body and a tripped breaker all
+  degrading rather than raising; Bearer vs Basic auth; the cache serving
+  repeats and refusing to cache a failure.
+- **Exit criteria:** the reference sample's top application frame resolves to
+  a real path in the real repository, and its version file reads correctly at
+  HEAD of `release`.
+- **Out of scope:** writes of any kind, diff parsing, and reading source into
+  an LLM prompt.
+
+---
+
+### Phase C5 -- Verdict engine (observe only)
+
+**Goal.** Compose C1-C4 into one of the four verdicts and write it into the
+casebook. Changes nothing about replay.
+
+- **New:** `src/dlt/code_check.py` -- `evaluate(failure, failed_at_ms,
+  baseline_versions, running_versions) -> CodeCheck`, a frozen dataclass
+  carrying its own evidence, in the shape `corroborate.py` already uses.
+- **Modified:** `src/api/dlt_routes.py` -- runs in `analyze_dlt` after the
+  group is recorded and before the replay gate, off-loop via `_off_loop`; a
+  `code_check` block on the casebook; `DLT_CASEBOOK_SCHEMA_VERSION` -> `1.1`;
+  `_recorded_baseline` reads `deployed.json`. `src/dlt/groups.py` --
+  `attach_code_check` through `update_json`, plus `code_check` and
+  `code_check_history` on `_blank`. `src/utils/metrics.py` --
+  `record_dlt_code_check`.
+- **Config:** `DLT_CODE_CHECK_ENABLED` (default `false`),
+  `DLT_CODE_CHECK_FRAMES`, `DLT_CODE_CHECK_MAX_CANDIDATES`,
+  `DLT_CODE_CHECK_BRANCH`.
+- **Design notes:**
+  - **The verdict answers deployment, never relevance.** "This commit is
+    running" is not "this commit fixes your bug". The casebook keeps
+    `code_check` separate from `finding` so a reader can disagree with either.
+  - **Three asymmetries, all pointing the same way.** A wrong `FIX_DEPLOYED`
+    causes a replay that fails again; a wrong `NOT_DEPLOYED` only delays one.
+    So the *highest* candidate version is required (several commits touched
+    the site and we cannot tell which is the fix), the *lowest* running
+    version is compared (a replay may land on any pod mid-rollout), and a
+    positive verdict requires a baseline while a negative one does not.
+  - **Trap T6 is handled by walking forward, unconditionally.** The fix
+    commit's own change set is checked first; only when it did not touch the
+    version file does the check walk forward to the next commit on the branch
+    that did. Correct under either convention, which is why it is built
+    regardless of what C0's Q4 reports.
+  - **Trap T9 is handled by requiring the version to have moved.** If the
+    change's version is not strictly ahead of the failing build's, a bump was
+    probably skipped and the version carries no signal -- `UNKNOWN`, not
+    `FIX_DEPLOYED`.
+  - **`baseline` is read from the artifact, not from today.** Substituting the
+    current version for the one that was running would silently defeat the T9
+    guard.
+  - **The group record is a record, not a cache.** Cost control lives in
+    `bitbucket.py`, whose reads are already keyed on things that repeat within
+    a group; `code_check` on the group is what the operator CLI reads and what
+    the accuracy loop joins against.
+  - Runs for Class A and B only.
+- **Tests:** `tests/test_dlt_code_check.py` -- every failure mode yields
+  `UNKNOWN`; the flag off makes zero calls; an unreadable repository is
+  `UNKNOWN` and never `NO_CHANGE`; both T6 branches; T9 in both directions;
+  the highest-required and lowest-running asymmetries; `1.0.10` not behind
+  `1.0.9` end to end; a raised exception degrading rather than propagating.
+  `tests/test_dlt_analysis_replay.py` -- the casebook always carries the
+  block, the verdict reaches the group, and **the replay decision is
+  unchanged for every verdict**.
+- **Exit criteria:** verdicts appear in production casebooks with the flag on,
+  and no replay behaviour has changed. Then leave it running and collect
+  cases.
+- **Out of scope:** acting on the verdict. That is C6.
+
+---
+
+### Phase C6 -- Replay veto
+
+**Goal.** Let a `NO_CHANGE` or `NOT_DEPLOYED` verdict withhold a replay that
+would otherwise fire.
+
+> **Precondition.** Do not enable until C5 has run for at least two weeks and
+> the recorded verdicts have been checked against what replays actually did.
+> Same evidence bar Open Question 2 sets for the corroboration verdict.
+
+- **Modified:** `src/dlt/auto_replay.py` -- `decide(finding, ref_id,
+  code_check=None)` and `maybe_replay(..., code_check=None)`, with the new
+  check placed **last**, after the existing four. `src/api/dlt_routes.py`
+  passes the C5 verdict through.
+- **Config:** `DLT_CODE_CHECK_GATES_REPLAY` (default `false`), independent of
+  `DLT_CODE_CHECK_ENABLED`. The gate is inert unless both are on.
+- **Design notes:**
+  - **A veto only: it can subtract a replay, never add one.** That asymmetry
+    is the whole safety argument -- a wrong verdict can delay a packet, and
+    cannot cause a replay that fails again. Letting `FIX_DEPLOYED` *enable* a
+    replay the existing gate declined is a real capability, and is what would
+    finally make Class B replayable, but it is deferred (see below).
+  - **`UNKNOWN` changes nothing.** A Bitbucket outage, an unmapped package or
+    a disabled flag must not silently stop every replay in the system.
+  - **The veto goes last**, so a replay declined for its own reasons still
+    reports that reason rather than blaming the precheck.
+  - `NOT_DEPLOYED` withholds here and is *parked* in C7 -- withholding without
+    coming back to it would lose the packet.
+- **Tests:** extends `tests/test_dlt_auto_replay.py` -- the gate flag off
+  leaves all four verdicts inert; `NO_CHANGE` and `NOT_DEPLOYED` withhold and
+  name why, the latter naming the version to wait for; `FIX_DEPLOYED` and
+  `UNKNOWN` change nothing; the veto cannot rescue a declined finding; the
+  existing conditions still report first. `tests/test_dlt_analysis_replay.py`
+  -- the same case that replays under C5 does not under C6.
+- **Exit criteria:** a replay that would have failed is withheld, and the
+  casebook says exactly which commit-absence withheld it.
+- **Out of scope:** parking the withheld packet (C7), and any path that lets a
+  verdict cause a replay.
+
+---
+
+### Deferred -- Class B replay
+
+The capability this unlocks is replaying **Class B** -- the NPEs, index errors
+and cast failures that today get a canned `NEEDS_MANUAL_REVIEW` and never
+replay at all, because `canned.py` attaches no confidence and `decide()`
+rejects a finding without one. Class B is also the only class where "the code
+changed, so the replay may now work" is a coherent claim: Class A's typical
+`DATA_FIX_REQUIRED` means a row is missing, and no commit makes a row appear.
+
+Deferred rather than scheduled, because it is the one change that lets this
+feature *cause* replays rather than only withhold them. Preconditions, all of
+them:
+
+- C6 enabled and stable.
+- At least 30 `FIX_DEPLOYED` verdicts checked by hand against real replay
+  outcomes.
+- A measured false-positive rate from the C8 accuracy report, not an assumed
+  one.
+- Its own flag, defaulting off, on the pattern the other two already follow.
+
+---
+
+### Phase C7 -- Parked replays
+
+**Goal.** Hold a `NOT_DEPLOYED` packet, then replay it once the pods reach the
+version that carries the fix. This is the part that turns "replay it and see"
+into "replay it after Thursday's deploy".
+
+- **New:** `src/dlt/parked.py` -- a `dlt_parked_replays` storage root via
+  `get_scoped_storage`, one document per case; `maybe_park`, `list_parked`,
+  `release_ready`. `src/tools/release_parked_replays.py` -- an offline CLI
+  (`--list`, `--dry-run`, `--version`, `--json`), idempotent, run after a
+  deploy or on a schedule.
+- **Modified:** `src/api/dlt_routes.py` -- parks after the replay gate; a
+  `parked` block on the casebook, present whether or not anything was parked.
+- **Config:** `DLT_CODE_CHECK_PARK_ENABLED`,
+  `DLT_PARKED_REPLAY_TTL_SECONDS` (30 days), `DLT_PARKED_REPLAY_CAP` (500).
+- **Design notes:**
+  - **One document per case, not a shared file.** `_queue_pending_replay`
+    learned this the hard way: a `pending_replays.jsonl` lived on whichever
+    pod wrote it, so under the S3 backend with more than one replica the queue
+    fragmented. A parked queue is worse to lose -- nobody is watching it.
+  - **Parking requires everything a replay requires, minus the version.** A
+    packet parks only when `auto_replay.decide` would have said yes *without*
+    the veto. Otherwise the release worker becomes a second replay path that
+    bypasses `DLT_AUTO_REPLAY_ENABLED`, replaying packets the operator never
+    agreed to replay.
+  - **Releasing does not necessarily replay.** It calls `queue_for_replay`,
+    whose `ENABLE_AUTO_REPLAY` switch still decides whether the packet reaches
+    OIS or lands in `pending_replays` for a human.
+  - **An unreadable running version leaves everything parked.** Not being able
+    to read a version is not evidence that a fix shipped.
+  - **Expiry beats release.** A month-old packet is not obviously safe to
+    replay just because the version finally moved.
+- **Tests:** `tests/test_dlt_parked.py` -- only `NOT_DEPLOYED` parks; nothing
+  parks with auto-replay off, with the veto off, or for a finding the gate
+  declines on its own; an unusable case id is refused; the cap and TTL both
+  bind; release is numeric not lexical, is idempotent, and leaves an
+  unreadable version parked; a dry run changes nothing; expiry beats release.
+  `tests/test_dlt_analysis_replay.py` -- parked end to end, and the casebook
+  always carries the block.
+- **Exit criteria:** a packet parked before a deploy is queued for replay
+  after it, with no human involved in the timing decision.
+- **Out of scope:** mapping a parked entry's repository back to a Kubernetes
+  service. The release worker reads one app's version, so a deployment with
+  several DLT-producing services runs it once per app.
+
+---
+
+### Phase C8 -- Operator surface
+
+**Goal.** Make the verdict legible to the people who act on it, and to the
+people who have to trust it.
+
+- **Modified:** `src/tools/dlt_report.py` -- `--parked` (what is waiting, and
+  which version releases it), `--code-check` (verdict distribution, with the
+  `UNKNOWN` share as the real coverage number), `--code-check-accuracy`, and
+  the latest verdict shown inline under `--group`. `DLT_PLAN.md` section 2's
+  "no source-code analysis" non-goal, amended the way section 5.9 amends "no
+  remediation". `ARCHITECTURE.md` section 4.4.1. `.env.example`.
+- **The accuracy loop.** The only outcome this system can observe by itself is
+  whether a packet dead-lettered **again** after it was replayed. That is
+  exactly the signal that matters: a `FIX_DEPLOYED` verdict followed by a
+  recurrence is a false positive, and a `NO_CHANGE` verdict followed by one is
+  the verdict being right. Counterfactuals are not measurable and are not
+  guessed at -- which is why the report is worth running *before*
+  `DLT_CODE_CHECK_GATES_REPLAY` goes on, while replays still fire regardless
+  of the verdict. Without it there is no way to know whether Trap T9's 5% is
+  really 5%, and no evidence base for ever enabling C6.
+- **Tests:** `tests/test_dlt_report.py` -- `--parked` groups by the version
+  waited on; `--code-check` reports coverage and flags a mostly-`UNKNOWN`
+  corpus; the verdict appears inline under `--group`; the accuracy report
+  counts a recurrence as a false positive, counts rates over *replays* rather
+  than casebooks, ignores cases where no replay fired, and says how to start
+  when there is nothing to measure.
+- **Exit criteria:** an operator can answer "what is parked, and what deploy
+  releases it?" in one command.
+- **Out of scope:** dashboards and alerting.
+
+---
+
+### Dependency graph -- phases C0-C8
+
+```
+C0 (feasibility gate) ─────────────┐
+                                   │
+C1 (deployed version) ─────────────┤
+C2 (frame locations) ──────────────┼──> C5 ──> C6 ──> C7 ──> C8
+C3 (version algebra) ──────────────┤     │
+                                   │     └──> (validation period)
+C0 ──> C4 (bitbucket adapter) ─────┘
+```
+
+C1, C2 and C3 touch nothing external and were built while C0's questions were
+still open. C4 must not be configured before section 14.3 reports. C6
+additionally waits on a validation period after C5, which is a calendar
+dependency rather than a code one.
+
+**C1 alone is worth keeping even if the rest is abandoned.** It closes Open
+Question 3 and lets a group record which build it was last seen on, which is
+what Risk R4 asks for.
+
+---
+
+### 14.4 Traps
+
+Numbered to continue section 3.2's series. Each fails silently and produces a
+confident wrong answer.
+
+| # | Trap | Where it is handled |
+|---|---|---|
+| T5 | A pom declares `<parent><version>` *before* its own, so the first `<version>` tag is the parent's | `bitbucket.parse_pom_version` parses the XML and reads `/project/version` |
+| T6 | The version may be bumped at release cut rather than in the fix commit, so reading it at the fix says a build that predates the fix contains it | `code_check._first_containing_version` walks forward to the next version-changing commit, unconditionally |
+| T7 | `"1.0.10" < "1.0.9"` as strings -- correct-looking, wrong ~10% of the time | `versions.py`, its own module with a brute-forced total-order test |
+| T8 | A frame in the shared `in.gov.uidai.common` library is a dependency bump, not a commit on the service's branch | An unmapped package resolves to no repository and yields `UNKNOWN` |
+| T9 | A fix merged with no version bump leaves the version reading the number already running -- a false `FIX_DEPLOYED` | A positive verdict requires the version to be *strictly ahead* of the failing build's |
+| T10 | C2 puts line numbers in the failure record for the first time; one reaching `compute_fingerprint` fragments every group (Risk R3) | The reference fixture's fingerprint is pinned as a literal and asserted byte-identical |
+
+---
+
+### 14.5 Open questions
+
+1. **Is `release` one branch or many?** `DLT_REPO_MAP` carries a per-repo
+   `branch` for this, but nobody has confirmed the branches are named
+   consistently across the service repositories.
+2. ~~**What happens during a rolling deploy?**~~ **Answered.** Pods are on two
+   versions at once; `deployed.py` reports the set and `versions.lowest` takes
+   the minimum, because a replay may land on any pod.
+3. **Does the replay even land on this service?** `queue_for_replay` posts to
+   OIS, which re-drives the packet through the pipeline from a stage this
+   system does not choose. If the replay re-enters *upstream* of the failing
+   service, the running version that matters belongs to a different service
+   than the pods C1 reads. **Worth confirming before C6 is enabled.**
+4. **Is the 5% uniform?** If one team never bumps versions, T9 is not a 5%
+   error rate but a 100% one for that team's repositories. C0's Q4 sample must
+   be stratified by repo, not pooled.
+5. **Which service does a parked entry belong to?** The release worker reads
+   one app's version, so a deployment with several DLT-producing services must
+   run it once per app. A parked entry records its repository but nothing maps
+   that back to a Kubernetes app.

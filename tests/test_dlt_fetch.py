@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from src.api.dlt_routes import (
+    DEPLOYED_ARTIFACT,
     FETCHED_LOGS_ARTIFACT,
     HEADERS_ARTIFACT,
     PARSED_TRACE_ARTIFACT,
@@ -20,7 +21,7 @@ from src.api.dlt_routes import (
     build_failure,
     fetch_dlt_logs,
 )
-from src.dlt import case_storage
+from src.dlt import case_storage, deployed
 from src.dlt.headers import parse_headers
 from src.dlt.window import derive_window
 from src.models.dlt_schemas import DltMessage
@@ -312,3 +313,95 @@ def test_utc_conversion_is_stable():
     window = derive_window(parse_headers(REFERENCE), now_ms=LAST_ATTEMPT_MS)
     expected = datetime.fromtimestamp(LAST_ATTEMPT_MS / 1000, tz=timezone.utc).isoformat()
     assert window.anchor_iso == expected
+
+
+# ======================================================================
+# Phase C1 -- the running build is recorded on every case
+# ======================================================================
+
+def _fake_pods(monkeypatch, versions):
+    """Patch the pod listing to report containers on `versions`."""
+    from src.log_pipeline.sources.k8s import discovery
+
+    class _Status:
+        def __init__(self, image):
+            self.name = "app"
+            self.image = image
+            self.image_id = "sha256:x"
+
+    class _Pod:
+        def __init__(self, name, image):
+            self.metadata = type("M", (), {"name": name})()
+            self.status = type("S", (), {"container_statuses": [_Status(image)]})()
+
+    pods = [_Pod(f"enu-biometric-{i}",
+                 f"harbor.uidai.net.in/ankalan/enu-biometric/{v}")
+            for i, v in enumerate(versions)]
+    monkeypatch.setattr(discovery, "list_pods_for_service",
+                        lambda app=None, namespace=None, request_timeout=None: pods)
+    deployed.reset_cache()
+
+
+def test_the_running_build_is_recorded_as_an_artifact(monkeypatch):
+    """Answers Open Question 3: without this, a fingerprint can never be
+    retired when its bug is fixed (Risk R4)."""
+    _fake_pods(monkeypatch, ["1.0.0-release.42"])
+
+    result = fetch_dlt_logs(message(ref_id=None))
+    storage = case_storage.get_dlt_storage()
+    record = json.loads(storage.load_artifact(result["case_id"], DEPLOYED_ARTIFACT))
+
+    assert record["ok"] is True
+    assert record["version"] == "1.0.0-release.42"
+    assert record["mixed"] is False
+    assert result["baseline_versions"] == ["1.0.0-release.42"]
+
+
+def test_a_rolling_deploy_is_recorded_without_picking_a_winner(monkeypatch):
+    _fake_pods(monkeypatch, ["1.0.0-release.42", "1.0.0-release.43"])
+
+    result = fetch_dlt_logs(message(ref_id=None))
+    storage = case_storage.get_dlt_storage()
+    record = json.loads(storage.load_artifact(result["case_id"], DEPLOYED_ARTIFACT))
+
+    assert record["mixed"] is True
+    assert record["version"] is None
+    assert len(result["baseline_versions"]) == 2
+
+
+def test_the_fetch_still_succeeds_when_the_version_cannot_be_read(monkeypatch):
+    """A missing version degrades the later verdict to UNKNOWN. It must never
+    cost the case, which is why capture is not on the critical path."""
+    from src.log_pipeline.sources.k8s import discovery
+
+    def dead(app=None, namespace=None, request_timeout=None):
+        raise RuntimeError("cluster unreachable")
+
+    monkeypatch.setattr(discovery, "list_pods_for_service", dead)
+    deployed.reset_cache()
+
+    result = fetch_dlt_logs(message(ref_id=None))
+    storage = case_storage.get_dlt_storage()
+    record = json.loads(storage.load_artifact(result["case_id"], DEPLOYED_ARTIFACT))
+
+    assert result["status"] == "queued_for_analysis"
+    assert record["ok"] is False
+    assert "cluster unreachable" in record["reason"]
+    assert result["baseline_versions"] == []
+
+
+def test_build_failure_carries_locations_beside_the_frames(monkeypatch):
+    """Phase C2: file and line reach the failure record, and stay out of the
+    fingerprint that groups it."""
+    monkeypatch.setenv("DLT_REGISTRY_PATH", "tests/fixtures/dlt/business_errors.csv")
+    from src.dlt import registry
+    registry.clear_cache()
+
+    failure = build_failure(parse_headers(REFERENCE), REFERENCE.get("kafka_exception-message"))
+
+    assert len(failure["locations"]) == len(failure["frames"])
+    assert failure["locations"][0]["file"] == "BioDataBaseHelperServiceImpl.java"
+    assert failure["locations"][0]["line"] == 257
+    # The guard: the fingerprint is a function of frames, not locations.
+    assert failure["fingerprint"] == (
+        "2bc62d82761a7f19593aea92c2eef08e51bf481bef517aa8883eef61b51ee57b")
