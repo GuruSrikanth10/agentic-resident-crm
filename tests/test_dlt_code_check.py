@@ -63,27 +63,40 @@ def failure(cls="B", locations=None):
 
 class FakeRepo:
     """Stands in for the whole C4 adapter, so C5's decisions are what is under
-    test rather than any HTTP behaviour."""
+    test rather than any HTTP behaviour.
+
+    `path`/`commits` give every frame the same file -- the single-frame shape
+    most tests want. `paths` (suffix -> repo path) and `commits_by_path` model
+    a real call path, where each frame is a different file.
+    """
 
     def __init__(self, monkeypatch, *, path=PATH, commits=(), changes=None,
-                 versions=None, bumps=None):
+                 versions=None, bumps=None, paths=None, commits_by_path=None):
         self.path = path
         self.commits = commits
         self.changes = changes if changes is not None else {}
         self.versions = versions or {}
         self.bumps = bumps
+        self.paths = paths
+        self.commits_by_path = commits_by_path
         self.calls = []
 
-        monkeypatch.setattr(bitbucket, "resolve_path",
-                            lambda repo, suffix: self.path)
+        monkeypatch.setattr(bitbucket, "resolve_path", self._resolve)
         monkeypatch.setattr(bitbucket, "commits_touching", self._commits)
         monkeypatch.setattr(bitbucket, "changed_paths", self._changes)
         monkeypatch.setattr(bitbucket, "version_at", self._version)
+
+    def _resolve(self, repo, suffix):
+        if self.paths is not None:
+            return self.paths.get(suffix)
+        return self.path
 
     def _commits(self, repo, path, since_ms=None, limit=None):
         self.calls.append(("commits", path))
         if path == repo.version_file:
             return self.bumps
+        if self.commits_by_path is not None:
+            return self.commits_by_path.get(path, [])
         return self.commits
 
     def _changes(self, repo, commit_id, limit=500):
@@ -407,9 +420,8 @@ def test_versions_that_cannot_be_ordered_are_unknown(monkeypatch):
 # Frame search
 # ---------------------------------------------------------------------------
 
-def test_a_fix_one_frame_up_is_still_found(monkeypatch):
-    """The top frame is the failure site, but the bug is often in the caller
-    that passed the null."""
+def test_an_unmappable_frame_does_not_stop_the_search(monkeypatch):
+    """A shared-library frame is skipped, and a later mappable one is used."""
     monkeypatch.setenv("DLT_CODE_CHECK_FRAMES", "3")
     unmapped = {"target": "org.other.Helper.run", "file": "Helper.java", "line": 5}
     ours = {"target": FRAME, "file": "BioDataBaseHelperServiceImpl.java", "line": 257}
@@ -475,3 +487,212 @@ def test_a_global_branch_override_applies_to_repos_on_the_default(monkeypatch):
 
     assert seen["branch"] == "release/2026"
     assert result.branch == "release/2026"
+
+
+# ---------------------------------------------------------------------------
+# The whole call path, not just the failure site
+# ---------------------------------------------------------------------------
+#
+# `a()` passes inconsistent data to `b()`, which passes it to `c()`, which
+# throws. The exception surfaces in `c()`; the bug -- and the fix -- is in
+# `a()`. Checking only the failure site finds no commit and reports a
+# confident, false NO_CHANGE that withholds a replay which would now succeed.
+
+PKG = "src/main/java/com/uidai/enu/biometric"
+CALL_PATH = [
+    {"target": "com.uidai.enu.biometric.ServiceC.c", "file": "ServiceC.java", "line": 90},
+    {"target": "com.uidai.enu.biometric.ServiceB.b", "file": "ServiceB.java", "line": 55},
+    {"target": "com.uidai.enu.biometric.ServiceA.a", "file": "ServiceA.java", "line": 12},
+]
+PATHS = {
+    "com/uidai/enu/biometric/ServiceC.java": f"{PKG}/ServiceC.java",
+    "com/uidai/enu/biometric/ServiceB.java": f"{PKG}/ServiceB.java",
+    "com/uidai/enu/biometric/ServiceA.java": f"{PKG}/ServiceA.java",
+}
+
+
+def _call_path_repo(monkeypatch, commits_by_path, **kwargs):
+    return FakeRepo(monkeypatch, paths=PATHS, commits_by_path=commits_by_path,
+                    **kwargs)
+
+
+def test_a_fix_in_a_caller_is_found_not_reported_as_no_change(monkeypatch):
+    """The bug this exists for. Only ServiceA has a commit; the failure site
+    has none."""
+    _call_path_repo(
+        monkeypatch,
+        {f"{PKG}/ServiceC.java": [], f"{PKG}/ServiceB.java": [],
+         f"{PKG}/ServiceA.java": [commit("fix123", "Fix data passed down from a()")]},
+        changes={"fix123": ["pom.xml"]}, versions={"fix123": "1.0.5"})
+
+    result = code_check.evaluate(failure(locations=CALL_PATH), FAILED_AT,
+                                 ["1.0.0"], ["1.0.9"])
+
+    assert result.verdict == code_check.FIX_DEPLOYED
+    assert result.frames_examined == 3
+    assert result.frames_resolved == 3
+    assert len(result.paths_checked) == 3
+    assert result.candidates[0]["path"].endswith("ServiceA.java")
+    assert "ServiceA.java" in result.reason
+
+
+def test_a_caller_fix_that_has_not_deployed_is_parked_not_dismissed(monkeypatch):
+    _call_path_repo(
+        monkeypatch,
+        {f"{PKG}/ServiceC.java": [], f"{PKG}/ServiceB.java": [],
+         f"{PKG}/ServiceA.java": [commit("fix123")]},
+        changes={"fix123": ["pom.xml"]}, versions={"fix123": "1.0.5"})
+
+    result = code_check.evaluate(failure(locations=CALL_PATH), FAILED_AT,
+                                 ["1.0.0"], ["1.0.1"])
+
+    assert result.verdict == code_check.NOT_DEPLOYED
+    assert result.required_version == "1.0.5"
+
+
+def test_no_change_requires_every_file_on_the_path_to_be_clean(monkeypatch):
+    _call_path_repo(monkeypatch, {p: [] for p in PATHS.values()})
+
+    result = code_check.evaluate(failure(locations=CALL_PATH), FAILED_AT,
+                                 ["1.0.0"], ["1.0.9"])
+
+    assert result.verdict == code_check.NO_CHANGE
+    assert "3 file(s) on this call path" in result.reason
+
+
+def test_commits_from_several_frames_all_become_candidates(monkeypatch):
+    """Two files on the path changed; the HIGHEST version is required."""
+    _call_path_repo(
+        monkeypatch,
+        {f"{PKG}/ServiceC.java": [commit("cfix", "tidy c()")],
+         f"{PKG}/ServiceB.java": [],
+         f"{PKG}/ServiceA.java": [commit("afix", "the real fix")]},
+        changes={"cfix": ["pom.xml"], "afix": ["pom.xml"]},
+        versions={"cfix": "1.0.2", "afix": "1.0.7"})
+
+    result = code_check.evaluate(failure(locations=CALL_PATH), FAILED_AT,
+                                 ["1.0.0"], ["1.0.9"])
+
+    assert len(result.candidates) == 2
+    assert result.required_version == "1.0.7"
+
+
+def test_the_same_commit_reached_from_two_frames_is_counted_once(monkeypatch):
+    shared = commit("shared1", "one commit touching two files")
+    _call_path_repo(
+        monkeypatch,
+        {f"{PKG}/ServiceC.java": [shared], f"{PKG}/ServiceB.java": [shared],
+         f"{PKG}/ServiceA.java": []},
+        changes={"shared1": ["pom.xml"]}, versions={"shared1": "1.0.5"})
+
+    result = code_check.evaluate(failure(locations=CALL_PATH), FAILED_AT,
+                                 ["1.0.0"], ["1.0.9"])
+
+    assert len(result.candidates) == 1
+
+
+def test_two_frames_in_one_file_cost_one_lookup(monkeypatch):
+    """The reference sample has four frames inside BioDeDuplicationServiceImpl.
+    Asking the same question four times only spends API calls."""
+    same_file = [
+        {"target": "com.uidai.enu.biometric.ServiceA.a", "file": "ServiceA.java", "line": 12},
+        {"target": "com.uidai.enu.biometric.ServiceA.helper", "file": "ServiceA.java", "line": 40},
+        {"target": "com.uidai.enu.biometric.ServiceA.outer", "file": "ServiceA.java", "line": 77},
+    ]
+    fake = _call_path_repo(monkeypatch, {f"{PKG}/ServiceA.java": []})
+
+    result = code_check.evaluate(failure(locations=same_file), FAILED_AT,
+                                 ["1.0.0"], ["1.0.9"])
+
+    assert result.verdict == code_check.NO_CHANGE
+    assert result.frames_resolved == 3
+    assert result.paths_checked == (f"{PKG}/ServiceA.java",)
+    assert len([c for c in fake.calls if c[1].endswith("ServiceA.java")]) == 1
+
+
+# -- coverage is reported, never implied ------------------------------------
+
+def test_no_change_discloses_frames_it_could_not_map(monkeypatch):
+    """A shared-library frame is a permanent blind spot (Trap T8). Claiming
+    "nothing changed" without saying so would overstate the evidence."""
+    with_library = CALL_PATH + [
+        {"target": "in.gov.uidai.common.util.Helper.check",
+         "file": "Helper.java", "line": 8},
+    ]
+    _call_path_repo(monkeypatch, {p: [] for p in PATHS.values()})
+
+    result = code_check.evaluate(failure(locations=with_library), FAILED_AT,
+                                 ["1.0.0"], ["1.0.9"])
+
+    assert result.verdict == code_check.NO_CHANGE
+    assert result.frames_unmapped == 1
+    assert "1 frame(s) could not be mapped" in result.reason
+
+
+def test_a_file_that_could_not_be_read_blocks_the_negative_claim(monkeypatch):
+    """`None` from the adapter is "we could not look". One of those anywhere
+    on the path makes a NO_CHANGE claim about the path unsupportable."""
+    _call_path_repo(
+        monkeypatch,
+        {f"{PKG}/ServiceC.java": [], f"{PKG}/ServiceB.java": None,
+         f"{PKG}/ServiceA.java": []})
+
+    result = code_check.evaluate(failure(locations=CALL_PATH), FAILED_AT,
+                                 ["1.0.0"], ["1.0.9"])
+
+    assert result.verdict == code_check.UNKNOWN
+    assert "could not be read" in result.reason
+
+
+def test_the_failure_site_is_still_the_recorded_path(monkeypatch):
+    """`path` stays the frame the exception surfaced in, so the casebook field
+    keeps its meaning; every file checked is in `paths_checked`."""
+    _call_path_repo(monkeypatch, {p: [] for p in PATHS.values()})
+
+    result = code_check.evaluate(failure(locations=CALL_PATH), FAILED_AT)
+
+    assert result.path == f"{PKG}/ServiceC.java"
+    assert result.paths_checked[0] == f"{PKG}/ServiceC.java"
+
+
+def test_changes_spanning_two_repositories_are_not_compared(monkeypatch):
+    """Versions order within one repository, and one running build was read.
+    Comparing across repos would be meaningless."""
+    monkeypatch.setenv("DLT_REPO_MAP", json.dumps({
+        "com.uidai.enu.biometric": {"project": "ENU", "repo": "enu-biometric"},
+        "com.uidai.enu.shared": {"project": "ENU", "repo": "enu-shared"},
+    }))
+    locations = [
+        {"target": "com.uidai.enu.biometric.ServiceC.c", "file": "ServiceC.java", "line": 9},
+        {"target": "com.uidai.enu.shared.Helper.help", "file": "Helper.java", "line": 4},
+    ]
+    paths = {"com/uidai/enu/biometric/ServiceC.java": "a/ServiceC.java",
+             "com/uidai/enu/shared/Helper.java": "b/Helper.java"}
+    FakeRepo(monkeypatch, paths=paths,
+             commits_by_path={"a/ServiceC.java": [commit("x")],
+                              "b/Helper.java": [commit("y")]},
+             changes={"x": ["pom.xml"], "y": ["pom.xml"]},
+             versions={"x": "1.0.1", "y": "2.0.1"})
+
+    result = code_check.evaluate(failure(locations=locations), FAILED_AT,
+                                 ["1.0.0"], ["1.0.9"])
+
+    assert result.verdict == code_check.UNKNOWN
+    assert "2 repositories" in result.reason
+
+
+def test_the_frame_cap_bounds_the_path_that_is_checked(monkeypatch):
+    """With the cap at 1, only the failure site is checked -- which is exactly
+    the old behaviour, and exactly why the default is not 1."""
+    monkeypatch.setenv("DLT_CODE_CHECK_FRAMES", "1")
+    _call_path_repo(
+        monkeypatch,
+        {f"{PKG}/ServiceC.java": [], f"{PKG}/ServiceB.java": [],
+         f"{PKG}/ServiceA.java": [commit("fix123")]},
+        changes={"fix123": ["pom.xml"]}, versions={"fix123": "1.0.5"})
+
+    result = code_check.evaluate(failure(locations=CALL_PATH), FAILED_AT,
+                                 ["1.0.0"], ["1.0.9"])
+
+    assert result.verdict == code_check.NO_CHANGE
+    assert result.frames_examined == 1

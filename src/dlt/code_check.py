@@ -22,11 +22,27 @@ second flag, deliberately not the same switch. Running C5 alone for a few
 weeks is what produces the evidence for turning C6 on, which is the posture
 Open Question 2 already takes for the mis-cast detector.
 
+**The whole call path is checked, not just the failure site.** An exception
+surfaces where the bad data is *used*, which is often several frames below
+where it was produced: `a()` passes something inconsistent to `b()`, which
+passes it to `c()`, which throws. A developer fixes `a()`. Checking only
+`c()` would find no commit and report `NO_CHANGE` -- a confident, false claim
+that withholds a replay which would in fact now succeed. So every application
+frame up to `DLT_CODE_CHECK_FRAMES` is resolved and queried, and `NO_CHANGE`
+is a statement about the *path*, not about one file.
+
+**Coverage is reported, never implied.** Some frames are structurally
+invisible -- a shared-library frame is unmapped by design (Trap T8) -- so
+`NO_CHANGE` names how many files it actually checked out of how many frames.
+A frame that could not be *read* is different from one that cannot be
+*mapped*: the first is transient and blocks the negative claim entirely, the
+second is permanent and is merely disclosed.
+
 **Three asymmetries, all in the same direction.** A wrong `FIX_DEPLOYED`
 causes a replay that fails again; a wrong `NOT_DEPLOYED` only delays one. So:
 
 * the *highest* candidate version is required, not the lowest -- if several
-  commits touched the failure site we cannot tell which is the fix, and
+  commits touched the call path we cannot tell which is the fix, and
   waiting for all of them errs toward delay;
 * the *lowest* running version is compared, not the highest -- mid-rollout a
   replay may land on any pod;
@@ -57,7 +73,10 @@ VERDICTS = (NO_CHANGE, NOT_DEPLOYED, FIX_DEPLOYED, UNKNOWN)
 #: no parseable frame to anchor on.
 CHECKED_CLASSES = ("A", "B")
 
-DEFAULT_FRAMES = 3
+#: How many application frames of the call path to check. The reference
+#: sample carries 8 after normalisation; 5 covers a realistic caller chain
+#: without turning one trace into a repository crawl.
+DEFAULT_FRAMES = 5
 
 #: How many candidate commits to resolve to a version. Each costs two reads,
 #: both cached; the cap stops a file with a busy week from fanning out.
@@ -73,6 +92,13 @@ class CodeCheck:
     repo: Optional[str] = None
     path: Optional[str] = None
     branch: Optional[str] = None
+    #: Every file actually checked, in call-path order.
+    paths_checked: tuple = ()
+    #: Frames that resolved to a file, and frames that could not be mapped.
+    #: Reported rather than implied: an unmapped shared-library frame is a
+    #: permanent blind spot in any `NO_CHANGE` claim (Trap T8).
+    frames_resolved: int = 0
+    frames_unmapped: int = 0
     #: What was running when the packet failed (lowest, across pods).
     baseline_version: Optional[str] = None
     #: What is running now (lowest, across pods).
@@ -101,6 +127,9 @@ class CodeCheck:
             "reason": self.reason,
             "repo": self.repo,
             "path": self.path,
+            "paths_checked": list(self.paths_checked),
+            "frames_resolved": self.frames_resolved,
+            "frames_unmapped": self.frames_unmapped,
             "branch": self.branch,
             "baseline_version": self.baseline_version,
             "running_version": self.running_version,
@@ -126,12 +155,13 @@ def enabled() -> bool:
 
 
 def frames_to_check() -> int:
-    """How far up the stack to look for a changed file.
+    """How many application frames of the call path to check.
 
-    The top application frame is the failure site, but a fix is often one
-    frame up -- in the caller that passed the null. Searching a few and taking
-    the first that maps to a repository covers that without turning a
-    9-frame trace into 9 repository lookups.
+    **Every one of them is queried, not just the first that resolves.** The
+    top frame is where the exception surfaced; the bug is frequently in a
+    caller further down, and a fix there leaves the failure site untouched.
+    Distinct files are deduplicated first, so the four frames the reference
+    sample has inside `BioDeDuplicationServiceImpl` cost one lookup, not four.
     """
     try:
         return max(1, int(os.environ.get("DLT_CODE_CHECK_FRAMES",
@@ -171,6 +201,29 @@ def _locations(failure: dict) -> list:
     return out
 
 
+@dataclass
+class FrameProbe:
+    """One frame of the call path, and what the repository said about it."""
+
+    target: str
+    #: The `bitbucket.Repo` this frame maps to, when it maps to one.
+    repo: object = None
+    path: Optional[str] = None
+    #: None means the repository could not be read -- distinct from [], which
+    #: means it answered and nothing has touched this file.
+    commits: Optional[list] = None
+    #: Why the frame could not be mapped, when it could not.
+    reason: str = ""
+
+    @property
+    def mapped(self) -> bool:
+        return self.path is not None
+
+    @property
+    def unreadable(self) -> bool:
+        return self.mapped and self.commits is None
+
+
 def _resolve_frame(location: FrameLocation):
     """(repo, path) for one frame, or (None, why)."""
     repo = bitbucket.repo_for(location.class_fqcn)
@@ -187,6 +240,37 @@ def _resolve_frame(location: FrameLocation):
     if path is None:
         return None, f"{location.source_path_suffix} not found in {repo.slug}"
     return (repo, path), ""
+
+
+def _probe_path(locations, failed_at_ms) -> list:
+    """Resolve and query every frame of the call path, in order.
+
+    Distinct *files* are queried once: the reference sample has four frames
+    inside `BioDeDuplicationServiceImpl`, and asking the same question four
+    times would only spend API calls to get the same answer.
+    """
+    probes, seen = [], {}
+    for location in locations:
+        found, reason = _resolve_frame(location)
+        if not found:
+            probes.append(FrameProbe(target=location.target, reason=reason))
+            continue
+
+        repo, path = found
+        if path in seen:
+            # A different method in a file already checked. Carry the same
+            # answer so the frame is still counted as covered.
+            probes.append(FrameProbe(target=location.target, repo=repo,
+                                     path=path, commits=seen[path].commits))
+            continue
+
+        commits = bitbucket.commits_touching(repo, path, since_ms=failed_at_ms)
+        probe = FrameProbe(target=location.target, repo=repo, path=path,
+                           commits=commits)
+        seen[path] = probe
+        probes.append(probe)
+
+    return probes
 
 
 def _first_containing_version(repo, commit) -> tuple:
@@ -271,83 +355,119 @@ def _evaluate(failure: dict, failed_at_ms, baseline_versions,
     if not locations:
         return _unknown("no application frame carried a source location")
 
-    # -- find a frame we can look up -------------------------------------
-    resolved, why_not = None, []
-    examined = 0
-    for location in locations[:frames_to_check()]:
-        examined += 1
-        found, reason = _resolve_frame(location)
-        if found:
-            resolved = found
-            break
-        why_not.append(reason)
+    # -- probe the whole call path, not just the failure site ------------
+    probes = _probe_path(locations[:frames_to_check()], failed_at_ms)
+    mapped = [p for p in probes if p.mapped]
+    unmapped = [p for p in probes if not p.mapped]
 
-    if resolved is None:
+    base = {"frames_examined": len(probes),
+            "frames_resolved": len(mapped),
+            "frames_unmapped": len(unmapped)}
+
+    if not mapped:
         return _unknown(
             "no frame could be mapped to a file in a known repository: "
-            + "; ".join(why_not[:3]),
-            frames_examined=examined)
+            + "; ".join(p.reason for p in unmapped[:3]),
+            **base)
 
-    repo, path = resolved
-    base = dict(repo=repo.slug, path=path, branch=repo.branch,
-                frames_examined=examined)
+    # Distinct files, in call-path order. The failure site is first.
+    paths, seen = [], set()
+    for probe in mapped:
+        if probe.path not in seen:
+            seen.add(probe.path)
+            paths.append(probe.path)
 
-    # -- has anything touched it? ----------------------------------------
-    commits = bitbucket.commits_touching(repo, path, since_ms=failed_at_ms)
-    if commits is None:
-        return _unknown("the repository could not be read", **base)
+    site = mapped[0]
+    base.update(repo=site.repo.slug, path=site.path, branch=site.repo.branch,
+                paths_checked=tuple(paths))
+
+    # A file we could not READ is not a file with no commits. One transient
+    # failure anywhere on the path makes a negative claim about the path
+    # unsupportable, so it is UNKNOWN rather than a confident NO_CHANGE.
+    unreadable = [p for p in mapped if p.unreadable]
+    if unreadable:
+        return _unknown(
+            f"{len({p.path for p in unreadable})} of the {len(paths)} file(s) on "
+            f"the call path could not be read", **base)
 
     baseline = versions.lowest(baseline_versions) if baseline_versions else None
     running = versions.lowest(running_versions) if running_versions else None
     base.update(baseline_version=str(baseline) if baseline else None,
                 running_version=str(running) if running else None)
 
-    if not commits:
+    with_commits = [p for p in mapped if p.commits]
+
+    if not with_commits:
         # The cheap, deterministic negative -- and the only verdict that needs
-        # no version data at all.
+        # no version data at all. The reason states coverage rather than
+        # implying it: an unmapped shared-library frame is a permanent blind
+        # spot, and a reader must be able to see it (Trap T8).
+        blind = (f", though {len(unmapped)} frame(s) could not be mapped to a "
+                 f"repository and were not checked" if unmapped else "")
         return CodeCheck(
             verdict=NO_CHANGE,
-            reason=(f"nothing on {repo.branch} has touched {path} since this "
-                    f"packet failed, so a replay reproduces the same dead letter"),
+            reason=(f"nothing on {site.repo.branch} has touched any of the "
+                    f"{len(paths)} file(s) on this call path since the packet "
+                    f"failed{blind}, so a replay reproduces the same dead letter"),
             checked_at=time.time(), **base)
 
     # -- what version carries them? --------------------------------------
+    # Versions only order within one repository, and the running version we
+    # read belongs to one service. A call path spanning two mapped repos has
+    # no single comparable version, so say so rather than compare across them.
+    repos = {p.repo.slug for p in with_commits}
+    if len(repos) > 1:
+        return _unknown(
+            f"changes were found in {len(repos)} repositories "
+            f"({', '.join(sorted(repos))}); their versions are not comparable "
+            f"against one running build", **base)
+
+    repo = with_commits[0].repo
     candidates, required = [], None
-    for commit in commits[:max_candidates()]:
-        version, how = _first_containing_version(repo, commit)
-        candidates.append({
-            "commit": commit.short,
-            "subject": commit.subject[:120],
-            "timestamp_ms": commit.timestamp_ms,
-            "first_containing_version": version or None,
-            "resolved_by": how,
-        })
-        if version is None:
-            continue
-        if version == "":
-            # On the branch but never cut. Nothing running can contain it.
-            required = required or ""
-            continue
-        if required in (None, "") or (versions.compare(version, required) or 0) > 0:
-            # The HIGHEST, not the lowest: several commits touched the failure
-            # site and we cannot tell which is the fix, so waiting for all of
-            # them errs toward delay rather than toward a replay that fails.
-            required = version
+    seen_commits = set()
+
+    for probe in with_commits:
+        for commit in (probe.commits or [])[:max_candidates()]:
+            if commit.id in seen_commits:
+                continue
+            seen_commits.add(commit.id)
+
+            version, how = _first_containing_version(repo, commit)
+            candidates.append({
+                "commit": commit.short,
+                "subject": commit.subject[:120],
+                "path": probe.path,
+                "timestamp_ms": commit.timestamp_ms,
+                "first_containing_version": version or None,
+                "resolved_by": how,
+            })
+            if version is None:
+                continue
+            if version == "":
+                # On the branch but never cut. Nothing running can contain it.
+                required = required or ""
+                continue
+            if required in (None, "") or (versions.compare(version, required) or 0) > 0:
+                # The HIGHEST, not the lowest: several commits touched the
+                # call path and we cannot tell which is the fix, so waiting
+                # for all of them errs toward delay rather than toward a
+                # replay that fails.
+                required = version
 
     base["candidates"] = tuple(candidates)
 
     if required == "":
         return CodeCheck(
             verdict=NOT_DEPLOYED,
-            reason=(f"{len(candidates)} commit(s) have touched {path} since this "
-                    f"packet failed, but no version has been cut since, so "
-                    f"nothing running can contain them"),
+            reason=(f"{len(candidates)} commit(s) have touched this call path "
+                    f"since the packet failed, but no version has been cut "
+                    f"since, so nothing running can contain them"),
             checked_at=time.time(), **base)
 
     if required is None:
         return _unknown(
-            f"{len(candidates)} commit(s) touched {path}, but no version "
-            f"could be resolved for any of them",
+            f"{len(candidates)} commit(s) touched this call path, but no "
+            f"version could be resolved for any of them",
             **base)
 
     base["required_version"] = str(required)
@@ -382,16 +502,19 @@ def _evaluate(failure: dict, failed_at_ms, baseline_versions,
                 f"{running} is at or beyond {required}, but no baseline "
                 f"version was recorded for the failing build, so a skipped "
                 f"bump could not be ruled out (Trap T9)", **base)
+        changed = ", ".join(sorted({c["path"].rsplit("/", 1)[-1]
+                                    for c in candidates}))
         return CodeCheck(
             verdict=FIX_DEPLOYED,
-            reason=(f"{path} changed on {repo.branch} after this packet failed, "
-                    f"and the running build ({running}) is at or beyond the "
-                    f"version carrying it ({required})"),
+            reason=(f"{changed} changed on {repo.branch} after this packet "
+                    f"failed, and the running build ({running}) is at or "
+                    f"beyond the version carrying it ({required})"),
             checked_at=time.time(), **base)
 
+    changed = ", ".join(sorted({c["path"].rsplit("/", 1)[-1] for c in candidates}))
     return CodeCheck(
         verdict=NOT_DEPLOYED,
-        reason=(f"{path} changed on {repo.branch} after this packet failed, but "
-                f"the running build ({running}) is behind the version carrying "
-                f"it ({required}); replay once the pods reach {required}"),
+        reason=(f"{changed} changed on {repo.branch} after this packet failed, "
+                f"but the running build ({running}) is behind the version "
+                f"carrying it ({required}); replay once the pods reach {required}"),
         checked_at=time.time(), **base)
