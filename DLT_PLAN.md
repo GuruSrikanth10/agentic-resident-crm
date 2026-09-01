@@ -1727,11 +1727,34 @@ confident wrong answer.
 2. ~~**What happens during a rolling deploy?**~~ **Answered.** Pods are on two
    versions at once; `deployed.py` reports the set and `versions.lowest` takes
    the minimum, because a replay may land on any pod.
-3. **Does the replay even land on this service?** `queue_for_replay` posts to
-   OIS, which re-drives the packet through the pipeline from a stage this
-   system does not choose. If the replay re-enters *upstream* of the failing
-   service, the running version that matters belongs to a different service
-   than the pods C1 reads. **Worth confirming before C6 is enabled.**
+3. ~~**Does the replay even land on this service?**~~ **Answered
+   (2026-09-01, operator): an OIS replay re-runs the packet through the whole
+   pipeline from the start.**
+
+   The version comparison is therefore measuring the right service. The packet
+   traverses the chain again and reaches the failing service a second time, so
+   "is the fix running in the service the trace came from" is exactly the
+   question that decides whether it fails the same way.
+
+   Two limits follow from the answer rather than threatening it, and both are
+   about what the verdict *does not* cover:
+
+   - **The verdict speaks only for the service the trace came from.** A
+     from-the-start replay passes through every earlier stage first and can
+     fail there for reasons no stack trace in this DLT record mentions. A
+     `FIX_DEPLOYED` verdict means "this packet will not fail *here* again",
+     never "this replay will succeed".
+   - **Bad data produced upstream is invisible to this check.** A stack trace
+     only carries frames from the JVM that threw, so when the inconsistent
+     input came from a different service, neither the failing frames nor
+     `DLT_REPO_MAP` can reach the code that produced it. Trap T11's fix widens
+     the search across the *call path*; it cannot widen it across a process
+     boundary.
+
+   Also worth an operator's attention before C6 and C7 are enabled: replaying
+   from the start is a heavier operation than a targeted redrive, and the
+   parked-replay worker can release a batch of them at once after a deploy.
+   `DLT_PARKED_REPLAY_CAP` bounds how large that batch can be.
 4. **Is the 5% uniform?** If one team never bumps versions, T9 is not a 5%
    error rate but a 100% one for that team's repositories. C0's Q4 sample must
    be stratified by repo, not pooled.
