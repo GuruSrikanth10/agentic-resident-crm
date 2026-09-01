@@ -1255,10 +1255,21 @@ acts on by itself.
 | C2 | `dlt/stacktrace.py` | `FrameLocation` keeps the file and line the parser already captured and discarded -- beside the fingerprint, never inside it. |
 | C3 | `dlt/versions.py` | Parses and orders `1.0.0-release.42`, `1.0.1-SNAPSHOT`, `1.0.0`. Unparseable means `None`, and `None` propagates through every comparison. |
 | C4 | `dlt/bitbucket.py` | Read-only, both API flavours. Four calls: commits touching a path, a commit's changed paths, a file at a ref, a repository listing. |
-| C5 | `dlt/code_check.py` | Composes the above into the verdict. |
+| C5 | `dlt/code_check.py` | Composes the above into the verdict. Queries **every** frame of the call path, not just the failure site. |
 | C6 | `dlt/auto_replay.py` | The veto, in `decide()`, placed last. |
 | C7 | `dlt/parked.py` + `tools/release_parked_replays.py` | The waiting queue, and what comes back for it. |
 | C8 | `tools/dlt_report.py` | `--parked`, `--code-check`, `--code-check-accuracy`. |
+
+**The whole call path is checked, not just the failure site.** An exception
+surfaces where bad data is *used*, which is often several frames below where
+it was produced: `a()` passes something inconsistent to `b()`, which passes it
+to `c()`, which throws, and the developer fixes `a()`. Checking only `c()`
+finds no commit and reports a confident, false `NO_CHANGE` -- withholding a
+replay that would in fact now succeed, and doing so invisibly, since
+`--code-check-accuracy` can only measure replays that actually fired. Every
+frame up to `DLT_CODE_CHECK_FRAMES` (default 5) is queried, distinct files
+once, and `NO_CHANGE` names how many files it checked and how many frames it
+could not map. (Trap T11; this was a real bug, fixed 2026-09-01.)
 
 **Three asymmetries, all pointing the same way.** A wrong `FIX_DEPLOYED`
 causes a replay that fails again; a wrong `NOT_DEPLOYED` only delays one. So
@@ -1276,8 +1287,9 @@ changed" and stop every replay in the system on no evidence at all -- the same
 distinction `FetchResult.ok` and `Corroboration.could_not_look` already make
 in the log lane.
 
-**Six traps** are documented in DLT_PLAN.md 14.4, numbered T5-T10 to continue
-that document's existing series. The two most likely to bite a future editor:
+**Seven traps** are documented in DLT_PLAN.md 14.4, numbered T5-T11 to
+continue that document's existing series. The two most likely to bite a future
+editor:
 a Maven pom declares `<parent><version>` *before* its own, so the first
 `<version>` tag is the parent's (T5); and `"1.0.10" < "1.0.9"` is true as
 strings and wrong as versions, which is why `versions.py` is its own module

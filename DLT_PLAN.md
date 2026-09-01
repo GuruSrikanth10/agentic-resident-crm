@@ -1478,6 +1478,19 @@ casebook. Changes nothing about replay.
   - **The verdict answers deployment, never relevance.** "This commit is
     running" is not "this commit fixes your bug". The casebook keeps
     `code_check` separate from `finding` so a reader can disagree with either.
+  - **The whole call path is checked, not just the failure site** (fixed
+    2026-09-01; see Trap T11). Every application frame up to
+    `DLT_CODE_CHECK_FRAMES` is resolved and queried, distinct files once, and
+    `NO_CHANGE` is a claim about the path rather than about one file.
+  - **Coverage is reported, never implied.** `NO_CHANGE` names how many files
+    it checked and how many frames it could not map. A frame that could not be
+    *read* is different from one that cannot be *mapped*: the first is
+    transient and blocks the negative claim entirely, the second is permanent
+    (Trap T8) and is merely disclosed.
+  - **Changes spanning two repositories are not compared.** Versions order
+    within one repository and one running build was read, so a call path
+    touching two mapped repos yields `UNKNOWN` rather than a meaningless
+    comparison.
   - **Three asymmetries, all pointing the same way.** A wrong `FIX_DEPLOYED`
     causes a replay that fails again; a wrong `NOT_DEPLOYED` only delays one.
     So the *highest* candidate version is required (several commits touched
@@ -1693,6 +1706,7 @@ confident wrong answer.
 | T8 | A frame in the shared `in.gov.uidai.common` library is a dependency bump, not a commit on the service's branch | An unmapped package resolves to no repository and yields `UNKNOWN` |
 | T9 | A fix merged with no version bump leaves the version reading the number already running -- a false `FIX_DEPLOYED` | A positive verdict requires the version to be *strictly ahead* of the failing build's |
 | T10 | C2 puts line numbers in the failure record for the first time; one reaching `compute_fingerprint` fragments every group (Risk R3) | The reference fixture's fingerprint is pinned as a literal and asserted byte-identical |
+| T11 | **Checking only the failure site.** An exception surfaces where bad data is *used*, not where it was produced -- `a()` passes something inconsistent to `b()` to `c()`, which throws, and the fix lands in `a()`. Checking `c()` alone finds no commit and reports a confident, false `NO_CHANGE`, withholding a replay that would now succeed. Fails toward "never replay", which is safe but silently removes the packets the feature exists to help -- and `--code-check-accuracy` cannot see it, because a withheld replay produces no outcome to measure | `code_check._probe_path` queries every frame up to `DLT_CODE_CHECK_FRAMES` (default 5), and `NO_CHANGE` requires every mapped file on the path to be clean |
 
 ---
 
