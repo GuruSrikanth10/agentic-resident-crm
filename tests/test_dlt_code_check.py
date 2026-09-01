@@ -696,3 +696,39 @@ def test_the_frame_cap_bounds_the_path_that_is_checked(monkeypatch):
 
     assert result.verdict == code_check.NO_CHANGE
     assert result.frames_examined == 1
+
+
+# ---------------------------------------------------------------------------
+# An unreadable version must not be reported as a skipped bump
+# ---------------------------------------------------------------------------
+
+def test_an_unresolvable_version_is_not_blamed_on_a_skipped_bump(monkeypatch):
+    """Trap T12. `version_at` returning an unparseable string used to flow all
+    the way to the T9 guard, which reported "a bump was probably skipped" --
+    pointing an investigator at a convention problem that does not exist. The
+    version file was simply unreadable, and the reason must say so."""
+    FakeRepo(monkeypatch,
+             commits=[commit("aaa")],
+             changes={"aaa": ["pom.xml"]},
+             versions={})          # version_at now returns None for `${revision}`
+
+    result = code_check.evaluate(failure(), FAILED_AT, ["1.0.0"], ["1.0.9"])
+
+    assert result.verdict == code_check.UNKNOWN
+    assert "no version could be resolved" in result.reason
+    assert "T9" not in result.reason
+    assert "bump was probably skipped" not in result.reason
+
+
+def test_a_genuinely_skipped_bump_still_reports_t9(monkeypatch):
+    """The T9 message must survive for the case it was written for: the
+    version read fine, it just did not move."""
+    FakeRepo(monkeypatch,
+             commits=[commit("aaa")],
+             changes={"aaa": ["pom.xml"]},
+             versions={"aaa": "1.0.0"})
+
+    result = code_check.evaluate(failure(), FAILED_AT, ["1.0.0"], ["1.0.0"])
+
+    assert result.verdict == code_check.UNKNOWN
+    assert "T9" in result.reason

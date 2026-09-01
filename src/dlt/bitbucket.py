@@ -70,6 +70,9 @@ DEFAULT_COMMIT_LIMIT = 50
 #: `release` does not need sub-hour detection for this purpose.
 DEFAULT_CACHE_TTL_SECONDS = 3600.0
 
+#: 15 minutes for an empty result. See `negative_cache_ttl_seconds`.
+DEFAULT_NEGATIVE_TTL_SECONDS = 900.0
+
 #: Ceiling on a fetched file. A pom is kilobytes; anything approaching this is
 #: not a version file, and parsing it would only spend memory to learn that.
 MAX_FILE_BYTES = 2 * 1024 * 1024
@@ -167,6 +170,28 @@ def cache_ttl_seconds() -> float:
                                              str(DEFAULT_CACHE_TTL_SECONDS))))
     except (ValueError, TypeError):
         return DEFAULT_CACHE_TTL_SECONDS
+
+
+def negative_cache_ttl_seconds() -> float:
+    """How long an *empty* result is reused. Shorter, on purpose.
+
+    An empty commit list is the answer that becomes `NO_CHANGE` and withholds
+    a replay, so a stale one is the expensive kind of wrong: a fix that lands
+    minutes after a case was analysed would keep reading as "nothing has
+    changed" for the rest of the window, and `--code-check-accuracy` cannot
+    see it, because a withheld replay produces no outcome to measure. A
+    non-empty result carries no such risk -- it only ever leads to a version
+    comparison -- so it keeps the full TTL.
+
+    Never longer than the positive TTL, so lowering that one lowers both.
+    """
+    ttl = cache_ttl_seconds()
+    try:
+        negative = float(os.environ.get("DLT_CODE_CHECK_NEGATIVE_TTL_SECONDS",
+                                        str(DEFAULT_NEGATIVE_TTL_SECONDS)))
+    except (ValueError, TypeError):
+        negative = DEFAULT_NEGATIVE_TTL_SECONDS
+    return min(ttl, max(0.0, negative))
 
 
 def repo_map() -> dict:
@@ -314,14 +339,13 @@ def _call(path: str, params=None, raw: bool = False):
 # ---------------------------------------------------------------------------
 
 def _cached(key: tuple, produce):
-    ttl = cache_ttl_seconds()
-    if ttl <= 0:
+    if cache_ttl_seconds() <= 0:
         return produce()
 
     now = time.monotonic()
     with _lock:
         entry = _cache.get(key)
-        if entry is not None and now - entry[0] < ttl:
+        if entry is not None and now < entry[0]:
             return entry[1]
 
     value = produce()
@@ -329,9 +353,15 @@ def _cached(key: tuple, produce):
     # A None is not cached: it usually means the server was unreachable, and
     # holding that for a whole TTL would keep returning UNKNOWN long after the
     # server came back.
-    if value is not None:
+    if value is None:
+        return value
+
+    # An empty result expires sooner than a populated one -- it is the answer
+    # that withholds a replay, so a stale one costs more.
+    ttl = negative_cache_ttl_seconds() if not value else cache_ttl_seconds()
+    if ttl > 0:
         with _lock:
-            _cache[key] = (now, value)
+            _cache[key] = (now + ttl, value)
     return value
 
 
@@ -397,6 +427,10 @@ def commits_touching(repo: Repo, path: str,
                 {"path": path, "pagelen": min(count, 100)})
             if data is None:
                 return None
+            # Cloud exposes only `date` on a commit, with no separate
+            # committer timestamp, so the rebase caveat above cannot be
+            # avoided here -- widen DLT_CODE_CHECK_COMMIT_LOOKBACK_SECONDS if
+            # this repository squash-merges long-lived branches.
             return [
                 Commit(id=v.get("hash") or "",
                        subject=((v.get("message") or "").splitlines() or [""])[0],
@@ -412,7 +446,17 @@ def commits_touching(repo: Repo, path: str,
         return [
             Commit(id=v.get("id") or "",
                    subject=((v.get("message") or "").splitlines() or [""])[0],
-                   timestamp_ms=_iso_to_ms(v.get("authorTimestamp")))
+                   # `committerTimestamp` first, deliberately. `authorTimestamp`
+                   # is when the code was *written*, which a rebase or squash
+                   # merge leaves far in the past: a fix authored Monday, merged
+                   # Friday, on a packet that failed Wednesday would be filtered
+                   # out as "older than the failure" and the fix never found --
+                   # a confident, false NO_CHANGE that withholds a replay which
+                   # would now succeed. The committer timestamp is rewritten by
+                   # those operations and tracks when the commit actually
+                   # landed, which is the question `since_ms` is really asking.
+                   timestamp_ms=_iso_to_ms(v.get("committerTimestamp")
+                                           or v.get("authorTimestamp")))
             for v in (data.get("values") or [])
         ]
 
@@ -553,6 +597,54 @@ def _local_name(tag: str) -> str:
     return tag.rsplit("}", 1)[-1] if "}" in tag else tag
 
 
+#: `${revision}` and friends, as used by Maven's CI-friendly versions.
+_PLACEHOLDER_RE = re.compile(r"\$\{([^}]+)\}")
+
+
+def _pom_properties(root) -> dict:
+    """`<properties>` as a plain dict, for placeholder resolution."""
+    for child in root:
+        if _local_name(child.tag) == "properties":
+            return {_local_name(prop.tag): (prop.text or "").strip()
+                    for prop in child}
+    return {}
+
+
+def _resolve_placeholders(value: str, properties: dict) -> Optional[str]:
+    """Substitute `${name}` from `<properties>`, or None if any is unknown.
+
+    **Maven CI-friendly versions.** A multi-module pom commonly declares
+    `<version>${revision}</version>` with the real number in
+    `<properties><revision>1.0.1</revision></properties>` -- and the
+    concatenated `${revision}${sha1}${changelist}` form is the documented
+    idiom. Returning the literal `"${revision}"` would pass every "did we read
+    something?" check and only fail later at comparison time, where the
+    misleading conclusion is that a version bump was skipped (Trap T9).
+
+    None when a placeholder cannot be resolved: an unresolved version is not a
+    version, and saying so here is what keeps the failure honest.
+    """
+    if "${" not in value:
+        return value
+
+    missing = []
+
+    def substitute(match):
+        name = match.group(1).strip()
+        if name in properties:
+            return properties[name]
+        missing.append(name)
+        return ""
+
+    resolved = _PLACEHOLDER_RE.sub(substitute, value).strip()
+    if missing:
+        logger.warning("pom.xml version uses properties this pom does not "
+                       "define; treating the version as unreadable",
+                       unresolved=missing, raw=value)
+        return None
+    return resolved or None
+
+
 def parse_pom_version(text: Optional[str]) -> Optional[str]:
     """The project's own version from a pom.
 
@@ -562,6 +654,8 @@ def parse_pom_version(text: Optional[str]) -> Optional[str]:
     `/project/version` read specifically, falling back to
     `/project/parent/version` only when the project declares none, which is
     the case Maven's own inheritance rule covers.
+
+    `${...}` placeholders are resolved against `<properties>` (Trap T12).
     """
     if not text or not text.strip():
         return None
@@ -572,17 +666,39 @@ def parse_pom_version(text: Optional[str]) -> Optional[str]:
         logger.warning("pom.xml did not parse", error=str(exc))
         return None
 
+    properties = _pom_properties(root)
+
     parent_version = None
     for child in root:
         name = _local_name(child.tag)
         if name == "version" and (child.text or "").strip():
-            return child.text.strip()
+            return _resolve_placeholders(child.text.strip(), properties)
         if name == "parent":
             for grandchild in child:
                 if _local_name(grandchild.tag) == "version":
                     parent_version = (grandchild.text or "").strip() or None
 
-    return parent_version
+    if parent_version:
+        return _resolve_placeholders(parent_version, properties)
+    return None
+
+
+def parse_properties_version(text: Optional[str]) -> Optional[str]:
+    """`version=1.0.1` out of a `.properties` file.
+
+    Lets `version_file` point at `gradle.properties` or a `versions.props`
+    when the build keeps the shipped number there rather than in a pom.
+    """
+    if not text:
+        return None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith(("#", "!")):
+            continue
+        key, separator, value = line.partition("=")
+        if separator and key.strip() in ("version", "revision"):
+            return value.strip() or None
+    return None
 
 
 def parse_package_version(text: Optional[str]) -> Optional[str]:
@@ -597,16 +713,41 @@ def parse_package_version(text: Optional[str]) -> Optional[str]:
 
 def version_at(repo: Repo, ref: Optional[str] = None,
                version_file: Optional[str] = None) -> Optional[str]:
-    """The version declared in the repo's version file at `ref`, or None."""
+    """The version declared in the repo's version file at `ref`, or None.
+
+    **A value that does not parse as a version is not returned.** Handing back
+    text that merely *looks* read -- an unresolved `${revision}`, a
+    placeholder, a branch name -- passes every "did we get something?" check
+    upstream and fails only at comparison time, where the reported cause is a
+    skipped version bump (Trap T9) rather than an unreadable version file.
+    Returning None keeps the diagnosis attached to the thing that actually
+    went wrong.
+    """
     if not repo:
         return None
     name = version_file or repo.version_file
     text = file_at(repo, name, ref)
     if text is None:
         return None
+
     if name.endswith(".json"):
-        return parse_package_version(text)
-    return parse_pom_version(text)
+        raw = parse_package_version(text)
+    elif name.endswith(".properties") or name.endswith(".props"):
+        raw = parse_properties_version(text)
+    else:
+        raw = parse_pom_version(text)
+
+    if raw is None:
+        return None
+
+    from src.dlt import versions
+    if versions.parse(raw) is None:
+        logger.warning("Version file holds a value that is not an ordered "
+                       "version; treating it as unreadable",
+                       repo=repo.slug, file=name, ref=ref or repo.branch,
+                       value=raw[:80])
+        return None
+    return raw
 
 
 #: `pom.xml` at any depth, so a nested module's pom counts as the version file.

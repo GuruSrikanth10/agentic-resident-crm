@@ -1254,7 +1254,7 @@ acts on by itself.
 | C1 | `dlt/deployed.py` | Reads `status.container_statuses[].image` off the service's pods. Sidecars excluded via `K8S_SIDECAR_DENYLIST`. Reports the *set* of versions and refuses to name a winner mid-rollout. |
 | C2 | `dlt/stacktrace.py` | `FrameLocation` keeps the file and line the parser already captured and discarded -- beside the fingerprint, never inside it. |
 | C3 | `dlt/versions.py` | Parses and orders `1.0.0-release.42`, `1.0.1-SNAPSHOT`, `1.0.0`. Unparseable means `None`, and `None` propagates through every comparison. |
-| C4 | `dlt/bitbucket.py` | Read-only, both API flavours. Four calls: commits touching a path, a commit's changed paths, a file at a ref, a repository listing. |
+| C4 | `dlt/bitbucket.py` | Read-only, both API flavours. Four calls: commits touching a path, a commit's changed paths, a file at a ref, a repository listing. Resolves `${revision}`-style pom versions, and refuses any version that does not parse. |
 | C5 | `dlt/code_check.py` | Composes the above into the verdict. Queries **every** frame of the call path, not just the failure site. |
 | C6 | `dlt/auto_replay.py` | The veto, in `decide()`, placed last. |
 | C7 | `dlt/parked.py` + `tools/release_parked_replays.py` | The waiting queue, and what comes back for it. |
@@ -1287,9 +1287,15 @@ changed" and stop every replay in the system on no evidence at all -- the same
 distinction `FetchResult.ok` and `Corroboration.could_not_look` already make
 in the log lane.
 
-**Seven traps** are documented in DLT_PLAN.md 14.4, numbered T5-T11 to
-continue that document's existing series. The two most likely to bite a future
-editor:
+**Nine traps** are documented in DLT_PLAN.md 14.4, numbered T5-T13 to continue
+that document's existing series. Three are worth knowing before configuring
+anything: a pom's `<parent><version>` comes first in the document, so the
+first `<version>` tag is the wrong one (T5); a multi-module pom's
+`<version>${revision}</version>` must be resolved against `<properties>`, and
+an unresolved placeholder must be treated as unreadable rather than passed
+downstream (T12); and `authorTimestamp` is when code was *written*, so a
+rebased or squash-merged fix sorts before the failure it fixes and gets
+filtered out (T13). The two most likely to bite a future editor:
 a Maven pom declares `<parent><version>` *before* its own, so the first
 `<version>` tag is the parent's (T5); and `"1.0.10" < "1.0.9"` is true as
 strings and wrong as versions, which is why `versions.py` is its own module
