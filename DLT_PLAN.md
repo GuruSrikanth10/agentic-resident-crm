@@ -1491,6 +1491,13 @@ casebook. Changes nothing about replay.
     within one repository and one running build was read, so a call path
     touching two mapped repos yields `UNKNOWN` rather than a meaningless
     comparison.
+  - **A version file that does not parse is unreadable, not a skipped bump**
+    (Trap T12). `version_at` validates through `versions.parse` before
+    returning, so an unresolved `${revision}` reports "no version could be
+    resolved" rather than being blamed on Trap T9.
+  - **An empty commit list expires sooner than a populated one.** It is the
+    answer that withholds a replay, so a stale one costs more --
+    `DLT_CODE_CHECK_NEGATIVE_TTL_SECONDS`, capped by the main TTL.
   - **Three asymmetries, all pointing the same way.** A wrong `FIX_DEPLOYED`
     causes a replay that fails again; a wrong `NOT_DEPLOYED` only delays one.
     So the *highest* candidate version is required (several commits touched
@@ -1706,6 +1713,8 @@ confident wrong answer.
 | T8 | A frame in the shared `in.gov.uidai.common` library is a dependency bump, not a commit on the service's branch | An unmapped package resolves to no repository and yields `UNKNOWN` |
 | T9 | A fix merged with no version bump leaves the version reading the number already running -- a false `FIX_DEPLOYED` | A positive verdict requires the version to be *strictly ahead* of the failing build's |
 | T10 | C2 puts line numbers in the failure record for the first time; one reaching `compute_fingerprint` fragments every group (Risk R3) | The reference fixture's fingerprint is pinned as a literal and asserted byte-identical |
+| T12 | **Maven CI-friendly versions.** A multi-module pom commonly reads `<version>${revision}</version>` with the number in `<properties>`. Returning the literal `"${revision}"` passes every "did we read something?" check and fails only at comparison time -- where the reported cause is a *skipped version bump* (T9), pointing an investigator at a convention problem that does not exist | `parse_pom_version` resolves `${...}` against `<properties>`; `version_at` refuses any value that does not parse as an ordered version, so the diagnosis stays attached to the unreadable file |
+| T13 | **`authorTimestamp` is when code was written, not when it landed.** Under rebase or squash-merge a fix authored Monday, merged Friday, on a packet that failed Wednesday sorts *before* the failure and is filtered out -- a confident, false `NO_CHANGE`, invisible to the accuracy report | Bitbucket Server's `committerTimestamp` is preferred, and is the field those operations rewrite. Cloud exposes no equivalent, so the caveat stands there |
 | T11 | **Checking only the failure site.** An exception surfaces where bad data is *used*, not where it was produced -- `a()` passes something inconsistent to `b()` to `c()`, which throws, and the fix lands in `a()`. Checking `c()` alone finds no commit and reports a confident, false `NO_CHANGE`, withholding a replay that would now succeed. Fails toward "never replay", which is safe but silently removes the packets the feature exists to help -- and `--code-check-accuracy` cannot see it, because a withheld replay produces no outcome to measure | `code_check._probe_path` queries every frame up to `DLT_CODE_CHECK_FRAMES` (default 5), and `NO_CHANGE` requires every mapped file on the path to be clean |
 
 ---

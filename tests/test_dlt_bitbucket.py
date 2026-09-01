@@ -505,3 +505,165 @@ def test_branch_names_with_slashes_are_usable():
     assert B.is_usable_branch("release/2026.08") is True
     assert B.is_usable_branch("release; rm -rf") is False
     assert B.is_usable_branch("") is False
+
+
+# ---------------------------------------------------------------------------
+# Trap T12 -- Maven CI-friendly versions
+# ---------------------------------------------------------------------------
+
+CI_POM = """<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <parent><artifactId>uidai-parent</artifactId><version>2.7.0</version></parent>
+  <artifactId>enu-biometric</artifactId>
+  <version>${revision}</version>
+  <properties><revision>1.0.1</revision></properties>
+</project>
+"""
+
+CI_POM_TRIO = """<project>
+  <version>${revision}${sha1}${changelist}</version>
+  <properties>
+    <revision>1.0.1</revision><sha1></sha1><changelist>-SNAPSHOT</changelist>
+  </properties>
+</project>
+"""
+
+CI_POM_UNDEFINED = """<project><version>${revision}</version></project>"""
+
+
+def test_a_ci_friendly_version_is_resolved_from_properties():
+    """`<version>${revision}</version>` is the documented multi-module idiom.
+    Returning the literal would pass every "did we read something?" check and
+    fail only at comparison time."""
+    assert B.parse_pom_version(CI_POM) == "1.0.1"
+
+
+def test_the_revision_sha1_changelist_trio_is_resolved():
+    assert B.parse_pom_version(CI_POM_TRIO) == "1.0.1-SNAPSHOT"
+
+
+def test_a_placeholder_with_no_property_is_unreadable_not_literal():
+    """None, not `"${revision}"`. An unresolved version is not a version."""
+    assert B.parse_pom_version(CI_POM_UNDEFINED) is None
+
+
+def test_a_parent_version_placeholder_is_resolved_too():
+    pom = """<project>
+      <parent><version>${revision}</version></parent>
+      <properties><revision>2.7.0</revision></properties>
+    </project>"""
+    assert B.parse_pom_version(pom) == "2.7.0"
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("group=uidai\nversion=1.0.1\n", "1.0.1"),
+    ("# a comment\nrevision = 1.0.2\n", "1.0.2"),
+    ("name=svc\n", None),
+    ("", None),
+    (None, None),
+])
+def test_a_properties_file_can_carry_the_version(text, expected):
+    assert B.parse_properties_version(text) == expected
+
+
+def test_version_at_reads_a_properties_file_when_configured(monkeypatch):
+    monkeypatch.setenv("DLT_REPO_MAP", json.dumps({
+        "com.uidai.enu.biometric": {"project": "ENU", "repo": "enu-biometric",
+                                    "version_file": "gradle.properties"},
+    }))
+    _serve(monkeypatch, lambda path, params: FakeResponse(200, text="version=1.0.1"))
+
+    assert B.version_at(_repo()) == "1.0.1"
+
+
+# -- a value that does not parse is not a version ---------------------------
+
+@pytest.mark.parametrize("pom", [CI_POM_UNDEFINED,
+                                 "<project><version>latest</version></project>",
+                                 "<project><version>main</version></project>"])
+def test_version_at_refuses_a_value_that_is_not_an_ordered_version(monkeypatch, pom):
+    """Handing back unparseable text upstream makes the eventual failure read
+    as a skipped version bump (Trap T9) rather than an unreadable file."""
+    _serve(monkeypatch, lambda path, params: FakeResponse(200, text=pom))
+
+    assert B.version_at(_repo()) is None
+
+
+def test_version_at_still_returns_a_real_version(monkeypatch):
+    _serve(monkeypatch, lambda path, params: FakeResponse(200, text=CI_POM))
+    assert B.version_at(_repo()) == "1.0.1"
+
+
+# ---------------------------------------------------------------------------
+# Trap T13 -- which timestamp a commit is filtered on
+# ---------------------------------------------------------------------------
+
+def test_the_committer_timestamp_is_preferred_over_the_author_timestamp(monkeypatch):
+    """A rebase or squash merge leaves `authorTimestamp` far in the past. A fix
+    authored before the packet failed but merged after would be filtered out as
+    "older than the failure", and the fix never found."""
+    payload = {"values": [{"id": "aaa", "message": "Fix",
+                           "authorTimestamp": 1786000000000,     # long before
+                           "committerTimestamp": 1787200000000}]}  # after
+    _serve(monkeypatch, lambda path, params: FakeResponse(200, payload))
+
+    commits = B.commits_touching(_repo(), "Foo.java")
+    assert commits[0].timestamp_ms == 1787200000000
+
+    # And it therefore survives a filter anchored on the failure.
+    B.reset_cache()
+    _serve(monkeypatch, lambda path, params: FakeResponse(200, payload))
+    assert len(B.commits_touching(_repo(), "Foo.java", since_ms=1787019608511)) == 1
+
+
+def test_the_author_timestamp_is_the_fallback(monkeypatch):
+    payload = {"values": [{"id": "aaa", "message": "Fix",
+                           "authorTimestamp": 1787200000000}]}
+    _serve(monkeypatch, lambda path, params: FakeResponse(200, payload))
+
+    assert B.commits_touching(_repo(), "Foo.java")[0].timestamp_ms == 1787200000000
+
+
+# ---------------------------------------------------------------------------
+# An empty result expires sooner than a populated one
+# ---------------------------------------------------------------------------
+
+def test_the_negative_ttl_defaults_shorter_than_the_positive_one(monkeypatch):
+    monkeypatch.setenv("DLT_CODE_CHECK_TTL_SECONDS", "3600")
+    assert B.negative_cache_ttl_seconds() < B.cache_ttl_seconds()
+    assert B.negative_cache_ttl_seconds() == B.DEFAULT_NEGATIVE_TTL_SECONDS
+
+
+def test_the_negative_ttl_never_exceeds_the_positive_one(monkeypatch):
+    """Lowering the main TTL for testing must lower both."""
+    monkeypatch.setenv("DLT_CODE_CHECK_TTL_SECONDS", "60")
+    monkeypatch.setenv("DLT_CODE_CHECK_NEGATIVE_TTL_SECONDS", "900")
+    assert B.negative_cache_ttl_seconds() == 60
+
+
+def test_an_empty_result_is_re_fetched_sooner_than_a_populated_one(monkeypatch):
+    """An empty list becomes NO_CHANGE and withholds a replay, so a stale one
+    costs more than a stale list of commits."""
+    monkeypatch.setenv("DLT_CODE_CHECK_TTL_SECONDS", "3600")
+    monkeypatch.setenv("DLT_CODE_CHECK_NEGATIVE_TTL_SECONDS", "900")
+
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(B.time, "monotonic", lambda: clock["t"])
+
+    for payload, key, expected_after_20min in (({"values": []}, "empty.java", 2),
+                                               (SERVER_COMMITS, "full.java", 1)):
+        B.reset_cache()
+        clock["t"] = 1000.0
+        calls = _serve(monkeypatch, lambda path, params: FakeResponse(200, payload))
+
+        B.commits_touching(_repo(), key)
+        clock["t"] += 1200          # 20 minutes: past the negative TTL only
+        B.commits_touching(_repo(), key)
+
+        assert len(calls) == expected_after_20min, key
+
+
+def test_a_malformed_negative_ttl_falls_back_to_the_default(monkeypatch):
+    monkeypatch.setenv("DLT_CODE_CHECK_TTL_SECONDS", "3600")
+    monkeypatch.setenv("DLT_CODE_CHECK_NEGATIVE_TTL_SECONDS", "soon")
+    assert B.negative_cache_ttl_seconds() == B.DEFAULT_NEGATIVE_TTL_SECONDS
