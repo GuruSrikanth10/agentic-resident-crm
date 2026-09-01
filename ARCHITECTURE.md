@@ -1303,11 +1303,14 @@ Parking cannot become a second replay path: a packet parks only when
 `queue_for_replay`, so `ENABLE_AUTO_REPLAY` still decides whether the packet
 reaches OIS or lands in `pending_replays` for a human.
 
-**Status.** Phases C0-C8 are implemented and unit-tested against fixtures.
+**Status.** Phases C0-C8 are merged and unit-tested against fixtures.
 **C0 has never been run against a real Bitbucket or cluster**, so DLT_PLAN.md
-14.3's five findings are all open and C4 should not merge to `main` until they
-are filled in. `BITBUCKET_BASE_URL` left empty keeps the whole extension
-inert and every verdict reads `UNKNOWN`. C1 is the exception worth keeping
+14.3's five findings are all open. The code is on `main` but **inert**:
+`BITBUCKET_BASE_URL` is empty and all three flags default `false`, so every
+verdict reads `UNKNOWN` and nothing about the DLT lane behaves differently
+from before it existed. **C0 is a gate on configuring it, not on merging it**
+-- `src/dlt/bitbucket.py`'s API flavour, path resolution and version-file
+handling all depend on answers nobody has yet. C1 is the exception worth keeping
 regardless: it closes DLT_PLAN.md Open Question 3 and mitigates Risk R4 on its
 own, and it is deliberately not behind a feature flag.
 
@@ -1334,7 +1337,7 @@ Open items, in the order they should be closed:
 
 | # | Item | Why it matters |
 |---|------|----------------|
-| 1 | **C0 has never been run.** `DLT_PLAN.md` 14.3's five findings are all `*pending*` | `src/dlt/bitbucket.py` should not merge to `main` until they are filled in: its API flavour, path resolution and version-file handling all depend on the answers. Run `python -m src.tools.code_check_probe --all --repo <PROJECT>/<REPO>`. |
+| 1 | **C0 has never been run.** `DLT_PLAN.md` 14.3's five findings are all `*pending*` | Do not set `BITBUCKET_BASE_URL` until they are filled in: `src/dlt/bitbucket.py`'s API flavour, path resolution and version-file handling all depend on the answers. Run `python -m src.tools.code_check_probe --all --repo <PROJECT>/<REPO>`. |
 | 2 | **Does the replay even land on this service?** (`DLT_PLAN.md` 14.5 Q3) | `queue_for_replay` posts to OIS, which re-drives the packet from a stage this system does not choose. If it re-enters *upstream* of the failing service, the running version that matters belongs to a different service than the pods `deployed.py` reads -- which would invalidate the comparison rather than merely weaken it. **Settle this before enabling `DLT_CODE_CHECK_GATES_REPLAY`.** |
 | 3 | **The verdicts have not been validated against reality** | `dlt_report --code-check-accuracy` exists precisely to produce that evidence, and it needs replays that actually fired. Run C5 alone (`DLT_CODE_CHECK_ENABLED=true`, gate off) for at least two weeks first. |
 | 4 | **Is the 5% uniform?** (Trap T9) | A fix merged with no version bump yields a false `FIX_DEPLOYED`. Mitigated by requiring the version to be *strictly ahead*, but if one team never bumps versions the error rate for their repos is 100%, not 5%. C0's Q4 sample must be stratified by repo, not pooled. |

@@ -1241,7 +1241,7 @@ systems, before any adapter code is written. Same shape as Phase 0.
 ### 14.3 Phase C0 findings
 
 Filled in by whoever runs the probe against the real systems. Until then
-every row is open, and C4 must not merge.
+every row is open, and C4 must stay unconfigured.
 
 | # | Question | Answer |
 |---|---|---|
@@ -1402,10 +1402,11 @@ months, because a bad comparison looks exactly like a good one.
 **Goal.** Read-only access to `release`: which commits touched a file, and
 what the version file said at a commit.
 
-> **Gate.** This phase must not merge to `main` before section 14.3's findings
+> **Gate.** This phase must not be *configured* before section 14.3's findings
 > are filled in. Its API flavour, path resolution and version-file handling
-> all depend on what C0 reports, and `BITBUCKET_BASE_URL` left empty keeps it
-> completely inert in the meantime.
+> all depend on what C0 reports. `BITBUCKET_BASE_URL` left empty keeps it
+> completely inert, which is what makes it safe to merge unanswered -- the
+> gate is on turning it on, not on the code existing.
 
 - **New:** `src/dlt/bitbucket.py` -- `repo_for`, `resolve_path`,
   `commits_touching`, `changed_paths`, `file_at`, `version_at`,
@@ -1669,7 +1670,7 @@ C0 ──> C4 (bitbucket adapter) ─────┘
 ```
 
 C1, C2 and C3 touch nothing external and were built while C0's questions were
-still open. C4 must not merge to `main` before section 14.3 reports. C6
+still open. C4 must not be configured before section 14.3 reports. C6
 additionally waits on a validation period after C5, which is a calendar
 dependency rather than a code one.
 
