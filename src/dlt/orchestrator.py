@@ -75,12 +75,21 @@ def _evidence_block(state: DltGraphState) -> str:
     )
     frames = "\n".join(f"  - {frame}" for frame in (failure.get("frames") or []))
 
-    # The payload is evidence, not just a place the refId lives. For the
-    # ABIS dedupe failures this lane sees most, the frames name a loop over
-    # matched candidates and the payload holds the candidates being looped
-    # over -- which is the difference between "a row was missing" and "a row
-    # was missing while resolving these specific candidates".
+    # The payload is evidence, not just a place the refId lives. Where the
+    # frames name a loop and the payload holds what was being looped over,
+    # this is the difference between "a row was missing" and "a row was
+    # missing while resolving the entries this input carried".
+    #
+    # It is also the only per-structure context the prompts get. The prompts
+    # are one file each, shared by every original topic; the payload structure
+    # is not shared, so the type-specific facts -- which field is the
+    # correlation id, which ids belong to other records -- travel here, in
+    # text `summarise_payload` renders for whichever `__TypeId__` this record
+    # actually has. The topic and type are named alongside it so a summary is
+    # never read against the wrong structure.
     payload_summary = state.get("payload_summary") or "(no payload was captured)"
+    origin_topic = failure.get("origin_topic") or "(unknown)"
+    type_id = failure.get("type_id") or "(no __TypeId__ header)"
 
     registry = failure.get("registry_description")
     category = failure.get("registry_category")
@@ -93,7 +102,9 @@ def _evidence_block(state: DltGraphState) -> str:
                      "(No registry entry exists for this code.)")
 
     return (
-        f"### Case\n{state.get('case_id')}\n\n"
+        f"### Case\n{state.get('case_id')}\n"
+        f"Original topic: {origin_topic}\n"
+        f"Payload type (__TypeId__): {type_id}\n\n"
         f"### Declared failure\n"
         f"Class: {failure.get('failure_class')} ({failure.get('class_reason')})\n"
         f"Root exception: {failure.get('root_fqcn')}\n"
@@ -104,7 +115,7 @@ def _evidence_block(state: DltGraphState) -> str:
         f"### Exception chain (outermost first; the LAST entry is the root)\n"
         f"{chain or '  (none parsed)'}\n\n"
         f"### Application frames at the failure site\n{frames or '  (none)'}\n\n"
-        f"### Message payload\n{payload_summary}\n\n"
+        f"### Message payload (structure: {type_id})\n{payload_summary}\n\n"
         f"### Corroboration\n"
         f"Verdict: {corroboration.get('verdict')}\n"
         f"Reason: {corroboration.get('reason')}\n"

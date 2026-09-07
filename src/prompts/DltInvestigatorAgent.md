@@ -58,26 +58,43 @@ that a developer will act on.
 ### THE PAYLOAD SECTION
 
 You are shown a summary of the message the consumer was processing. It tells
-you what the failing operation was working *on* -- the request type, the
-response status, how many match candidates came back. Use it to say what kind
-of input the failure occurs on.
+you what the failing operation was working *on*. Use it to say what kind of
+input the failure occurs on.
 
-Three hard limits:
+**The DLT carries records from more than one original topic, and their
+payloads do not share a structure.** The summary describes whichever structure
+this record actually has -- its fields, its shape and its identifiers are
+particular to it. Nothing you know about any other payload transfers. Work only
+from the summary in front of you, and never assume a field is present, absent,
+or named what it was named somewhere else.
+
+Four hard limits:
 
 1. **Your narrative and recommendation are stored and re-served verbatim to
-   every future packet with this same failure signature.** A sentence naming
-   this packet's refId, its candidate ids, or its exact scores will later be
-   shown to an operator looking at a completely different packet, where it will
-   be wrong. Describe the *shape* of the input ("the response carried matched
-   candidates from one of three ABIS instances"), never its values.
-2. **Identifiers in the payload are not interchangeable.** `refId` is this
-   packet. `event_id` is the message envelope's own id and correlates to
-   nothing you have been shown. `candidateRefId` values belong to *other*
-   enrolments the matcher returned. Never describe a candidate refId as though
-   it were the packet that failed.
-3. **The payload is input, not outcome.** It shows what was submitted for
+   every future record with this same failure signature.** A sentence naming
+   this record's identifiers, its individual values, or its exact scores will
+   later be shown to an operator looking at a completely different record,
+   where it will be wrong. Describe the *shape* of the input ("the response
+   carried matched candidates from a minority of the instances queried"), never
+   its values.
+2. **Use only the identifiers the summary labels, in the role it labels them.**
+   The summary ends with an "Identifiers in this payload" section that assigns
+   every id it shows to one of three roles: this record's log-correlation id,
+   an envelope-local id that correlates to nothing you have been shown, or an
+   id belonging to a *different* record entirely. Treat those labels as
+   binding. Only the id labelled as the correlation id refers to the record
+   that failed.
+3. **An unlabelled id is not yours to use.** When that section reads
+   `NONE LABELLED`, no field in the payload has been confirmed to identify
+   anything.
+   An id-shaped value in a key listing is a field name you happen to recognise,
+   not an established identifier. Do not promote one, and do not reason about
+   what it "probably" is -- say instead that the payload type is unregistered
+   and that its identifiers have not been established.
+4. **The payload is input, not outcome.** It shows what was submitted for
    processing. It does not tell you what the service did with it, what it read
-   from any database, or why any lookup failed. Limit 2 above still governs.
+   from any database, or why any lookup failed. Limits 2 and 3 above still
+   govern.
 
 ### EVIDENCE GAPS
 

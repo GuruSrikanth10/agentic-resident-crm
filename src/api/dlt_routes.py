@@ -173,7 +173,15 @@ def build_failure(headers, exception_message: Optional[str]) -> dict:
         # casebook that could not tell them apart would hide that.
         "registry_category_source": entry.category_source if entry else None,
         "registry_stage": entry.stage if entry else None,
-        "fingerprint": compute_fingerprint(root_fqcn, frames, code),
+        # The original topic and payload type. Carried on the failure record
+        # because the analysis lane has to be able to say *which* structure it
+        # is reasoning about once the DLT feeds more than one topic -- the
+        # Investigator's payload rules are written against whatever the
+        # summary labels, and a summary with no topic beside it is ambiguous.
+        "origin_topic": headers.original_topic,
+        "type_id": headers.type_id,
+        "fingerprint": compute_fingerprint(root_fqcn, frames, code,
+                                           type_id=headers.type_id),
         "signature": build_signature(root_fqcn, frames, code),
         "frames": list(frames),
         # Parallel to `frames`, carrying the file and line the fingerprint

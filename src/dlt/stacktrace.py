@@ -106,6 +106,33 @@ def fingerprint_frame_count() -> int:
         return DEFAULT_FINGERPRINT_FRAMES
 
 
+def fingerprint_includes_type() -> bool:
+    """Whether `__TypeId__` is a fingerprint dimension.
+
+    A group's recommendation is written once and re-served verbatim to every
+    later member, and the narrative describes the payload the failure occurs
+    on. That is safe while the DLT carries one payload structure. It stops
+    being safe with several: two topics failing in a shared library or a
+    common consumer base class share a root exception, a business code and
+    their top application frames, so they collapse into one group -- and the
+    first topic's payload description is then served against the second's
+    records, where it is simply wrong.
+
+    Off by default, because turning it on re-hashes every failure mode: live
+    groups fragment once, occurrence counts restart from zero and stored
+    recommendations are orphaned. That is Risk R3 paid deliberately, and it
+    buys nothing until a second structure actually reaches the DLT -- so it is
+    a deployment decision, not a release. Turn it on with the second topic.
+
+    Reads `os.environ` directly rather than through `src.utils.env`, like the
+    two settings above it: that module calls `load_dotenv()` on import, and
+    this one is imported by pure-parsing tools that should not acquire a
+    dotenv read as a side effect.
+    """
+    raw = os.environ.get("DLT_FINGERPRINT_TYPE_ID", "").strip().lower()
+    return raw in ("true", "1", "yes")
+
+
 # ---------------------------------------------------------------------------
 # Parsed shapes
 # ---------------------------------------------------------------------------
@@ -377,21 +404,34 @@ def normalise_frame_locations(frames: Sequence,
 def compute_fingerprint(root_fqcn: Optional[str],
                         normalised_frames: Sequence,
                         business_code: str = "",
-                        limit: Optional[int] = None) -> str:
+                        limit: Optional[int] = None,
+                        type_id: Optional[str] = None) -> str:
     """Stable SHA256 identity for one failure mode.
 
     `business_code` is supplied by Phase 2's classifier; Phase 1 computes
     fingerprints without one. It is a distinct dimension rather than part of
     the message because two different codes raised from the same frame are
     genuinely different failures.
+
+    `type_id` is the payload's `__TypeId__`, and it is a dimension only when
+    `fingerprint_includes_type()` says so -- see that function for why the
+    default is off. It is **appended** to the hashed string rather than
+    interleaved, so a fingerprint computed without it stays byte-identical to
+    every fingerprint this function has ever returned. Do not reorder these
+    parts to tidy them up: the order is the compatibility guarantee.
     """
     count = fingerprint_frame_count() if limit is None else max(1, limit)
-    payload = "|".join((
+    parts = [
         (root_fqcn or "").strip(),
         (business_code or "").strip(),
         "\n".join(normalised_frames[:count]),
-    ))
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    ]
+
+    normalised_type = (type_id or "").strip()
+    if normalised_type and fingerprint_includes_type():
+        parts.append(normalised_type)
+
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 
 
 def build_signature(root_fqcn: Optional[str],

@@ -764,6 +764,7 @@ All new. Added to `.env.example` in the phase that first reads them.
 | `DLT_APP_PACKAGES` | `com.uidai.,in.gov.uidai.` | Frames kept during normalisation |
 | `DLT_FINGERPRINT_FRAMES` | `5` | Frames in the fingerprint |
 | `DLT_BOILERPLATE_FRAMES` | `in.gov.uidai.common.factory.CommonErrorFactory` | Exception-plumbing frames dropped before fingerprinting (5.1). Empty disables |
+| `DLT_FINGERPRINT_TYPE_ID` | `false` | Make `__TypeId__` a fingerprint dimension. Turn on with the second original topic; doing so fragments every existing group once |
 | `DLT_CLASS_MAP` | (built-in) | JSON, exception FQCN prefix -> class. **Extends** the built-in map, never replaces it |
 | `DLT_BUSINESS_EXCEPTIONS` | `in.gov.uidai.common.exception.BusinessException` | Extra business-exception FQCNs; any `*BusinessException` already qualifies |
 | `DLT_REFID_PATH` | (unset) | Dotted path to refId in the payload |
