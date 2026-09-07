@@ -20,6 +20,37 @@ ERROR_CONTEXT_LINES = int(os.environ.get("LOG_ERROR_CONTEXT_LINES", "200"))
 # of the trace, which is effectively the whole log (1.11).
 ERROR_TRAILING_LINES = int(os.environ.get("LOG_ERROR_TRAILING_LINES", "200"))
 
+# Within the ERROR window, a template repeating at least this often is folded
+# to its first occurrence plus a count. Lower than the clustered path's
+# threshold because the window is a few hundred lines, not a whole flow -- a
+# line appearing three times in 233 is already boilerplate here. WARN and ERROR
+# lines are never folded regardless.
+ERROR_REPEAT_THRESHOLD = int(os.environ.get("LOG_ERROR_REPEAT_THRESHOLD", "3"))
+
+# ---------------------------------------------------------------------------
+# Stage 2.5 -- Noise floor (applied AFTER raw_logs.txt is written)
+# ---------------------------------------------------------------------------
+# Severity floor for the text handed to the reducer. Framework DEBUG chatter
+# -- shard hints, JPA transaction bookkeeping, integrity interceptors, SQL
+# echo -- is ~50% of the lines and ~66% of the BYTES in a real trace, and
+# none of it distinguishes one packet's outcome from another's.
+#
+# Applied after `_save_raw_logs`, never before: raw_logs.txt stays the
+# complete, unfiltered record for audit. Only the LLM's copy is thinned, and
+# the count of what was dropped is announced in the header rather than
+# removed silently.
+MIN_LEVEL = os.environ.get("LOG_MIN_LEVEL", "INFO").strip().upper()
+
+#: Severity ordering used by the floor above. WARN and ERROR must always sit
+#: above the default so no floor can ever discard them by accident.
+LEVEL_ORDER = {"TRACE": 0, "DEBUG": 10, "INFO": 20, "WARN": 30, "ERROR": 40}
+
+# Collapse the column list of an echoed SQL statement to a count. These are
+# 10.6% of the lines but 38.6% of the bytes (avg 465 chars) in the reference
+# trace, and the diagnostic content of `select a,b,c,...,z from t where x=?`
+# is entirely in the table and the predicate -- never in the 43 column names.
+COLLAPSE_SQL = os.environ.get("LOG_COLLAPSE_SQL", "true").lower() == "true"
+
 # ---------------------------------------------------------------------------
 # Stage 3 -- Drain3 clustering
 # ---------------------------------------------------------------------------
@@ -34,6 +65,19 @@ ERROR_TRAILING_LINES = int(os.environ.get("LOG_ERROR_TRAILING_LINES", "200"))
 # Templates whose per-flow count is below this threshold are always kept in
 # full (with example lines), never collapsed to count-only.
 RARE_TEMPLATE_THRESHOLD = int(os.environ.get("LOG_RARE_TEMPLATE_THRESHOLD", "5"))
+
+# Collapse a template to count-only once it repeats this often within a single
+# flow, EVEN IF the catalog does not classify it as boilerplate.
+#
+# Without this the collapse branch in `apply_evidence_guardrails` was reachable
+# only via a catalog classification, so a deployment that never ran
+# `build_catalog` (every template classifies as "unknown") collapsed nothing at
+# all: 107 of 139 templates were kept in full with up to 3 example lines each,
+# and the "reduced" output came out ~1.8x LARGER than the trace it reduced.
+# Frequency within the flow is evidence of boilerplate on its own; the catalog
+# now improves this judgement instead of being the only thing that makes it.
+BOILERPLATE_COUNT_THRESHOLD = int(
+    os.environ.get("LOG_BOILERPLATE_COUNT", "5"))
 
 # Decision-vocabulary matches are kept in FULL TEXT, so an unbounded list can
 # make the "reduced" output larger than the raw trace it reduces. The default

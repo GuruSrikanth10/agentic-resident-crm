@@ -16,7 +16,13 @@ from typing import Optional
 from src.log_pipeline import redaction
 from src.log_pipeline.catalog import TemplateCatalog
 from src.log_pipeline.config import MAX_REDUCED_CHARS
-from src.log_pipeline.reducer import branch_on_error, cluster_logs, apply_evidence_guardrails
+from src.log_pipeline.reducer import (
+    apply_evidence_guardrails,
+    apply_noise_floor,
+    branch_on_error,
+    cluster_logs,
+    collapse_error_window,
+)
 from src.log_pipeline.sources import chain as source_chain
 from src.log_pipeline.sources.k8s import gaps as k8s_gaps
 from src.log_pipeline.types import CONTEXT_LINE_MARKER, FetchContext, TimeWindow
@@ -147,8 +153,31 @@ def reduce_logs(event_id: str, extra_identifiers: tuple = (),
     # Persist raw logs to disk for audit
     log_file_path = _save_raw_logs(artifact_key, raw_logs, storage=storage)
 
+    # ------------------------------------------------------------------
+    # Stage 2.5: Noise floor -- AFTER the audit copy is on disk.
+    # ------------------------------------------------------------------
+    # Framework DEBUG chatter and echoed SQL column lists are together ~66%
+    # and ~39% of the bytes in a real trace and carry no packet-specific
+    # signal. Thinning them here rather than at fetch keeps raw_logs.txt the
+    # complete record while shrinking only the copy the model reads.
+    #
+    # If the floor would empty the trace, keep the original: handing the
+    # agent nothing reads as "no logs existed", which is the one conclusion
+    # this pipeline must never invite (design principle 3).
+    floored, noise_report = apply_noise_floor(raw_logs)
+    if floored:
+        raw_logs = floored
+    else:
+        noise_report = {"dropped_below_level": 0, "min_level": noise_report["min_level"],
+                        "sql_collapsed": 0, "sql_chars_saved": 0}
+    # Folded into the gap banner so every output path -- small, ERROR and
+    # clustered -- announces it, and so it lands ahead of the trace rather
+    # than after it.
+    noise_banner = _noise_banner(noise_report, total_fetched)
+    gap_banner = "\n".join(part for part in (gap_banner, noise_banner) if part)
+
     # If logs are small enough, return directly
-    if total_fetched < 50:
+    if len(raw_logs) < 50:
         lines = [f"--- Log Trace for ID: {event_id} ---",
                  *_context_legend(raw_logs)]
         # `record`, not `log`: this loop used to rebind `log`, the bound
@@ -169,10 +198,13 @@ def reduce_logs(event_id: str, extra_identifiers: tuple = (),
     branch_result = branch_on_error(raw_logs)
 
     if branch_result["has_error"]:
-        # Stuck path: format the trimmed context directly
+        # Stuck path: chronological, but with repeated boilerplate folded to
+        # its first occurrence. The sequence is what this branch is for, so it
+        # is never replaced by a cluster summary the way the normal path is.
+        window, _suppressed = collapse_error_window(branch_result["payload"])
         formatted = _with_banner(
             gap_banner,
-            _format_error_path(event_id, branch_result["payload"], total_fetched, log_file_path),
+            _format_error_path(event_id, window, total_fetched, log_file_path),
         )
         _save_reduced_logs(artifact_key, formatted, storage=storage)
         return formatted
@@ -237,6 +269,31 @@ def _bound_total_size(body: str) -> str:
     return body[:keep] + marker + body[-keep:]
 
 
+def _noise_banner(report: dict, total_fetched: int) -> str:
+    """Announce what the noise floor removed, in the model's own view.
+
+    An omission the model cannot see is one it reasons as though it never
+    happened -- the same rule the decision-vocabulary and truncation markers
+    follow. It matters most for the dropped DEBUG lines: without this line the
+    model has no way to tell a service that logged nothing at DEBUG from one
+    whose DEBUG was filtered out on the way here.
+    """
+    parts = []
+    dropped = report.get("dropped_below_level", 0)
+    if dropped:
+        parts.append(
+            f"{dropped} of {total_fetched} lines below {report.get('min_level', 'INFO')} "
+            f"were omitted (LOG_MIN_LEVEL); raw_logs.txt holds the complete trace."
+        )
+    collapsed = report.get("sql_collapsed", 0)
+    if collapsed:
+        parts.append(
+            f"{collapsed} SQL statements had their column lists replaced with a "
+            f"count (LOG_COLLAPSE_SQL); tables and predicates are unchanged."
+        )
+    return "NOTE: " + " ".join(parts) if parts else ""
+
+
 def _origin(log: dict) -> str:
     """Render pod attribution when present.
 
@@ -289,6 +346,10 @@ def _format_error_path(event_id: str, trimmed_logs: list[dict],
         "",
     ]
     for log in trimmed_logs:
+        # Synthetic marker standing in for folded repeats of the line above.
+        if "_note" in log:
+            lines.append(f"          {log['_note']}")
+            continue
         marker = " *** " if log.get("level", "").upper() == "ERROR" else "     "
         lines.append(f"{marker}[{log['timestamp']}] [{_origin(log)}] "
                      f"[{log['level']}]{_context_tag(log)} {log['message']}")
@@ -341,6 +402,12 @@ def _format_normal_path(event_id: str, assembled: dict,
         lines.append("")
 
     # Template clusters (ordered by first_seen)
+    #
+    # Rendered compactly, because the scaffolding used to cost more than the
+    # evidence: a standalone `first_seen=/last_seen=` line per cluster was
+    # 26.6% of the whole output, and a cluster of count 1 printed the same
+    # content three times over -- once as the Drain3 template, once as the
+    # timestamp pair, and once as its single "example".
     lines.append("== Template Clusters (ordered by first appearance) ==")
     for cluster in clusters:
         classification = cluster.get("classification", "unknown")
@@ -351,15 +418,40 @@ def _format_normal_path(event_id: str, assembled: dict,
         last = cluster.get("last_seen", "")
         examples = cluster.get("examples", [])
 
-        lines.append(f"  [{tid}] [Count:{count:4d}] [{classification}] {template}")
-        lines.append(f"         first_seen={first}  last_seen={last}")
-        if examples:
-            for ex in examples[:3]:
-                lines.append(f"         example: {ex}")
-        lines.append("")
+        span = first if (not last or last == first) else f"{first}..{_time_only(last)}"
+
+        # A cluster seen once IS its example; the template adds nothing but a
+        # placeholder-substituted copy of the same text.
+        if count == 1 and examples:
+            lines.append(f"  [{tid}] x1 [{span}] {examples[0]}")
+            continue
+
+        # Collapsed (boilerplate/repetitive): the template and the count are
+        # the whole point -- examples were stripped in Stage 4.
+        if not examples:
+            lines.append(f"  [{tid}] x{count} [{classification}] [{span}] {template}")
+            continue
+
+        # Rare but repeated: the examples carry the varying parameters, which
+        # is what the template's <*> placeholders throw away.
+        lines.append(f"  [{tid}] x{count} [{classification}] [{span}]")
+        for ex in examples[:3]:
+            lines.append(f"      {ex}")
 
     lines.append("--- End of Reduced Log Analysis ---")
     return "\n".join(lines)
+
+
+def _time_only(timestamp: str) -> str:
+    """Render the time half of an RFC3339 stamp, for the end of a same-day span.
+
+    A cluster's first and last line are almost always seconds apart, so
+    repeating the full date in the range doubles the cost of the span for no
+    information. Falls back to the whole string when the shape is unfamiliar.
+    """
+    if "T" in timestamp:
+        return timestamp.split("T", 1)[1]
+    return timestamp
 
 
 # ======================================================================

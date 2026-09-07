@@ -21,8 +21,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from src.log_pipeline.catalog import TemplateCatalog
 from src.log_pipeline.config import CATALOG_PATH, DECISION_VOCABULARY_REGEX
-from src.log_pipeline.fetcher import fetch_logs
 from src.log_pipeline.reducer import cluster_logs
+from src.log_pipeline.sources import chain as source_chain
+from src.log_pipeline.types import FetchContext, TimeWindow
+
+
+def _default_window() -> "TimeWindow":
+    """Same look-back the pipeline uses, so the catalog is built from the same
+    slice of history the analysis will later see."""
+    return TimeWindow(hours=float(os.environ.get("K8S_DEFAULT_SINCE_HOURS", "2")))
 
 
 def main():
@@ -30,6 +37,8 @@ def main():
     parser.add_argument("--refids", nargs="+", help="List of refids to sample.")
     parser.add_argument("--refids-file", type=str, help="Path to a file with one refid per line.")
     parser.add_argument("--output", type=str, default=CATALOG_PATH, help="Output catalog JSON path.")
+    parser.add_argument("--hours", type=float, default=None,
+                        help="Look-back window (defaults to K8S_DEFAULT_SINCE_HOURS).")
     args = parser.parse_args()
 
     # Collect refids
@@ -54,7 +63,20 @@ def main():
     for i, refid in enumerate(refids):
         print(f"\n[{i+1}/{total_flows}] Processing refid: {refid}")
         try:
-            raw_logs = fetch_logs(refid, catalog=None)  # No catalog filtering during build
+            # Through the source chain, not the Elasticsearch fetcher: the
+            # catalog has to be buildable from whatever source the pipeline
+            # will actually read at analysis time. Going straight to
+            # `fetcher.fetch_logs` meant K8S_MOCK_LOG_FILE and the Kubernetes
+            # source were both invisible here, so an operator with no cluster
+            # access -- exactly the person running the mock -- could not build
+            # the catalog at all, and without a catalog Stage 4 collapses
+            # nothing (see reducer.BOILERPLATE_COUNT_THRESHOLD).
+            result = source_chain.fetch_with_fallback(
+                refid,
+                TimeWindow(hours=args.hours) if args.hours else _default_window(),
+                FetchContext(event_id=refid),
+            )
+            raw_logs = result.records  # No catalog filtering during build
             if not raw_logs:
                 print(f"  No logs found for {refid}, skipping.")
                 continue

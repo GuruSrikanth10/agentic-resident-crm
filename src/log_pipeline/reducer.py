@@ -6,17 +6,23 @@ Stage 3: Drain3 clustering with persisted state.
 Stage 4: Evidence assembly guardrails.
 """
 import os
+import re
 import threading
 from typing import Optional
 
 from filelock import FileLock
 
 from src.log_pipeline.config import (
+    BOILERPLATE_COUNT_THRESHOLD,
+    COLLAPSE_SQL,
     DECISION_VOCABULARY_REGEX,
     DRAIN3_STATE_DIR,
     ERROR_CONTEXT_LINES,
+    ERROR_REPEAT_THRESHOLD,
     ERROR_TRAILING_LINES,
+    LEVEL_ORDER,
     MAX_DECISION_VOCABULARY_LINES,
+    MIN_LEVEL,
     RARE_TEMPLATE_THRESHOLD,
 )
 from src.log_pipeline.catalog import TemplateCatalog
@@ -35,6 +41,106 @@ _drain3_intraprocess_lock = threading.Lock()
 # file every time, which only grows as more templates accumulate (2.5).
 # Access is still only ever under _drain3_intraprocess_lock / FileLock above.
 _template_miner_instance = None
+
+
+# ======================================================================
+# Stage 2.5 -- Noise floor
+# ======================================================================
+
+#: `select <cols> from ...`, `insert into t (<cols>) values (<vals>)` and
+#: `update t set <assignments> where ...`. Only the list between the anchors is
+#: replaced -- the statement kind, the table and the predicate all survive,
+#: because those are the parts that say what the flow was doing.
+_SQL_SELECT = re.compile(r"^(\s*select\s+)(.+?)(\s+from\s+.*)$", re.I | re.S)
+_SQL_INSERT = re.compile(r"^(\s*insert\s+into\s+\S+\s*\()([^)]*)(\).*)$", re.I | re.S)
+_SQL_UPDATE = re.compile(r"^(\s*update\s+\S+\s+set\s+)(.+?)(\s+where\s+.*)$", re.I | re.S)
+
+
+def _count_items(fragment: str) -> int:
+    """Count comma-separated items, ignoring commas inside parentheses.
+
+    `count(*), coalesce(a, b)` is two items, not three -- a naive split would
+    over-report and make the collapsed marker wrong.
+    """
+    depth = items = 0
+    seen = False
+    for char in fragment:
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif char == "," and depth == 0:
+            items += 1
+        if not char.isspace():
+            seen = True
+    return items + 1 if seen else 0
+
+
+def collapse_sql(message: str) -> str:
+    """Replace a SQL column/assignment list with a count of its entries.
+
+    Returns the message unchanged when it is not one of the three recognised
+    shapes, so an unfamiliar statement is never mangled into something the
+    Investigator would read as truncated evidence.
+    """
+    if not COLLAPSE_SQL or not message:
+        return message
+    for pattern, noun in ((_SQL_SELECT, "columns"),
+                          (_SQL_INSERT, "columns"),
+                          (_SQL_UPDATE, "assignments")):
+        match = pattern.match(message)
+        if not match:
+            continue
+        head, body, tail = match.groups()
+        count = _count_items(body)
+        # One or two items is already shorter than the marker replacing it.
+        if count < 3:
+            return message
+        return f"{head}<{count} {noun} elided>{tail}"
+    return message
+
+
+def apply_noise_floor(logs: list[dict]) -> tuple:
+    """Drop sub-threshold lines and collapse SQL. Returns (kept, report).
+
+    Runs AFTER raw_logs.txt is persisted, so this thins only the copy the LLM
+    reads; the audit record keeps every line at full length.
+
+    An unrecognised level is kept rather than dropped. `parse_line` defaults to
+    INFO when it cannot find a level, but a source that emits something outside
+    LEVEL_ORDER would otherwise have its whole trace silently deleted by a
+    floor it was never measured against.
+    """
+    # Clamped at WARN: the floor exists to strip framework DEBUG chatter, and
+    # no configuration of it may discard a warning or an error. `branch_on_error`
+    # keys off ERROR, and a WARN like "Integrity verification failed." is
+    # exactly the evidence this pipeline exists to surface -- a misconfigured
+    # LOG_MIN_LEVEL=ERROR must not be able to delete it.
+    floor = min(LEVEL_ORDER.get(MIN_LEVEL, LEVEL_ORDER["INFO"]), LEVEL_ORDER["WARN"])
+    kept, dropped, collapsed, saved = [], 0, 0, 0
+
+    for record in logs:
+        rank = LEVEL_ORDER.get((record.get("level") or "").upper())
+        if rank is not None and rank < floor:
+            dropped += 1
+            continue
+        message = record.get("message", "")
+        shortened = collapse_sql(message)
+        if shortened != message:
+            collapsed += 1
+            saved += len(message) - len(shortened)
+            record = {**record, "message": shortened}
+        kept.append(record)
+
+    report = {
+        "dropped_below_level": dropped,
+        "min_level": MIN_LEVEL,
+        "sql_collapsed": collapsed,
+        "sql_chars_saved": saved,
+    }
+    if dropped or collapsed:
+        logger.info("Reducer applied the noise floor", **report)
+    return kept, report
 
 
 # ======================================================================
@@ -103,6 +209,90 @@ def _get_template_miner():
     return _template_miner_instance
 
 
+def local_template_ids(logs: list[dict]) -> list[str]:
+    """Group these lines by template, using a miner local to this call.
+
+    Deliberately NOT the shared, file-persisted miner that `cluster_logs`
+    uses. Two reasons, and the first is the important one:
+
+    * Determinism. Feeding the ERROR window into the shared tree trains it,
+      so a packet that took the ERROR branch would silently change how the
+      NEXT packet's clustered path groups its lines -- the reduced evidence
+      for packet B would depend on whether packet A happened to be analysed
+      first. Verified: routing this through the shared miner made one
+      packet's output differ by 111 lines between a cold and a warm run.
+      A per-packet investigation must not depend on processing history.
+
+    * Scope. Folding repeats inside one window only needs template identity
+      *within that window*. Globally stable ids buy nothing here, and the
+      shared tree costs a file lock and a state write to obtain them.
+
+    Returns one id per input line, in order.
+    """
+    if not logs:
+        return []
+
+    from drain3 import TemplateMiner
+    from drain3.template_miner_config import TemplateMinerConfig
+
+    # persistence_handler=None -> in-memory only; nothing is written and
+    # nothing from previous packets is read.
+    miner = TemplateMiner(None, TemplateMinerConfig())
+    return [f"t_{miner.add_log_message(entry.get('message', ''))['cluster_id']:04d}"
+            for entry in logs]
+
+
+def collapse_error_window(logs: list[dict]) -> tuple:
+    """Suppress repeated boilerplate inside the ERROR branch's window.
+
+    The ERROR branch never clustered: it emitted every line of its
+    (ERROR_CONTEXT_LINES + ERROR_TRAILING_LINES) window verbatim, which is why
+    it stayed ~37k characters while the clustered path fell to ~18k.
+
+    Clustering it outright is wrong -- this branch exists to show the *sequence*
+    leading into a failure, and a cluster summary destroys the ordering the
+    Investigator reads. So the trace stays chronological and line-by-line, and
+    only the repeats are folded: the first occurrence of a repeated template is
+    kept in place, later ones are replaced by a single marker at that first
+    occurrence.
+
+    Never folds a WARN or an ERROR, however often it repeats -- in this branch
+    those lines are the evidence.
+
+    Returns (records, suppressed_count) where records may contain synthetic
+    `_note` entries the formatter renders as an inline marker.
+    """
+    if len(logs) < ERROR_REPEAT_THRESHOLD:
+        return logs, 0
+
+    ids = local_template_ids(logs)
+    counts: dict[str, int] = {}
+    last_ts: dict[str, str] = {}
+    for record, tid in zip(logs, ids):
+        counts[tid] = counts.get(tid, 0) + 1
+        last_ts[tid] = record.get("timestamp", "")
+
+    out, seen, suppressed = [], set(), 0
+    for record, tid in zip(logs, ids):
+        level = (record.get("level") or "").upper()
+        if level in ("ERROR", "WARN") or counts[tid] < ERROR_REPEAT_THRESHOLD:
+            out.append(record)
+            continue
+        if tid not in seen:
+            seen.add(tid)
+            out.append(record)
+            out.append({"_note": (f"(+{counts[tid] - 1} further lines matching this "
+                                  f"template, last at {last_ts[tid]})")})
+            continue
+        suppressed += 1
+
+    if suppressed:
+        logger.info("Reducer folded repeats in the ERROR window",
+                    input_lines=len(logs), suppressed=suppressed,
+                    kept=len(logs) - suppressed)
+    return out, suppressed
+
+
 def cluster_logs(logs: list[dict], catalog: Optional[TemplateCatalog] = None) -> list[dict]:
     """Cluster log messages using Drain3 with persisted state.
 
@@ -149,11 +339,17 @@ def cluster_logs(logs: list[dict], catalog: Optional[TemplateCatalog] = None) ->
                     "last_seen": ts,
                     "examples": [],
                     "count": 0,
+                    "has_error": False,
                 }
 
             meta = cluster_meta[cluster_id]
             meta["last_seen"] = ts
             meta["count"] += 1
+            # Carried so Stage 4 can refuse to collapse a template that ever
+            # carried a WARN or ERROR, however often it repeats. Losing an
+            # error to a frequency heuristic is the expensive direction.
+            if (log_entry.get("level", "") or "").upper() in ("ERROR", "WARN"):
+                meta["has_error"] = True
             # Keep up to 3 example lines for non-boilerplate clusters
             if len(meta["examples"]) < 3:
                 meta["examples"].append(msg)
@@ -185,6 +381,7 @@ def cluster_logs(logs: list[dict], catalog: Optional[TemplateCatalog] = None) ->
                 "last_seen": meta.get("last_seen", ""),
                 "classification": classification,
                 "examples": meta.get("examples", []),
+                "has_error": meta.get("has_error", False),
             })
 
     # Sort by first_seen timestamp (not frequency -- the LLM needs the sequence)
@@ -237,24 +434,59 @@ def apply_evidence_guardrails(
     # 2. Process each cluster
     # -------------------------------------------------------------------
     processed = []
+    collapsed_repetitive = 0
     for cluster in clusters:
         classification = cluster.get("classification", "unknown")
         count = cluster.get("count", 0)
 
-        # Rule 2: rare templates always keep examples
+        # Order matters, and it used to be wrong. The rare check ran first and
+        # short-circuited, so a template the catalog had classified as
+        # boilerplate -- on the cross-flow evidence that it appears in ~every
+        # flow regardless of outcome -- was still kept in full whenever it
+        # happened to appear fewer than RARE_TEMPLATE_THRESHOLD times in THIS
+        # flow. On the reference trace that is 89 of ~123 templates per flow,
+        # which is why building a catalog appeared to change nothing at all.
+        #
+        # The precedence below says what we actually mean:
+        #   1. anything that ever errored is evidence           -> keep
+        #   2. known noise in every flow beats local rarity     -> collapse
+        #   3. an unknown template we saw once or twice         -> keep
+        #   4. an unknown template that repeats within the flow -> collapse
+
+        # 1. Never collapse a template that ever carried a WARN or ERROR, no
+        # matter how often it repeated.
+        if cluster.get("has_error"):
+            processed.append(cluster)
+            continue
+
+        # 2. Boilerplate: collapse to count-only (no examples). Cross-flow
+        # evidence, so it outranks this flow's count either way.
+        if classification == "boilerplate":
+            cluster["examples"] = []
+            processed.append(cluster)
+            continue
+
+        # 3. Rare AND unclassified: keep examples. The guard protects
+        # templates we know nothing about -- not ones the catalog has already
+        # told us are noise.
         if count < RARE_TEMPLATE_THRESHOLD:
             cluster["classification"] = "rare"
             # examples are already populated from Stage 3
             processed.append(cluster)
             continue
 
-        # Boilerplate: collapse to count-only (no examples)
-        if classification == "boilerplate":
+        # 4. Repetitive-within-this-flow: collapse too. Without this the
+        # branch above was the ONLY route to a collapse, so a deployment with
+        # no template catalog (every classification "unknown") collapsed
+        # nothing and the "reduced" output came out larger than its input.
+        if count >= BOILERPLATE_COUNT_THRESHOLD:
+            cluster["classification"] = "repetitive"
             cluster["examples"] = []
+            collapsed_repetitive += 1
             processed.append(cluster)
             continue
 
-        # Everything else (informative, decision-marker, unknown): keep examples
+        # Everything else (informative, decision-marker): keep examples
         processed.append(cluster)
 
     # -------------------------------------------------------------------
@@ -284,6 +516,7 @@ def apply_evidence_guardrails(
         decision_vocabulary_omitted=decision_lines_omitted,
         boundary_lines=len(boundary_lines),
         rare_templates=sum(1 for c in processed if c.get("classification") == "rare"),
+        collapsed_repetitive=collapsed_repetitive,
     )
 
     return {
