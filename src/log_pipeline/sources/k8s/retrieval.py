@@ -198,10 +198,11 @@ def _read_instance(target: PodTarget, window: TimeWindow, previous: bool,
                    selector) -> tuple:
     """Read one container instance. Returns (records, stats, bytes, truncated).
 
-    `selector` is stateful and fed every line in order, returning the lines to
-    emit -- that is what lets a match pull in the preceding context lines it
-    needs. It is reset per instance so a previous container's trailing context
-    cannot leak into the current one.
+    `selector` is stateful and fed every line in order, returning
+    `(line, matched)` pairs to emit -- that is what lets a match pull in the
+    preceding context lines it needs, while keeping those context lines
+    distinguishable from the match itself. It is reset per instance so a
+    previous container's trailing context cannot leak into the current one.
     """
     records, stats, total_bytes, truncated = [], ParseStats(), 0, False
     instance = "previous" if previous else "current"
@@ -217,13 +218,18 @@ def _read_instance(target: PodTarget, window: TimeWindow, previous: bool,
                 if observed:
                     oldest_seen = observed
 
-            for emitted in selector.feed(line):
+            for emitted, matched in selector.feed(line):
                 record, level_ok, was_json = parse_line(
                     emitted, default_app=target.container
                 )
                 record["pod_name"] = target.pod_name
                 record["container"] = target.container
                 record["container_instance"] = instance
+                # Whether this line carried a searched identifier or was
+                # pulled in as surrounding context. Stamped here because the
+                # selector is the last place that knows: from here on the
+                # record is just a line among lines.
+                record["identifier_match"] = matched
                 records.append(record)
 
                 stats.total += 1

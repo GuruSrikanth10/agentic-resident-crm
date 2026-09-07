@@ -19,7 +19,7 @@ from src.log_pipeline.config import MAX_REDUCED_CHARS
 from src.log_pipeline.reducer import branch_on_error, cluster_logs, apply_evidence_guardrails
 from src.log_pipeline.sources import chain as source_chain
 from src.log_pipeline.sources.k8s import gaps as k8s_gaps
-from src.log_pipeline.types import FetchContext, TimeWindow
+from src.log_pipeline.types import CONTEXT_LINE_MARKER, FetchContext, TimeWindow
 from src.storage.factory import get_casebook_storage
 from src.utils import metrics
 from src.utils.logging_config import get_logger
@@ -149,13 +149,15 @@ def reduce_logs(event_id: str, extra_identifiers: tuple = (),
 
     # If logs are small enough, return directly
     if total_fetched < 50:
-        lines = [f"--- Log Trace for ID: {event_id} ---"]
+        lines = [f"--- Log Trace for ID: {event_id} ---",
+                 *_context_legend(raw_logs)]
         # `record`, not `log`: this loop used to rebind `log`, the bound
         # structlog logger created above, to a log-record dict. It survived
         # only because this branch returns immediately -- any line added
         # between here and the return would have raised AttributeError.
         for record in raw_logs:
-            lines.append(f"[{record['timestamp']}] [{_origin(record)}] [{record['level']}] {record['message']}")
+            lines.append(f"[{record['timestamp']}] [{_origin(record)}] "
+                         f"[{record['level']}]{_context_tag(record)} {record['message']}")
         lines.append(f"--- End of Trace ({total_fetched} logs total) ---")
         formatted = _with_banner(gap_banner, "\n".join(lines))
         _save_reduced_logs(artifact_key, formatted, storage=storage)
@@ -245,6 +247,37 @@ def _origin(log: dict) -> str:
     return f"{log.get('app_name','')}@{pod}" if pod else str(log.get('app_name',''))
 
 
+def _context_tag(log: dict) -> str:
+    """Mark a line the identifier filter kept only as surrounding context.
+
+    Such a line was emitted because it sits within K8S_CONTEXT_LINES_BEFORE /
+    _AFTER of a match, not because it carries the id -- so on a pod serving
+    packets concurrently it may belong to a different refId entirely. Both
+    readers of this text need to know: the Investigator, so it does not build
+    a narrative on another packet's failure, and `dlt/corroborate.py`, so it
+    does not report a neighbour's exception as one this packet's stack trace
+    failed to explain.
+
+    A missing key renders nothing, so Elasticsearch records -- filtered
+    server-side, hence always matches -- and snapshots written before the flag
+    existed produce byte-for-byte the previous output.
+    """
+    return "" if log.get("identifier_match", True) else f" {CONTEXT_LINE_MARKER}"
+
+
+def _context_legend(logs: list) -> list:
+    """One line explaining the marker, emitted only when it actually appears.
+
+    The marker is meaningless to a reader who has not been told what it means,
+    and a legend on a trace with no context lines is noise.
+    """
+    if not any(log.get("identifier_match", True) is False for log in logs):
+        return []
+    return [f"Lines tagged {CONTEXT_LINE_MARKER} did not carry the searched "
+            f"identifier; they were kept as surrounding context and may "
+            f"belong to another transaction on the same pod."]
+
+
 def _format_error_path(event_id: str, trimmed_logs: list[dict],
                        total_fetched: int, log_file_path: str) -> str:
     """Format the ERROR/stuck branch output for the LLM."""
@@ -252,11 +285,13 @@ def _format_error_path(event_id: str, trimmed_logs: list[dict],
         f"--- ERROR DETECTED in log trace for ID: {event_id} ---",
         f"Total raw logs: {total_fetched} (saved at {log_file_path})",
         f"Showing ERROR(s) + {len(trimmed_logs)} surrounding context lines:",
+        *_context_legend(trimmed_logs),
         "",
     ]
     for log in trimmed_logs:
         marker = " *** " if log.get("level", "").upper() == "ERROR" else "     "
-        lines.append(f"{marker}[{log['timestamp']}] [{_origin(log)}] [{log['level']}] {log['message']}")
+        lines.append(f"{marker}[{log['timestamp']}] [{_origin(log)}] "
+                     f"[{log['level']}]{_context_tag(log)} {log['message']}")
     lines.append("")
     lines.append("--- End of ERROR context ---")
     return "\n".join(lines)
@@ -357,7 +392,8 @@ def _write_artifact(event_id: str, filename: str, content: str, storage=None) ->
 def _save_raw_logs(event_id: str, logs: list[dict], storage=None) -> str:
     """Persist raw logs and return the artifact locator."""
     body = "".join(
-        f"[{log['timestamp']}] [{_origin(log)}] [{log['level']}] {log['message']}\n"
+        f"[{log['timestamp']}] [{_origin(log)}] "
+        f"[{log['level']}]{_context_tag(log)} {log['message']}\n"
         for log in logs
     )
     return _write_artifact(event_id, "raw_logs.txt", body, storage=storage)

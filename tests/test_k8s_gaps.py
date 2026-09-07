@@ -83,6 +83,11 @@ def test_build_selector_without_identifier_keeps_everything():
 # ======================================================================
 
 def _run(selector, lines):
+    """Emitted lines only. `_run_marked` keeps the match flags."""
+    return [line for line, _ in _run_marked(selector, lines)]
+
+
+def _run_marked(selector, lines):
     emitted = []
     for line in lines:
         emitted.extend(selector.feed(line))
@@ -108,6 +113,20 @@ def test_overlapping_windows_merge_without_duplicates():
     out = _run(selector, ["a", "hit1 evt-1", "b", "hit2 evt-1", "c", "d", "e"])
     assert out == ["a", "hit1 evt-1", "b", "hit2 evt-1", "c", "d"]
     assert len(out) == len(set(out))
+
+
+def test_context_lines_are_emitted_but_flagged():
+    """The whole point of the flag: a context line is kept as evidence and
+    labelled as not this packet's, so corroboration can tell them apart."""
+    selector = ContextWindowSelector(build_matcher(["evt-1"]), before=1, after=1)
+    out = _run_marked(selector, ["before", "hit evt-1", "after", "far"])
+    assert out == [("before", False), ("hit evt-1", True), ("after", False)]
+
+
+def test_keep_all_selector_reports_every_line_as_a_match():
+    """With no identifier to filter on there are no context lines -- calling
+    them context would tell corroboration to discard the whole trace."""
+    assert _run_marked(KeepAllSelector(), ["a", "b"]) == [("a", True), ("b", True)]
 
 
 def test_zero_context_emits_only_matches():

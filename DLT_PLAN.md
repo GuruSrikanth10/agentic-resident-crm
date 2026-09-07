@@ -448,14 +448,67 @@ Takes the parsed trace and the fetched logs and returns one of:
 
 | Verdict | Condition |
 |---|---|
-| `CORROBORATED` | An ERROR line for this `refId` within the window names the same root exception FQCN (or its business code) |
-| `CONTRADICTED` | An ERROR line within the window names a *different* exception FQCN, and the trace's declared root does not appear anywhere in the window |
-| `PARTIAL` | The declared root appears, but so do unexplained ERROR lines from other FQCNs |
-| `UNVERIFIABLE` | No logs fetched, `refId` unknown, window too old, or no ERROR lines matched |
+| `CORROBORATED` | A line within the window names the same root exception FQCN (or its simple name, or its business code) |
+| `CONTRADICTED` | An ERROR line *for this `refId`* names a *different* exception FQCN, and the trace's declared root does not appear anywhere in the window |
+| `PARTIAL` | The declared root appears, but this `refId`'s own ERROR lines also name FQCNs it does not explain |
+| `UNVERIFIABLE` | No logs fetched, `refId` unknown, window too old, no error- or warning-level lines, or every exception in the window sits on a line too weak to convict with |
+
+**Matching is wide, accusing is narrow.** The two halves of the check read the
+window differently, and deliberately so. A line may *corroborate* the declared
+root however weak it is; it may only *convict* the trace when it is strong on
+both of the axes below. The asymmetry follows from the cost of being wrong:
+missing a real mis-cast leaves the developer where they already were, while a
+false `CONTRADICTED` tells them their stack trace is lying when it is not, and
+a false `PARTIAL` puts an LLM call behind every occurrence (5.7).
+
+| Axis | Weak form | Why it may corroborate but not convict |
+|---|---|---|
+| Attribution | The line did not carry the `refId`; the Kubernetes context window pulled it in | It probably belongs to a concurrent packet on the same pod |
+| Severity | The line is `WARN`/`WARNING`, not `ERROR`/`FATAL`/`SEVERE` | Spring services log caught-and-handled faults at WARN; a retry notice is not a failure |
+
+Severity in particular is not optional. A service that catches a fault, logs
+it at WARN and rethrows it as a business exception is the exact shape this
+check exists to inspect -- so reading only ERROR lines made the declared root
+invisible in the most ordinary case there is, and any unrelated ERROR in the
+window then produced `CONTRADICTED`. `error_lines_seen` still counts only
+error-level lines; `details.warn_lines_seen` counts the rest.
+
+Every narrowing is reported rather than dropped:
+`details.exceptions_on_context_lines` and `details.exceptions_on_warn_lines`
+say what was set aside, `matched_in_context_only` and `matched_on_warn_only`
+say when a match is weaker than it looks, and the line the match rests on is
+always cited.
 
 `CONTRADICTED` and `PARTIAL` are the mis-cast detector. They do not assert a
 verdict on their own -- they escalate to the LLM lane with the discrepancy as
 the framing question, and the resulting casebook leads with it.
+
+**"For this `refId`" is enforced, not assumed.** The table above always said
+it; the first implementation could not deliver it. The Kubernetes source has
+no server-side grep, so it emits each identifier match plus
+`K8S_CONTEXT_LINES_BEFORE`/`_AFTER` lines around it, and on a pod serving
+packets concurrently those neighbours are other refIds' lines -- their ERROR
+lines included. Flattened to text they were indistinguishable from this
+packet's, so a concurrent timeout became an "unexplained ERROR line" and every
+occurrence on a busy service came back `PARTIAL`, which 5.7 turns into a fresh
+LLM call and no group reuse. When the declared root happened not to sit on an
+error-level line, the same neighbour produced `CONTRADICTED` -- telling a
+developer their trace is lying about a failure that was never theirs.
+
+The selector now reports, per line, whether that line carried a searched
+identifier; the record keeps the flag, `pipeline` renders unmatched lines with
+`types.CONTEXT_LINE_MARKER`, and corroboration reads the two kinds
+asymmetrically. The declared root may be matched anywhere in the window,
+context lines included -- generous, for the same reason FQCN / simple-name /
+business-code all count. An *unexplained* exception counts only from lines
+carrying the identifier, because that is the claim the verdict makes.
+Exceptions found only on context lines are reported in
+`details.exceptions_on_context_lines` rather than discarded, and a window
+whose only exceptions are there is `UNVERIFIABLE`, not `CONTRADICTED`.
+
+Elasticsearch filters server-side, so every record it returns carries the id
+and nothing is marked. Unmarked text -- from that source, or from an artifact
+written before the mark existed -- is read exactly as it was before.
 
 **No real example of a mis-cast case exists yet** (Open Question 2). The check
 is therefore built to *surface* discrepancies for a human rather than to

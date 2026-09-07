@@ -35,9 +35,31 @@ class LogRecord(TypedDict):
     source: NotRequired[str]              # "elastic" | "kubernetes"
     container_instance: NotRequired[str]  # "current" | "previous"
 
+    #: Did this line itself carry one of the identifiers we searched for?
+    #: False means it was pulled in as surrounding context and may belong to
+    #: another transaction entirely -- see CONTEXT_LINE_MARKER below. Absent
+    #: on sources that filter server-side (Elasticsearch queries the id, so
+    #: every record it returns carries it) and on snapshots written before
+    #: the flag existed; consumers must read a missing key as True.
+    identifier_match: NotRequired[bool]
+
 
 #: Keys every source must populate. Used by tests to enforce the contract.
 REQUIRED_RECORD_KEYS: tuple[str, ...] = ("timestamp", "level", "message", "app_name")
+
+#: Rendered beside the level on any line whose `identifier_match` is False.
+#:
+#: The Kubernetes source has no server-side grep, so it emits each matching
+#: line plus K8S_CONTEXT_LINES_BEFORE/AFTER lines around it. On a pod serving
+#: packets concurrently those neighbours are interleaved lines from other
+#: refIds, and their ERROR lines are indistinguishable from this packet's once
+#: everything is flattened to text. Marking them is what lets
+#: `src/dlt/corroborate.py` decline to blame this packet's trace for another
+#: packet's exception, and what tells the Investigator the same thing.
+#:
+#: It lives here rather than in either consumer because the producer
+#: (`pipeline._format_*`) and the reader (`corroborate`) must not drift.
+CONTEXT_LINE_MARKER = "[context]"
 
 
 class GapType(str, Enum):
