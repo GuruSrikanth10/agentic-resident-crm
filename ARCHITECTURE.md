@@ -725,11 +725,26 @@ agentic-resident-crm/
 
 ### 3.1 Environment Configuration (`.env`)
 The system manages all operational feature flags, LLM credentials, MySQL database connections, and Kafka connectivity settings via a strictly typed `.env` file (loaded via `python-dotenv` in `src/utils/env.py`).
-- **Template:** A reference file containing all placeholders is available at `.env.example`.
+- **Template:** `.env.example` is the annotated reference: it carries every setting an operator is expected to tune, with the reasoning behind each default. It is a starting point, not an exhaustive dump of every variable the code reads -- a handful of internal tunables (retry budgets, renderer selection, pipeline line bounds) exist only in code with working defaults.
 - **Database Modes:** Set `USE_MOCK_DB=true` to parse rules locally from a CSV, or `USE_MOCK_DB=false` to dynamically query the live MySQL `rules` table via SQLAlchemy/PyMySQL.
 - **Security:** The actual `.env` file is excluded via `.gitignore` to prevent secret leakage.
 - **Credentials the process holds:** the LLM provider key, MySQL, Elasticsearch, a Kubernetes kubeconfig (or an in-cluster ServiceAccount), `OIS_API_KEY` for the replay endpoint, and -- when the replay precheck is configured -- `BITBUCKET_TOKEN`. The last is **read-only and scoped to the repositories named in `DLT_REPO_MAP`**: `src/dlt/bitbucket.py` has no code path that writes, and leaving `BITBUCKET_BASE_URL` empty disables every source lookup outright.
 - **Feature flags are layered, not global.** Several capabilities are gated by two or three independent switches rather than one, so "let the system nominate an action" and "let the action actually happen" are always separate decisions -- `DLT_AUTO_REPLAY_ENABLED` vs `ENABLE_AUTO_REPLAY`, and `DLT_CODE_CHECK_ENABLED` vs `DLT_CODE_CHECK_GATES_REPLAY` vs `DLT_CODE_CHECK_PARK_ENABLED` (section 4.4.1).
+- **Derived defaults are load-bearing -- setting them explicitly breaks a relationship.** A number of settings default to a *function of another setting* rather than to a constant, and the derivation is the safety property. Leave them unset unless you intend to override the relationship:
+
+  | Variable | Derived default | Why the relationship matters |
+  | --- | --- | --- |
+  | `AGENT_INVOKE_TIMEOUT_SECONDS` | `PACKET_TIMEOUT_SECONDS - 30` | The server-side budget must expire *before* the consumer's. Set equal (or higher) and both sides time out together: the consumer writes `FAILED_TIMEOUT` and DLQs the message while the API keeps running and later overwrites that verdict with a "successful" casebook. |
+  | `DLT_ANALYZE_TIMEOUT_SECONDS` | `DLT_ANALYSIS_TIMEOUT_SECONDS - 30` | Same invariant for the DLT lane, which inherited the bug the rejection lane had already fixed. |
+  | `MAX_CONCURRENT_DLT_ANALYSES` | `MAX_CONCURRENT_INVESTIGATIONS` | The DLT executor is a *sibling* of the rejection lane's, not a share of it, so a DLT backlog cannot starve rejections. |
+  | `RATE_LIMIT_PER_MINUTE` | `max(60, MAX_CONCURRENT_INVESTIGATIONS x 20)` | The ceiling tracks the concurrency the API is actually built to serve; a fixed limit throttled this system's own consumer, which forwards every packet from a single IP. |
+  | `HEARTBEAT_STALE_SECONDS` | `HEARTBEAT_INTERVAL_SECONDS x 6` | Staleness is defined in beats, not seconds, so retuning the cadence retunes the health check with it. |
+  | `K8S_APP_NAMES` | `ES_APP_NAMES` | One application list drives both log sources. |
+  | `CASEBOOK_S3_BUCKET` | `S3_LOGS_BUCKET` | One bucket serves casebooks and log artifacts unless they are deliberately split. |
+  | `DLT_CODE_CHECK_NEGATIVE_TTL_SECONDS` | 900 (vs `DLT_CODE_CHECK_TTL_SECONDS` 3600) | An *empty* commit list is the answer that becomes `NO_CHANGE` and withholds a replay, so a stale one is the expensive kind of wrong. Negative results expire sooner than positive ones by design. |
+
+- **Windows paths must not be double-quoted.** `python-dotenv` processes backslash escapes inside double-quoted values but leaves unquoted values verbatim, so `KUBECONFIG_PATH="C:\temp\kube\config"` silently parses as `C:<TAB>emp\kube\config` while the unquoted form is correct. Operators run this on Windows desktops (`MOCK_DB_PATH`, `ES_MOCK_FILE`, `KUBECONFIG_PATH`), and the failure is invisible -- a wrong path, not a parse error -- so every path in `.env` is left unquoted. Forward slashes are the other safe option.
+- **`BITBUCKET_API_FLAVOUR` and `BITBUCKET_FLAVOUR` are two names for one setting.** The runtime adapter (`src/dlt/bitbucket.py`) reads `BITBUCKET_API_FLAVOUR`; the standalone probe CLI (`python -m src.tools.code_check_probe`, section 4.4.1) reads `BITBUCKET_FLAVOUR`. Set both to the same value, or the probe will auto-detect a flavour the runtime never uses and report a verdict the pipeline would not reproduce.
 
 ### 3.2 Environment & Local LLM Integration (`llm_utils.py`)
 Unlike generic AI projects bound to OpenAI, `agentic-resident-crm` is designed for on-premise, secure environments.
@@ -1024,6 +1039,8 @@ versa. Section 4.4 covers what actually runs in each.
    Copy `.env.example` to `.env` and set at minimum `USE_MOCK_DB`, `MOCK_DB_PATH`,
    `LLM_BASE_URL_COMPLEX` / `LLM_MODEL_COMPLEX`, and `AGENTIC_RESIDENT_CRM_API_KEY`.
    For fully offline runs, set `ES_MOCK_FILE` to a Kibana CSV export.
+   On Windows, leave every path value **unquoted** (`MOCK_DB_PATH=C:\Users\you\rules.csv`) --
+   see section 3.1 for why double quotes corrupt backslash paths.
 
 3. **Start all three services:**
    ```bash

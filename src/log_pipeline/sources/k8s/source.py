@@ -11,7 +11,7 @@ import pybreaker
 
 from src.log_pipeline import snapshot
 from src.utils.resilience import k8s_breaker
-from src.log_pipeline.sources.k8s import discovery, gaps, retrieval
+from src.log_pipeline.sources.k8s import discovery, gaps, mockfile, retrieval
 from src.log_pipeline.sources.k8s.filtering import build_selector, resolve_search_values
 from src.log_pipeline.types import (
     FetchContext,
@@ -51,6 +51,19 @@ class KubernetesLogSource:
                ctx: FetchContext) -> FetchResult:
         log = logger.bind(event_id=ctx.event_id)
         started = time.monotonic()
+
+        # Mock file before anything else. It replaces the transport only --
+        # identifier matching, context windows, parsing, redaction and gap
+        # detection all still run (see mockfile.py) -- so Stages 2-4 receive
+        # exactly the record shape a live cluster would have produced. Checked
+        # ahead of the snapshot so the file is unambiguously the single source
+        # of truth while it is set.
+        if mockfile.is_active():
+            return mockfile.fetch(
+                identifier, window, ctx,
+                extra_identifiers=_extra_identifiers(ctx),
+                started=started,
+            )
 
         # Snapshot first. Kubelet retention is minutes to hours, but retries,
         # DLQ replays, and checkpoint resumes re-enter this path much later --
