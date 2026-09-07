@@ -27,16 +27,30 @@ whether every claim is supported by the evidence actually supplied.
    every record carrying this error code. Reject anything implying this
    individual packet's data was examined.
 
-5. **Corroboration mishandled.** If the verdict was CONTRADICTED and the
+5. **Identifiers used outside their labelled role.** The payload summary ends
+   with an "Identifiers in this payload" section assigning every id it shows to
+   a role: this record's log-correlation id, an envelope-local id, or an id
+   belonging to a different record. Reject any claim that treats an id as the
+   record that failed unless the summary labelled it the correlation id. If the
+   section reads `NONE LABELLED`, reject any claim that treats *any* payload
+   value as an identifier -- the payload type is unregistered and nothing in it
+   has been established.
+
+6. **Payload structure assumed rather than read.** The DLT carries several
+   original topics whose payloads do not share a structure. Reject any claim
+   about a field, an identifier or a shape that the summary in front of you
+   does not actually show, however familiar it looks from another payload type.
+
+7. **Corroboration mishandled.** If the verdict was CONTRADICTED and the
    findings do not lead with the discrepancy, reject. If the verdict was
    UNVERIFIABLE and the findings speak as though the trace were confirmed,
    reject. If the verdict was CORROBORATED and the findings manufacture doubt
    anyway, reject.
 
-6. **Evidence gaps ignored.** If the trace carries a gap banner and the
+8. **Evidence gaps ignored.** If the trace carries a gap banner and the
    findings draw a conclusion from the absence of a log line, reject.
 
-7. **Overreach on Class B.** For an application defect with no source access,
+9. **Overreach on Class B.** For an application defect with no source access,
    the only supportable output is: what the exception was, where it fired, how
    often, and that it needs a developer. Reject any attempt to explain the bug.
 

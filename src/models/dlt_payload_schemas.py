@@ -158,6 +158,13 @@ class EnrolmentEventResponse(BaseModel):
 # two different original topics, so the "single schema" assumption is retired.
 # Adding a third stays config, not code: register a path here or set
 # DLT_REFID_PATHS_BY_TYPE.
+#
+# A type is fully supported when three things exist for it: refId paths here,
+# a model in `MODELS_BY_TYPE`, and a summariser in `SUMMARISERS_BY_TYPE` that
+# ends with `identifier_block`. None of the three is required -- an
+# unregistered type still yields a case, a bounded key listing and an
+# explicitly unlabelled identifier section -- but each one it has makes the
+# evidence stronger, and none of them is a prompt change.
 
 TYPE_ENROLMENT_EVENT_RESPONSE = (
     "in.gov.uidai.uidabismiddlewaresb.kafka.model.EnrolmentEventResponse")
@@ -226,26 +233,103 @@ MAX_SUMMARY_CANDIDATES = 10
 MAX_SUMMARY_KEYS = 40
 
 
+# ---------------------------------------------------------------------------
+# The identifier labelling contract
+# ---------------------------------------------------------------------------
+# Every summary ends with this section, and it is the seam that lets one set
+# of prompts serve many payload structures.
+#
+# The Investigator prompt used to name `refId`, `event_id` and
+# `candidateRefId` directly. That worked while the DLT carried one structure
+# and becomes wrong the moment it carries two: the prompt is a single file
+# shared by every topic, so it would be asserting an identifier contract that
+# does not hold for the payload actually in front of the model -- fields that
+# are absent, or worse, present with a different meaning.
+#
+# So the prompt now states the invariant ("use only the id this section labels
+# as the packet's correlation id, and treat every other id as belonging to
+# something else"), and the per-type facts travel here, in text rendered by
+# the code that already knows the type. Adding a topic is then a summariser,
+# not a prompt edit.
+#
+# A summariser that omits this section leaves the model with unlabelled
+# identifiers and an invariant it cannot apply, which is why the unregistered
+# fallback below emits the section too -- saying plainly that nothing is
+# labelled, rather than saying nothing at all.
+
+IDENTIFIER_HEADING = "Identifiers in this payload:"
+
+#: The three roles an identifier can hold. Exhaustive on purpose: an id that
+#: fits none of them is one whose role has not been established, and it must
+#: be labelled unlabelled rather than guessed into a bucket.
+ROLE_CORRELATION = ("THIS packet's log-correlation id -- the value the pod "
+                    "logs are keyed on")
+ROLE_ENVELOPE = ("NOT the log-correlation id -- envelope-local, correlating to "
+                 "nothing you have been shown")
+ROLE_FOREIGN = "A DIFFERENT record's id -- never this packet's"
+
+
+def identifier_block(correlation=(), envelope=(), foreign=(),
+                     unlabelled_reason: Optional[str] = None) -> str:
+    """Render the identifier section, from `(id_text, note)` pairs per role.
+
+    `unlabelled_reason` renders the section for a payload whose identifiers
+    have not been established, which is a real and useful thing to say: an
+    unlabelled section stops the model reaching for an id-shaped field on the
+    reasoning that nothing forbade it.
+    """
+    lines = [IDENTIFIER_HEADING]
+
+    if unlabelled_reason:
+        lines.append(f"  NONE LABELLED -- {unlabelled_reason}")
+        lines.append("  Do not treat any value shown above as this packet's "
+                     "identifier.")
+        return "\n".join(lines)
+
+    for role, entries in ((ROLE_CORRELATION, correlation),
+                          (ROLE_ENVELOPE, envelope),
+                          (ROLE_FOREIGN, foreign)):
+        for id_text, note in entries:
+            lines.append(f"  - {id_text}")
+            lines.append(f"      {role}. {note}.")
+
+    if len(lines) == 1:
+        lines.append("  (none found on this payload)")
+    return "\n".join(lines)
+
+
 def _summarise_enrolment_event_response(model: "EnrolmentEventResponse") -> str:
     lines = [
         "Payload type: EnrolmentEventResponse "
         "(ABIS middleware dedupe response)",
-        f"Payload event_id: {model.event_id} "
-        f"(the payload's own id -- NOT the log-correlation id)",
         f"Category / type / version: {model.category} / {model.event_type} / {model.version}",
         f"Payload eventTimestamp: {model.eventTimestamp} "
         f"(local time, no offset recorded -- not a log anchor)",
     ]
 
+    envelope = [(f"event_id = {model.event_id}",
+                 "Named event_id while the rest of the envelope is camelCase, "
+                 "which is exactly why it is the easy one to grab by mistake")]
+    correlation: list = []
+    foreign: list = []
+
     block = model.abisMWResponseNewSeda
     if block is None:
         lines.append("No abisMWResponseNewSeda block on this payload.")
+        lines.append(identifier_block(correlation=correlation, envelope=envelope,
+                                      foreign=foreign))
         return "\n".join(lines)
 
     lines.append(
         f"ABIS middleware: requestType={block.requestType} "
         f"responseStatus={block.responseStatus} requestId={block.requestId}")
-    lines.append(f"Packet refId: {block.refId}")
+
+    correlation.append((f"refId = {block.refId}",
+                        "At abisMWResponseNewSeda.refId -- the value the "
+                        "service writes into its pod lines"))
+    envelope.append((f"requestId = {block.requestId}",
+                     "The middleware's own request id -- correlates ABIS-side, "
+                     "not packet-side"))
 
     responses = block.abisResponses.abisResponse if block.abisResponses else []
     if responses:
@@ -266,13 +350,27 @@ def _summarise_enrolment_event_response(model: "EnrolmentEventResponse") -> str:
         for c in shown:
             lines.append(
                 f"  - {c.candidateRefId} (scaledScore={c.scaledScore})")
-        lines.append(
-            "  These are OTHER enrolments' refIds. They are the keys the "
-            "failing lookup iterates, not this packet's correlation id.")
+        foreign.append(
+            (f"the {len(candidates)} matched candidate refIds listed above",
+             "These are OTHER enrolments' refIds -- the keys the failing "
+             "lookup iterates, not this packet's correlation id"))
     else:
         lines.append("No matched candidates were returned by any ABIS instance.")
 
+    lines.append(identifier_block(correlation=correlation, envelope=envelope,
+                                  foreign=foreign))
     return "\n".join(lines)
+
+
+#: `__TypeId__` -> the function that describes that payload. The third and
+#: last per-type registry in this module, alongside `REFID_PATHS_BY_TYPE` and
+#: `MODELS_BY_TYPE`: between them they are everything a new DLT topic needs.
+#: Nothing outside this file should have to change to support one -- if a new
+#: structure ever forces a prompt edit, the labelling contract above has a gap
+#: and that is the thing to fix, not the prompt.
+SUMMARISERS_BY_TYPE = {
+    TYPE_ENROLMENT_EVENT_RESPONSE: _summarise_enrolment_event_response,
+}
 
 
 def summarise_payload(payload: Any, type_id: Optional[str] = None) -> Optional[str]:
@@ -281,17 +379,32 @@ def summarise_payload(payload: Any, type_id: Optional[str] = None) -> Optional[s
     Falls back to a key listing for an unmodelled type rather than dumping the
     payload verbatim: an unbounded dump is both a context-budget problem and a
     redaction surface we have not reasoned about.
+
+    The fallback still emits the identifier section. A summary that simply
+    stopped after the key listing would leave the Investigator holding a list
+    of field names, several of them id-shaped, with nothing saying which (if
+    any) is this packet's -- and an unlabelled id next to a silent prompt is
+    exactly the shape of the `event_id` mistake this module was written to
+    prevent.
     """
     model = parse_payload(payload, type_id)
-    if isinstance(model, EnrolmentEventResponse):
-        return _summarise_enrolment_event_response(model)
+    summariser = SUMMARISERS_BY_TYPE.get(type_id or "")
+    if model is not None and summariser is not None:
+        return summariser(model)
 
     if isinstance(payload, dict):
         keys = list(payload.keys())[:MAX_SUMMARY_KEYS]
         elided = "" if len(payload) <= len(keys) else f" (+{len(payload) - len(keys)} more)"
+        unlabelled = identifier_block(unlabelled_reason=(
+            f"no model is registered for {type_id or 'this type'}, so no field "
+            f"here has been confirmed to be the log-correlation id"))
         return (f"Payload type: {type_id or 'unregistered'} (no model registered; "
-                f"top-level keys only)\nKeys: {', '.join(map(str, keys))}{elided}")
+                f"top-level keys only)\nKeys: {', '.join(map(str, keys))}{elided}\n"
+                f"{unlabelled}")
 
     if payload is None:
         return None
-    return f"Payload type: {type_id or 'unregistered'} (not a JSON object)"
+    return (f"Payload type: {type_id or 'unregistered'} (not a JSON object)\n"
+            + identifier_block(unlabelled_reason=(
+                "the payload is not a JSON object, so nothing in it has been "
+                "read as an identifier")))
