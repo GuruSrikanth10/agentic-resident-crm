@@ -6,17 +6,22 @@ Stage 3: Drain3 clustering with persisted state.
 Stage 4: Evidence assembly guardrails.
 """
 import os
+import re
 import threading
 from typing import Optional
 
 from filelock import FileLock
 
 from src.log_pipeline.config import (
+    BOILERPLATE_COUNT_THRESHOLD,
+    COLLAPSE_SQL,
     DECISION_VOCABULARY_REGEX,
     DRAIN3_STATE_DIR,
     ERROR_CONTEXT_LINES,
     ERROR_TRAILING_LINES,
+    LEVEL_ORDER,
     MAX_DECISION_VOCABULARY_LINES,
+    MIN_LEVEL,
     RARE_TEMPLATE_THRESHOLD,
 )
 from src.log_pipeline.catalog import TemplateCatalog
@@ -35,6 +40,106 @@ _drain3_intraprocess_lock = threading.Lock()
 # file every time, which only grows as more templates accumulate (2.5).
 # Access is still only ever under _drain3_intraprocess_lock / FileLock above.
 _template_miner_instance = None
+
+
+# ======================================================================
+# Stage 2.5 -- Noise floor
+# ======================================================================
+
+#: `select <cols> from ...`, `insert into t (<cols>) values (<vals>)` and
+#: `update t set <assignments> where ...`. Only the list between the anchors is
+#: replaced -- the statement kind, the table and the predicate all survive,
+#: because those are the parts that say what the flow was doing.
+_SQL_SELECT = re.compile(r"^(\s*select\s+)(.+?)(\s+from\s+.*)$", re.I | re.S)
+_SQL_INSERT = re.compile(r"^(\s*insert\s+into\s+\S+\s*\()([^)]*)(\).*)$", re.I | re.S)
+_SQL_UPDATE = re.compile(r"^(\s*update\s+\S+\s+set\s+)(.+?)(\s+where\s+.*)$", re.I | re.S)
+
+
+def _count_items(fragment: str) -> int:
+    """Count comma-separated items, ignoring commas inside parentheses.
+
+    `count(*), coalesce(a, b)` is two items, not three -- a naive split would
+    over-report and make the collapsed marker wrong.
+    """
+    depth = items = 0
+    seen = False
+    for char in fragment:
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif char == "," and depth == 0:
+            items += 1
+        if not char.isspace():
+            seen = True
+    return items + 1 if seen else 0
+
+
+def collapse_sql(message: str) -> str:
+    """Replace a SQL column/assignment list with a count of its entries.
+
+    Returns the message unchanged when it is not one of the three recognised
+    shapes, so an unfamiliar statement is never mangled into something the
+    Investigator would read as truncated evidence.
+    """
+    if not COLLAPSE_SQL or not message:
+        return message
+    for pattern, noun in ((_SQL_SELECT, "columns"),
+                          (_SQL_INSERT, "columns"),
+                          (_SQL_UPDATE, "assignments")):
+        match = pattern.match(message)
+        if not match:
+            continue
+        head, body, tail = match.groups()
+        count = _count_items(body)
+        # One or two items is already shorter than the marker replacing it.
+        if count < 3:
+            return message
+        return f"{head}<{count} {noun} elided>{tail}"
+    return message
+
+
+def apply_noise_floor(logs: list[dict]) -> tuple:
+    """Drop sub-threshold lines and collapse SQL. Returns (kept, report).
+
+    Runs AFTER raw_logs.txt is persisted, so this thins only the copy the LLM
+    reads; the audit record keeps every line at full length.
+
+    An unrecognised level is kept rather than dropped. `parse_line` defaults to
+    INFO when it cannot find a level, but a source that emits something outside
+    LEVEL_ORDER would otherwise have its whole trace silently deleted by a
+    floor it was never measured against.
+    """
+    # Clamped at WARN: the floor exists to strip framework DEBUG chatter, and
+    # no configuration of it may discard a warning or an error. `branch_on_error`
+    # keys off ERROR, and a WARN like "Integrity verification failed." is
+    # exactly the evidence this pipeline exists to surface -- a misconfigured
+    # LOG_MIN_LEVEL=ERROR must not be able to delete it.
+    floor = min(LEVEL_ORDER.get(MIN_LEVEL, LEVEL_ORDER["INFO"]), LEVEL_ORDER["WARN"])
+    kept, dropped, collapsed, saved = [], 0, 0, 0
+
+    for record in logs:
+        rank = LEVEL_ORDER.get((record.get("level") or "").upper())
+        if rank is not None and rank < floor:
+            dropped += 1
+            continue
+        message = record.get("message", "")
+        shortened = collapse_sql(message)
+        if shortened != message:
+            collapsed += 1
+            saved += len(message) - len(shortened)
+            record = {**record, "message": shortened}
+        kept.append(record)
+
+    report = {
+        "dropped_below_level": dropped,
+        "min_level": MIN_LEVEL,
+        "sql_collapsed": collapsed,
+        "sql_chars_saved": saved,
+    }
+    if dropped or collapsed:
+        logger.info("Reducer applied the noise floor", **report)
+    return kept, report
 
 
 # ======================================================================
@@ -149,11 +254,17 @@ def cluster_logs(logs: list[dict], catalog: Optional[TemplateCatalog] = None) ->
                     "last_seen": ts,
                     "examples": [],
                     "count": 0,
+                    "has_error": False,
                 }
 
             meta = cluster_meta[cluster_id]
             meta["last_seen"] = ts
             meta["count"] += 1
+            # Carried so Stage 4 can refuse to collapse a template that ever
+            # carried a WARN or ERROR, however often it repeats. Losing an
+            # error to a frequency heuristic is the expensive direction.
+            if (log_entry.get("level", "") or "").upper() in ("ERROR", "WARN"):
+                meta["has_error"] = True
             # Keep up to 3 example lines for non-boilerplate clusters
             if len(meta["examples"]) < 3:
                 meta["examples"].append(msg)
@@ -185,6 +296,7 @@ def cluster_logs(logs: list[dict], catalog: Optional[TemplateCatalog] = None) ->
                 "last_seen": meta.get("last_seen", ""),
                 "classification": classification,
                 "examples": meta.get("examples", []),
+                "has_error": meta.get("has_error", False),
             })
 
     # Sort by first_seen timestamp (not frequency -- the LLM needs the sequence)
@@ -237,6 +349,7 @@ def apply_evidence_guardrails(
     # 2. Process each cluster
     # -------------------------------------------------------------------
     processed = []
+    collapsed_repetitive = 0
     for cluster in clusters:
         classification = cluster.get("classification", "unknown")
         count = cluster.get("count", 0)
@@ -248,13 +361,30 @@ def apply_evidence_guardrails(
             processed.append(cluster)
             continue
 
+        # Never collapse a template that ever carried a WARN or ERROR, no
+        # matter how often it repeated.
+        if cluster.get("has_error"):
+            processed.append(cluster)
+            continue
+
         # Boilerplate: collapse to count-only (no examples)
         if classification == "boilerplate":
             cluster["examples"] = []
             processed.append(cluster)
             continue
 
-        # Everything else (informative, decision-marker, unknown): keep examples
+        # Repetitive-within-this-flow: collapse too. Without this the branch
+        # above was the ONLY route to a collapse, so a deployment with no
+        # template catalog (every classification "unknown") collapsed nothing
+        # and the "reduced" output came out larger than its input.
+        if count >= BOILERPLATE_COUNT_THRESHOLD:
+            cluster["classification"] = "repetitive"
+            cluster["examples"] = []
+            collapsed_repetitive += 1
+            processed.append(cluster)
+            continue
+
+        # Everything else (informative, decision-marker): keep examples
         processed.append(cluster)
 
     # -------------------------------------------------------------------
@@ -284,6 +414,7 @@ def apply_evidence_guardrails(
         decision_vocabulary_omitted=decision_lines_omitted,
         boundary_lines=len(boundary_lines),
         rare_templates=sum(1 for c in processed if c.get("classification") == "rare"),
+        collapsed_repetitive=collapsed_repetitive,
     )
 
     return {

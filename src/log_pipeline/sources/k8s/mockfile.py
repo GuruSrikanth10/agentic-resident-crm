@@ -33,9 +33,18 @@ Accepted line formats, tried in order:
      selector below against the identifier actually being searched, which is
      the point of routing the file through the real selector.
 
-  2. Anything else -- raw kubelet output, a `kubectl logs` capture, JSON
-     lines, stack-trace continuations -- falls through to `parse_line`,
-     exactly as a live stream would.
+  2. Anything else falls through to `parse_line`, exactly as a live stream
+     would. That covers both real-world capture routes:
+
+       * the Kubernetes API with `timestamps=True`, which prefixes each line
+         with an RFC3339Nano kubelet timestamp and a space:
+             2026-09-07T09:19:31.806106042Z {"@timestamp":...,"level":"INFO"}
+       * an Argo CD / Kibana UI capture, which has no kubelet prefix and is
+         usually indented:
+               {"@timestamp":...,"level":"INFO","message":...}
+
+     `parse_line` strips the kubelet prefix when present and otherwise falls
+     back to the payload's own `@timestamp`, so both yield the same record.
 """
 import os
 import re
@@ -271,6 +280,17 @@ def fetch(identifier: str, window: TimeWindow, ctx: FetchContext,
         if hit_cap:
             truncated = True
             break
+
+    # Order exactly as `retrieval.read_all` does before handing records on.
+    # A live fetch merges several pods' streams and sorts the result; a mock
+    # file is whatever order it was captured in. An Argo CD capture is the
+    # common case and the worst one -- it is several per-refId searches pasted
+    # end to end, so file order is chronological only *within* each block.
+    # Left unsorted, `branch_on_error`'s index-based context window straddles
+    # the seam between two blocks and pulls a different packet's lines in as
+    # this packet's context.
+    records.sort(key=lambda record: (record.get("timestamp") or "",
+                                     0 if record.get("container_instance") == "previous" else 1))
 
     redaction_counts = redaction.redact_records(records, allowlist=allowlist) or {}
 
