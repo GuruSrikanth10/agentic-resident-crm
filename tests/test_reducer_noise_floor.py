@@ -138,3 +138,78 @@ def test_catalog_boilerplate_still_collapses(monkeypatch):
     monkeypatch.setattr(reducer, "BOILERPLATE_COUNT_THRESHOLD", 999999)
     out = apply_evidence_guardrails([_cluster("a", count=40, classification="boilerplate")], [])
     assert out["clusters"][0]["examples"] == []
+
+
+# ------------------------------------------------- ERROR-window repeat folding
+
+def _win(*levels_and_messages):
+    return [_rec(lvl, msg, ts=f"2026-09-07T15:31:{i:02d}+05:30")
+            for i, (lvl, msg) in enumerate(levels_and_messages)]
+
+
+def test_error_window_folds_repeats_to_the_first_occurrence(monkeypatch):
+    monkeypatch.setattr(reducer, "ERROR_REPEAT_THRESHOLD", 3)
+    window = _win(*[("INFO", "Fetching Index Master data for refId :: aaa")] * 6)
+    out, suppressed = reducer.collapse_error_window(window)
+    assert suppressed == 5
+    # first occurrence in place, then exactly one marker
+    assert out[0]["message"].startswith("Fetching Index Master")
+    assert sum(1 for r in out if "_note" in r) == 1
+    assert "5 further lines" in [r for r in out if "_note" in r][0]["_note"]
+
+
+def test_error_window_never_folds_an_error_or_warn(monkeypatch):
+    """In this branch those lines are the evidence, however often they repeat."""
+    monkeypatch.setattr(reducer, "ERROR_REPEAT_THRESHOLD", 2)
+    window = _win(*[("ERROR", "Topic cannot be null.")] * 5,
+                  *[("WARN", "Integrity verification failed.")] * 5)
+    out, suppressed = reducer.collapse_error_window(window)
+    assert suppressed == 0
+    assert sum(1 for r in out if r.get("level") == "ERROR") == 5
+    assert sum(1 for r in out if r.get("level") == "WARN") == 5
+
+
+def test_error_window_preserves_chronological_order(monkeypatch):
+    """The ERROR branch exists to show the sequence into a failure; a cluster
+    summary would destroy exactly what it is for."""
+    monkeypatch.setattr(reducer, "ERROR_REPEAT_THRESHOLD", 3)
+    window = _win(("INFO", "step one"), ("INFO", "noise"), ("INFO", "noise"),
+                  ("INFO", "noise"), ("ERROR", "boom"), ("INFO", "step two"))
+    out, _ = reducer.collapse_error_window(window)
+    messages = [r.get("message") for r in out if "_note" not in r]
+    assert messages.index("step one") < messages.index("boom") < messages.index("step two")
+
+
+def test_error_window_below_threshold_is_untouched(monkeypatch):
+    monkeypatch.setattr(reducer, "ERROR_REPEAT_THRESHOLD", 5)
+    window = _win(("INFO", "a"), ("INFO", "a"), ("INFO", "b"))
+    out, suppressed = reducer.collapse_error_window(window)
+    assert suppressed == 0 and len(out) == 3
+
+
+def test_error_window_handles_an_empty_trace():
+    assert reducer.collapse_error_window([]) == ([], 0)
+
+
+def test_error_folding_does_not_train_the_shared_drain3_tree(tmp_path, monkeypatch):
+    """Regression: the ERROR window must not mutate the persisted parse tree.
+
+    Routing it through the shared miner trained that tree, so a packet taking
+    the ERROR branch silently changed how the NEXT packet's clustered path
+    grouped its lines -- one packet's output moved by 111 lines depending on
+    whether another was analysed first. A per-packet investigation must not
+    depend on processing history.
+    """
+    monkeypatch.setattr(reducer, "DRAIN3_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(reducer, "ERROR_REPEAT_THRESHOLD", 3)
+    reducer.collapse_error_window(_win(*[("INFO", "repeated line")] * 6))
+    assert not list(tmp_path.iterdir()), "ERROR folding wrote shared Drain3 state"
+
+
+def test_error_folding_is_independent_of_call_history(monkeypatch):
+    """Same window in, same ids out, whatever was folded before it."""
+    monkeypatch.setattr(reducer, "ERROR_REPEAT_THRESHOLD", 3)
+    window = _win(("INFO", "alpha one"), ("INFO", "alpha two"), ("ERROR", "boom"))
+    first = reducer.local_template_ids(window)
+    reducer.collapse_error_window(_win(*[("INFO", f"unrelated {i}") for i in range(50)]))
+    assert reducer.local_template_ids(window) == first

@@ -21,6 +21,7 @@ from src.log_pipeline.reducer import (
     apply_noise_floor,
     branch_on_error,
     cluster_logs,
+    collapse_error_window,
 )
 from src.log_pipeline.sources import chain as source_chain
 from src.log_pipeline.sources.k8s import gaps as k8s_gaps
@@ -197,10 +198,13 @@ def reduce_logs(event_id: str, extra_identifiers: tuple = (),
     branch_result = branch_on_error(raw_logs)
 
     if branch_result["has_error"]:
-        # Stuck path: format the trimmed context directly
+        # Stuck path: chronological, but with repeated boilerplate folded to
+        # its first occurrence. The sequence is what this branch is for, so it
+        # is never replaced by a cluster summary the way the normal path is.
+        window, _suppressed = collapse_error_window(branch_result["payload"])
         formatted = _with_banner(
             gap_banner,
-            _format_error_path(event_id, branch_result["payload"], total_fetched, log_file_path),
+            _format_error_path(event_id, window, total_fetched, log_file_path),
         )
         _save_reduced_logs(artifact_key, formatted, storage=storage)
         return formatted
@@ -342,6 +346,10 @@ def _format_error_path(event_id: str, trimmed_logs: list[dict],
         "",
     ]
     for log in trimmed_logs:
+        # Synthetic marker standing in for folded repeats of the line above.
+        if "_note" in log:
+            lines.append(f"          {log['_note']}")
+            continue
         marker = " *** " if log.get("level", "").upper() == "ERROR" else "     "
         lines.append(f"{marker}[{log['timestamp']}] [{_origin(log)}] "
                      f"[{log['level']}]{_context_tag(log)} {log['message']}")

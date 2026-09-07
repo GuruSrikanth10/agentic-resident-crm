@@ -20,6 +20,13 @@ ERROR_CONTEXT_LINES = int(os.environ.get("LOG_ERROR_CONTEXT_LINES", "200"))
 # of the trace, which is effectively the whole log (1.11).
 ERROR_TRAILING_LINES = int(os.environ.get("LOG_ERROR_TRAILING_LINES", "200"))
 
+# Within the ERROR window, a template repeating at least this often is folded
+# to its first occurrence plus a count. Lower than the clustered path's
+# threshold because the window is a few hundred lines, not a whole flow -- a
+# line appearing three times in 233 is already boilerplate here. WARN and ERROR
+# lines are never folded regardless.
+ERROR_REPEAT_THRESHOLD = int(os.environ.get("LOG_ERROR_REPEAT_THRESHOLD", "3"))
+
 # ---------------------------------------------------------------------------
 # Stage 2.5 -- Noise floor (applied AFTER raw_logs.txt is written)
 # ---------------------------------------------------------------------------
