@@ -226,7 +226,7 @@ def test_a_line_mentioning_only_refid_is_matched():
     the Kubernetes source silently returned nothing."""
     selector = filtering.build_selector("evt-1", ["ref-9"])
     emitted = selector.feed("processing packet refId=ref-9 stage=BIO")
-    assert emitted == ["processing packet refId=ref-9 stage=BIO"]
+    assert emitted == [("processing packet refId=ref-9 stage=BIO", True)]
 
 
 def test_fetch_logs_node_passes_identifiers_through(monkeypatch):

@@ -11,6 +11,15 @@ one line of a stack trace whose useful part -- the exception, the caused-by
 chain -- never repeats the identifier. Without surrounding context the
 reduction pipeline receives isolated lines and the Investigator has nothing to
 reason over.
+
+They also carry a cost that has to be paid downstream. On a pod serving
+packets concurrently, the lines around a match belong to *other* refIds, and
+one of them erroring has nothing to do with the packet under investigation.
+So `feed` reports, per line, whether the line itself matched -- context lines
+are still emitted, but they are emitted labelled. `retrieval` stamps the flag
+onto the record, `pipeline` renders it, and `dlt/corroborate.py` uses it to
+avoid reading a neighbour's exception as evidence that this packet's stack
+trace is lying.
 """
 import os
 from collections import deque
@@ -93,10 +102,15 @@ def build_matcher(values: list, case_sensitive: bool = True) -> Callable[[str], 
 
 
 class KeepAllSelector:
-    """Emit every line. The default when no identifier filtering applies."""
+    """Emit every line. The default when no identifier filtering applies.
+
+    Every line is reported as a match. Not a white lie: with no identifier to
+    filter on there is no such thing as a context line here, and reporting
+    these as context would tell corroboration to discard the entire trace.
+    """
 
     def feed(self, line: str) -> list:
-        return [line]
+        return [(line, True)]
 
     def reset(self):
         pass
@@ -105,10 +119,16 @@ class KeepAllSelector:
 class ContextWindowSelector:
     """Emit matching lines plus surrounding context, merging overlaps.
 
-    Fed one line at a time in order, returning the lines to emit for that
-    input. Overlapping windows merge naturally: a fresh match resets the
-    trailing counter, and lines already emitted are never re-buffered, so no
-    line is emitted twice.
+    Fed one line at a time in order, returning `(line, matched)` pairs to emit
+    for that input, where `matched` says whether that line itself carried a
+    searched identifier. Overlapping windows merge naturally: a fresh match
+    resets the trailing counter, and lines already emitted are never
+    re-buffered, so no line is emitted twice.
+
+    The flag rather than a second filtering pass because the emitted list
+    interleaves the two kinds -- a match arrives with its leading context in
+    one call -- so the distinction is only knowable here, at the point the
+    matcher runs.
     """
 
     def __init__(self, matcher: Callable[[str], bool],
@@ -120,14 +140,16 @@ class ContextWindowSelector:
 
     def feed(self, line: str) -> list:
         if self._matcher(line):
-            emitted = list(self._before) + [line]
+            # Buffered leading context never matched -- that is why it was
+            # buffered rather than emitted when it arrived.
+            emitted = [(held, False) for held in self._before] + [(line, True)]
             self._before.clear()
             self._after_remaining = self._after
             return emitted
 
         if self._after_remaining > 0:
             self._after_remaining -= 1
-            return [line]
+            return [(line, False)]
 
         # Not emitted: hold it as potential leading context for a later match.
         if self._before.maxlen:

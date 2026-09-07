@@ -90,6 +90,32 @@ If the log trace is preceded by a banner reading
 2. **State the limitation explicitly** and name what it prevents you from
    concluding.
 
+### CONTEXT LINES ARE NOT THIS PACKET'S
+
+A log line tagged `[context]` did not carry the id you are investigating. It
+was kept because it sits near a line that did, and on a pod handling packets
+concurrently it usually belongs to a different transaction entirely.
+
+1. **Never build the narrative on one.** An error on a `[context]` line is not
+   this packet's failure, and citing it as one is the single easiest way to
+   produce a confident, wrong casebook.
+2. **You may still use them as background** -- "the pod was also timing out
+   against the same datasource at that instant" is a real observation. Say
+   which it is: name the line as context whenever you lean on it.
+
+### WARN IS NOT AUTOMATICALLY A FAILURE
+
+Services log caught exceptions at WARN. A WARN line naming an exception is
+good evidence that the exception occurred, and poor evidence that it went
+unhandled -- the service logged it and carried on, which is what WARN usually
+means.
+
+1. **Cite a WARN line freely to confirm what happened.** If it names the
+   declared root, say so; that is corroboration.
+2. **Do not present one as the failure** unless something else shows the flow
+   stopped there. A retry notice, a fallback, or a circuit-breaker transition
+   is the service working, not the packet dying.
+
 ### CITATIONS ARE MANDATORY
 
 Every factual claim must be traceable to something you were given: a specific
