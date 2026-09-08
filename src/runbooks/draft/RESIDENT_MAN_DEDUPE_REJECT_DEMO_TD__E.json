@@ -1,0 +1,28 @@
+{
+  "schema_version": "1.1",
+  "runbook_id": "RESIDENT_MAN_DEDUPE_REJECT_DEMO_TD__E",
+  "reason_code": "RESIDENT_MAN_DEDUPE_REJECT_DEMO_TD",
+  "enrolment_type": "E",
+  "status": "draft",
+  "version": 1,
+  "rule_fingerprint": "sha256:70823d98c9b8d5c95b15fe4d302d57fec43681ae2fc7df127ff0590a5632a0a9",
+  "resolution": {
+    "rejection_description": "Rejected because every de-duplication candidate matched on face and was a true duplicate of the applicant, with exactly one of them already holding an Aadhaar and a match score above the false-positive threshold.",
+    "synthesis": "The resident applied for a fresh enrolment, which requires globally unique biometrics. Fingerprint, iris and face all matched a single existing Aadhaar completely, which is a confirmed duplicate identity, so the applicant and the candidates without an Aadhaar were rejected. The resident must use the Aadhaar they already hold and approach the Regional Office if they cannot access it.",
+    "action": "RO_APPROVAL",
+    "resident_action": "RO_APPLICATION"
+  },
+  "provenance": {
+    "source_event_ids": [],
+    "source_casebook_count": 0,
+    "source_rule_ids": [
+      "cre-b0756de1"
+    ],
+    "generated_from": "rule_data",
+    "generated_at": "2026-08-17T05:41:14.119306",
+    "generated_by_model": "claude-opus-5",
+    "max_retry_count_in_sources": 0
+  },
+  "approved_by": null,
+  "approved_at": null
+}

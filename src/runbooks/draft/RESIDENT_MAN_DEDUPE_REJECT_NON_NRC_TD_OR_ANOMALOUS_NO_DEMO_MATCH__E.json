@@ -1,0 +1,28 @@
+{
+  "schema_version": "1.1",
+  "runbook_id": "RESIDENT_MAN_DEDUPE_REJECT_NON_NRC_TD_OR_ANOMALOUS_NO_DEMO_MATCH__E",
+  "reason_code": "RESIDENT_MAN_DEDUPE_REJECT_NON_NRC_TD_OR_ANOMALOUS_NO_DEMO_MATCH",
+  "enrolment_type": "E",
+  "status": "draft",
+  "version": 1,
+  "rule_fingerprint": "sha256:01de9a994e30d95490fbf21182aee9783fe8698c706dafbee6b09fb9a02c32d6",
+  "resolution": {
+    "rejection_description": "Rejected because de-duplication matched in-process enrolments that do not yet hold an Aadhaar, at least one of which was a true duplicate or an anomalous match, with no face match anywhere in the candidate set.",
+    "synthesis": "The resident applied for a fresh enrolment, which requires their biometrics to be unique against both issued Aadhaars and enrolments still in flight. The candidate set contained in-process enrolments that matched fully or partially on biometrics, so this packet could not be treated as a first, unique enrolment and was rejected together with those candidates. The competing enrolment conflict must be adjudicated through the Regional Office.",
+    "action": "RO_APPROVAL",
+    "resident_action": "RO_APPLICATION"
+  },
+  "provenance": {
+    "source_event_ids": [],
+    "source_casebook_count": 0,
+    "source_rule_ids": [
+      "cre-5b490252"
+    ],
+    "generated_from": "rule_data",
+    "generated_at": "2026-08-17T05:41:14.119306",
+    "generated_by_model": "claude-opus-5",
+    "max_retry_count_in_sources": 0
+  },
+  "approved_by": null,
+  "approved_at": null
+}

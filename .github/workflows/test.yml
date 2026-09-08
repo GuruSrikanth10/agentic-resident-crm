@@ -1,0 +1,76 @@
+name: tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.14 is what this runs on locally and in deployment; 3.12 was what
+        # CI alone used, so a green run proved nothing about the interpreter
+        # the code actually executes on (G21). Both are checked now.
+        python-version: ["3.12", "3.14"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run test suite
+        env:
+          # config_validator skips its LLM-key check under pytest, but the
+          # consumer/DLQ modules read Kafka config at import time.
+          KAFKA_CONSUMER_BROKERS: localhost:9092
+          AGENTIC_RESIDENT_CRM_API_KEY: ci-test-key
+          USE_MOCK_DB: "true"
+          # Keep the Kubernetes leg out of CI: no cluster, so the chain would
+          # fail fast on every fetch and add noise.
+          LOG_SOURCE: elastic
+        run: pytest
+
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Install tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install ruff pyright
+
+      # Neither of these ran before. pyrightconfig.json existed and nothing
+      # invoked it, and there was no linter at all -- so the print()-vs-structlog
+      # drift this audit cleaned up had nothing stopping it (G22c).
+      - name: Lint
+        run: ruff check .
+
+      - name: Type check
+        run: pyright
+        # Advisory for now: the codebase has never been type-checked, so
+        # failing the build on the first run would block every PR. Flip this
+        # to a hard gate once the existing findings are worked through.
+        continue-on-error: true

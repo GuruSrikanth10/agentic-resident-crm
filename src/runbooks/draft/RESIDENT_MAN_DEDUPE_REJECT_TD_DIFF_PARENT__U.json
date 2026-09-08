@@ -1,0 +1,28 @@
+{
+  "schema_version": "1.1",
+  "runbook_id": "RESIDENT_MAN_DEDUPE_REJECT_TD_DIFF_PARENT__U",
+  "reason_code": "RESIDENT_MAN_DEDUPE_REJECT_TD_DIFF_PARENT",
+  "enrolment_type": "U",
+  "status": "draft",
+  "version": 1,
+  "rule_fingerprint": "sha256:be486b48ed6156f4c4d0dcc4c5d73928b78039303dcb06f535106c8e43b7db01",
+  "resolution": {
+    "rejection_description": "Rejected on a mandatory biometric update because candidates from a different parent Aadhaar matched the resident completely on fingerprint, iris and face, making them true duplicates belonging to a separate identity record.",
+    "synthesis": "The resident submitted a first-time biometric update, which is de-duplicated like a fresh enrolment and must match no identity other than their own. A different parent Aadhaar matched on every modality, so the resident is already represented by another record, and the applicant together with the newer duplicate records was cancelled while the oldest bio-update was left standing. The duplicate identity must be resolved through the Regional Office.",
+    "action": "RO_APPROVAL",
+    "resident_action": "RO_APPLICATION"
+  },
+  "provenance": {
+    "source_event_ids": [],
+    "source_casebook_count": 0,
+    "source_rule_ids": [
+      "cre-9da382ad"
+    ],
+    "generated_from": "rule_data",
+    "generated_at": "2026-08-17T05:41:14.119306",
+    "generated_by_model": "claude-opus-5",
+    "max_retry_count_in_sources": 0
+  },
+  "approved_by": null,
+  "approved_at": null
+}

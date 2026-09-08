@@ -1,0 +1,5 @@
+code,description
+UID_ORIGIN_TRACKER_DATA_NOT_FOUND,UidOriginTracker record absent for the requested update
+DEMO_DATA_MISMATCH,Demographic data did not match the stored record
+PACKET_ALREADY_PROCESSED,The packet reached a terminal state in an earlier run
+INDEX_MASTER_DATA_NOT_FOUND,Index Master reference data absent for the request being processed

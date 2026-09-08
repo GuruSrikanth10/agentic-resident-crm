@@ -1,0 +1,28 @@
+{
+  "schema_version": "1.1",
+  "runbook_id": "RESIDENT_MAN_DEDUPE_REJECT_CANDIDATES_PRESENT__U",
+  "reason_code": "RESIDENT_MAN_DEDUPE_REJECT_CANDIDATES_PRESENT",
+  "enrolment_type": "U",
+  "status": "draft",
+  "version": 1,
+  "rule_fingerprint": "sha256:8c77173e1f343d21430cb497fb0a62f75f30fa273e7feed209ae273a2536623c",
+  "resolution": {
+    "rejection_description": "Rejected on a mandatory biometric update because de-duplication returned candidates, all of them belonging to the resident's own parent Aadhaar, while the applicant was not whitelisted.",
+    "synthesis": "The resident submitted a first-time biometric update, which is processed as a fresh enrolment and therefore expects no de-duplication candidates at all. Matches were returned and, although every one came from the resident's own parent Aadhaar rather than a different identity, the packet carried no whitelisting to permit them and was rejected. Whitelisting the applicant allows the packet to be reprocessed against the same candidates.",
+    "action": "WHITELISTING",
+    "resident_action": "PENDING"
+  },
+  "provenance": {
+    "source_event_ids": [],
+    "source_casebook_count": 0,
+    "source_rule_ids": [
+      "cre-6cb864c8"
+    ],
+    "generated_from": "rule_data",
+    "generated_at": "2026-08-17T05:41:14.119306",
+    "generated_by_model": "claude-opus-5",
+    "max_retry_count_in_sources": 0
+  },
+  "approved_by": null,
+  "approved_at": null
+}

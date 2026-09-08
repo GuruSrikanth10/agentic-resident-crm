@@ -1,0 +1,28 @@
+{
+  "schema_version": "1.1",
+  "runbook_id": "RESIDENT_MAN_DEDUPE_REJECT_NO_TD_SAME_PARENT__U",
+  "reason_code": "RESIDENT_MAN_DEDUPE_REJECT_NO_TD_SAME_PARENT",
+  "enrolment_type": "U",
+  "status": "draft",
+  "version": 1,
+  "rule_fingerprint": "sha256:168f7f3d3538154819f4e276d1b1edadddf6f53dc4bc2c563c859ceea1540764",
+  "resolution": {
+    "rejection_description": "Rejected on a standard biometric update because none of the candidates from the resident's own parent Aadhaar came back as a true duplicate, while other candidates were present.",
+    "synthesis": "The resident submitted a biometric update, which must authenticate completely against their own parent Aadhaar. No iteration of that parent matched on all of fingerprint and iris, so the system could not confirm that the person updating the record owns it, and the packet was rejected. A new packet with a careful, complete biometric capture is needed for the authentication to succeed.",
+    "action": "RESIDENT_PACKET_RESUBMIT",
+    "resident_action": "NEW_PACKET"
+  },
+  "provenance": {
+    "source_event_ids": [],
+    "source_casebook_count": 0,
+    "source_rule_ids": [
+      "cre-fa87353c"
+    ],
+    "generated_from": "rule_data",
+    "generated_at": "2026-08-17T05:41:14.119306",
+    "generated_by_model": "claude-opus-5",
+    "max_retry_count_in_sources": 0
+  },
+  "approved_by": null,
+  "approved_at": null
+}

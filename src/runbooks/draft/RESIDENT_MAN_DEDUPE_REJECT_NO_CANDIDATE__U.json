@@ -1,0 +1,28 @@
+{
+  "schema_version": "1.1",
+  "runbook_id": "RESIDENT_MAN_DEDUPE_REJECT_NO_CANDIDATE__U",
+  "reason_code": "RESIDENT_MAN_DEDUPE_REJECT_NO_CANDIDATE",
+  "enrolment_type": "U",
+  "status": "draft",
+  "version": 1,
+  "rule_fingerprint": "sha256:d9fd2a3554f025ea3c9f1890ed3ed9040a0f171f5d2fa3bd928711a66a5ac3a0",
+  "resolution": {
+    "rejection_description": "Rejected on a standard biometric update because de-duplication returned no candidates at all, leaving the packet with nothing to authenticate against.",
+    "synthesis": "The resident submitted a biometric update, which must authenticate one to one against their own parent Aadhaar rather than merely be unique. The capture matched no record whatsoever, including the resident's own parent, so ownership of the Aadhaar being updated could not be established and the packet was rejected. A new packet with a complete, good-quality biometric capture is required.",
+    "action": "RESIDENT_PACKET_RESUBMIT",
+    "resident_action": "NEW_PACKET"
+  },
+  "provenance": {
+    "source_event_ids": [],
+    "source_casebook_count": 0,
+    "source_rule_ids": [
+      "cre-b927eea0"
+    ],
+    "generated_from": "rule_data",
+    "generated_at": "2026-08-17T05:41:14.119306",
+    "generated_by_model": "claude-opus-5",
+    "max_retry_count_in_sources": 0
+  },
+  "approved_by": null,
+  "approved_at": null
+}

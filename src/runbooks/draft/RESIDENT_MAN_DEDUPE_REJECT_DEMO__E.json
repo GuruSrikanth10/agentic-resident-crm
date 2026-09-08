@@ -1,0 +1,28 @@
+{
+  "schema_version": "1.1",
+  "runbook_id": "RESIDENT_MAN_DEDUPE_REJECT_DEMO__E",
+  "reason_code": "RESIDENT_MAN_DEDUPE_REJECT_DEMO",
+  "enrolment_type": "E",
+  "status": "draft",
+  "version": 1,
+  "rule_fingerprint": "sha256:922fb83d5d05f6e591e53f9677a4409c2532bb4ed9bf795f4217fda7e4c21154",
+  "resolution": {
+    "rejection_description": "Rejected because every de-duplication candidate matched the applicant on face with a match score above the false-positive threshold, while none was a confirmed true duplicate and none was cleared as a false positive.",
+    "synthesis": "The resident applied for a fresh enrolment, which requires globally unique biometrics. A consistent face match at high score across all candidates is treated as the same person even though fingerprint and iris did not match completely, so the packet was rejected and the matched records holding an Aadhaar were suspended with the oldest retained. The resident should claim the existing Aadhaar through the Regional Office rather than enrol again.",
+    "action": "RO_APPROVAL",
+    "resident_action": "RO_APPLICATION"
+  },
+  "provenance": {
+    "source_event_ids": [],
+    "source_casebook_count": 0,
+    "source_rule_ids": [
+      "cre-cf086ba6"
+    ],
+    "generated_from": "rule_data",
+    "generated_at": "2026-08-17T05:41:14.119306",
+    "generated_by_model": "claude-opus-5",
+    "max_retry_count_in_sources": 0
+  },
+  "approved_by": null,
+  "approved_at": null
+}

@@ -1,0 +1,57 @@
+[tool.pytest.ini_options]
+# Confine collection to tests/. Without this, a bare `pytest` at the repo root
+# also collected test_payload.py -- a demo script, not a test, which executed
+# at import. CI dodged it by always passing `tests/`; a developer running
+# `pytest` did not (G22b).
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q --strict-markers"
+filterwarnings = [
+    # Surface deprecations from our own code rather than burying them.
+    "default::DeprecationWarning:src.*",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+exclude = [".venv", "local_casesheets", "local_checkpoints", "src/runbooks"]
+
+[tool.ruff.lint]
+# Deliberately narrow. The point is to catch the classes of defect this audit
+# found -- unused imports left by refactors, undefined names, bare excepts --
+# not to restyle the codebase (G22c).
+select = ["E9", "F63", "F7", "F82", "F401", "F811", "E711", "E712", "E713"]
+ignore = [
+    # `l` as a loop variable is fine; ambiguity rules are style, not defect.
+    "E741",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Re-exports exist so callers have one import site; they are used elsewhere.
+"src/log_pipeline/config.py" = ["F401"]
+
+# ---------------------------------------------------------------------------
+# Type checking
+# ---------------------------------------------------------------------------
+# The import root is the REPOSITORY ROOT, not src/.
+#
+# Every module in this codebase imports as `src.x.y`, but the old
+# pyrightconfig.json set `"root": "src"`, so the checker resolved `src.utils`
+# relative to src/ and reported "Cannot find module src.utils..." on virtually
+# every file. A type checker that is wrong about every import is a type
+# checker nobody reads, which is why it never caught anything (G22c).
+#
+# Consolidated here from the separate pyrightconfig.json so there is one
+# config file rather than two that can disagree.
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
+include = ["src", "tests"]
+exclude = [".venv", "**/__pycache__", "local_casesheets", "local_checkpoints", "src/runbooks"]
+extraPaths = ["."]
+typeCheckingMode = "basic"
+reportMissingImports = "error"
+
+[tool.ty.environment]
+root = ["."]
+extra-paths = ["."]

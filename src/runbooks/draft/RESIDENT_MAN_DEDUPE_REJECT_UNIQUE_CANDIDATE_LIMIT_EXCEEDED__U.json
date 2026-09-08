@@ -1,0 +1,28 @@
+{
+  "schema_version": "1.1",
+  "runbook_id": "RESIDENT_MAN_DEDUPE_REJECT_UNIQUE_CANDIDATE_LIMIT_EXCEEDED__U",
+  "reason_code": "RESIDENT_MAN_DEDUPE_REJECT_UNIQUE_CANDIDATE_LIMIT_EXCEEDED",
+  "enrolment_type": "U",
+  "status": "draft",
+  "version": 1,
+  "rule_fingerprint": "sha256:51e8c509f666fc7d67dfe3e05920b15f392541935c927a61111410b1f1813372",
+  "resolution": {
+    "rejection_description": "Rejected on an update because the number of unique de-duplication candidates exceeded the permitted limit while the applicant was not whitelisted.",
+    "synthesis": "The resident submitted an update and the biometrics matched more records than policy allows an operator to adjudicate for one packet, which usually indicates a low-quality capture matching broadly rather than a real duplicate. With the candidate set over the ceiling the comparison could not be completed and the packet was rejected. A new packet with a careful, high-quality capture of every modality is needed to narrow the candidate set.",
+    "action": "RESIDENT_PACKET_RESUBMIT",
+    "resident_action": "NEW_PACKET"
+  },
+  "provenance": {
+    "source_event_ids": [],
+    "source_casebook_count": 0,
+    "source_rule_ids": [
+      "cre-fe76cb18"
+    ],
+    "generated_from": "rule_data",
+    "generated_at": "2026-08-17T05:41:14.119306",
+    "generated_by_model": "claude-opus-5",
+    "max_retry_count_in_sources": 0
+  },
+  "approved_by": null,
+  "approved_at": null
+}

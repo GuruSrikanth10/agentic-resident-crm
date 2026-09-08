@@ -1,0 +1,28 @@
+{
+  "schema_version": "1.1",
+  "runbook_id": "RESIDENT_MAN_DEDUPE_REJECT_ONE_ANOMALOUS__E",
+  "reason_code": "RESIDENT_MAN_DEDUPE_REJECT_ONE_ANOMALOUS",
+  "enrolment_type": "E",
+  "status": "draft",
+  "version": 1,
+  "rule_fingerprint": "sha256:a8b9ce1c4a5b0b8acca7cef4cc87ea681148a14ba38e00ee672f9648d05b67fd",
+  "resolution": {
+    "rejection_description": "Rejected because exactly one candidate came back anomalous, with part of the biometrics matching and part not, at a match score above the false-positive threshold, with no face match and no confirmed true duplicate.",
+    "synthesis": "The resident applied for a fresh enrolment, which requires their biometrics to be globally unique. A single high-scoring partial match could be neither cleared as a false positive nor confirmed as a duplicate, so uniqueness was never established and the packet was rejected while the matched record holding an Aadhaar was suspended. A fresh packet with a complete, good-quality capture of every modality is needed to resolve that match.",
+    "action": "RESIDENT_PACKET_RESUBMIT",
+    "resident_action": "NEW_PACKET"
+  },
+  "provenance": {
+    "source_event_ids": [],
+    "source_casebook_count": 0,
+    "source_rule_ids": [
+      "cre-be2575b6"
+    ],
+    "generated_from": "rule_data",
+    "generated_at": "2026-08-17T05:41:14.119306",
+    "generated_by_model": "claude-opus-5",
+    "max_retry_count_in_sources": 0
+  },
+  "approved_by": null,
+  "approved_at": null
+}

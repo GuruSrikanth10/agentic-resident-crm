@@ -1,0 +1,28 @@
+{
+  "schema_version": "1.1",
+  "runbook_id": "RESIDENT_MAN_DEDUPE_REJECT_NO_DEMO__U",
+  "reason_code": "RESIDENT_MAN_DEDUPE_REJECT_NO_DEMO",
+  "enrolment_type": "U",
+  "status": "draft",
+  "version": 1,
+  "rule_fingerprint": "sha256:b24e194e24e775a00add12727c314aea8290830790b12517f7d97afe38be94c5",
+  "resolution": {
+    "rejection_description": "Rejected on a standard biometric update because the candidate set contained whitelisted records whose face did not match the applicant, while the applicant carried no whitelisting.",
+    "synthesis": "The resident submitted a biometric update and matched records that are whitelisted as a group, but the face on those whitelisted records does not belong to this resident. The whitelist exemption therefore could not be applied to the match and the packet was rejected. An operator must review and correct the whitelist grouping before the packet can proceed.",
+    "action": "MANUAL_REVIEW",
+    "resident_action": "PENDING"
+  },
+  "provenance": {
+    "source_event_ids": [],
+    "source_casebook_count": 0,
+    "source_rule_ids": [
+      "cre-cb5dddd2"
+    ],
+    "generated_from": "rule_data",
+    "generated_at": "2026-08-17T05:41:14.119306",
+    "generated_by_model": "claude-opus-5",
+    "max_retry_count_in_sources": 0
+  },
+  "approved_by": null,
+  "approved_at": null
+}

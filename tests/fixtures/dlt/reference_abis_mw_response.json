@@ -1,0 +1,94 @@
+{
+  "_comment": "Real DLT record from the enu-biometric service, captured 2026-08-20. The second real sample, and the first with a payload. Class A (BusinessException [INDEX_MASTER_DATA_NOT_FOUND]). What this fixture pins, beyond the Phase 1 traps the first sample already covers: (1) the record KEY is the refId, and the same value appears in the payload at abisMWResponseNewSeda.refId -- Open Question 1, resolved; (2) the payload's top-level event_id (b733ab61) is a DIFFERENT uuid from the refId (c5d21184), so anything reaching for a field named event_id correlates to nothing; (3) __TypeId__ is EnrolmentEventResponse, not the EventMessage the first sample carried, from a different original topic and consumer group -- the single-payload-schema assumption in DLT_PLAN.md 5.3 is retired; (4) retry_topic-backoff-timestamp 01A0192B922D decodes to 2026-08-19T08:38:01.005Z, matching the TimestampedException instant in the trace to the millisecond, and sitting 43h after kafka_original-timestamp -- Trap 2 confirmed on a second sample; (5) the payload eventTimestamp 2026-08-17 19:07:47.552 is the same instant as kafka_original-timestamp 1786973867552 = 13:37:47.552Z, i.e. local +05:30 with no offset recorded. Never a log anchor.",
+  "_source": {
+    "dlt_topic": "(not recorded)",
+    "dlt_partition": null,
+    "dlt_offset": null,
+    "dlt_timestamp": null,
+    "redacted": false
+  },
+  "key": "c5d21184-08f4-4c32-9e5e-5c108c33eb14",
+  "headers": {
+    "kafka_original-offset": "4441353",
+    "kafka_original-timestamp-type": "CreateTime",
+    "BiometricProducerInterceptor-before-retry": "true",
+    "kafka_dlt-original-consumer-group": "enu-biodedup-abismw-cg",
+    "kafka_original-topic": "ENU.MWARE.DEDUPE.PROCESS.COMPLETION.V1",
+    "kafka_original-timestamp": "1786973867552",
+    "kafka_original-partition": "9",
+    "retry_topic-original-timestamp": "01A00FF14E20",
+    "kafka_exception-cause-fqcn": "java.lang.RuntimeException",
+    "kafka_exception-stacktrace": "org.springframework.kafka.listener.ListenerExecutionFailedException: Listener failed\n\tat org.springframework.kafka.listener.KafkaMessageListenerContainer$ListenerConsumer.decorateException(KafkaMessageListenerContainer.java:2998)\n\tat org.springframework.kafka.listener.KafkaMessageListenerContainer$ListenerConsumer.doInvokeOnMessage(KafkaMessageListenerContainer.java:2901)\n\tat org.springframework.kafka.listener.KafkaMessageListenerContainer$ListenerConsumer.invokeOnMessage(KafkaMessageListenerContainer.java:2865)\n\tat org.springframework.kafka.listener.KafkaMessageListenerContainer$ListenerConsumer.doInvokeRecordListener(KafkaMessageListenerContainer.java:2777)\n\tat org.springframework.kafka.listener.KafkaMessageListenerContainer$ListenerConsumer$3.doInTransactionWithoutResult(KafkaMessageListenerContainer.java:2557)\n\tat org.springframework.transaction.support.TransactionCallbackWithoutResult.doInTransaction(TransactionCallbackWithoutResult.java:36)\n\tat org.springframework.transaction.support.TransactionTemplate.execute(TransactionTemplate.java:140)\n\tat org.springframework.kafka.listener.KafkaMessageListenerContainer$ListenerConsumer.invokeInTransaction(KafkaMessageListenerContainer.java:2550)\n\tat org.springframework.kafka.listener.KafkaMessageListenerContainer$ListenerConsumer.invokeRecordListenerInTx(KafkaMessageListenerContainer.java:2523)\n\tat org.springframework.kafka.listener.KafkaMessageListenerContainer$ListenerConsumer.invokeRecordListener(KafkaMessageListenerContainer.java:2500)\n\tat org.springframework.kafka.listener.KafkaMessageListenerContainer$ListenerConsumer.invokeListener(KafkaMessageListenerContainer.java:2152)\n\tat org.springframework.kafka.listener.KafkaMessageListenerContainer$ListenerConsumer.invokeIfHaveRecords(KafkaMessageListenerContainer.java:1528)\n\tat org.springframework.kafka.listener.KafkaMessageListenerContainer$ListenerConsumer.pollAndInvoke(KafkaMessageListenerContainer.java:1466)\n\tat org.springframework.kafka.listener.KafkaMessageListenerContainer$ListenerConsumer.run(KafkaMessageListenerContainer.java:1335)\n\tat java.base/java.util.concurrent.CompletableFuture$AsyncRun.run(CompletableFuture.java:1804)\n\tat java.base/java.lang.Thread.run(Thread.java:840)\nCaused by: org.springframework.kafka.listener.TimestampedException: Exception thrown at 2026-08-19T08:38:01.005905798Z\n\tat org.springframework.kafka.listener.adapter.KafkaBackoffAwareMessageListenerAdapter.onMessage(KafkaBackoffAwareMessageListenerAdapter.java:100)\n\tat org.springframework.kafka.listener.adapter.KafkaBackoffAwareMessageListenerAdapter.onMessage(KafkaBackoffAwareMessageListenerAdapter.java:49)\n\tat org.springframework.kafka.listener.KafkaMessageListenerContainer$ListenerConsumer.doInvokeOnMessage(KafkaMessageListenerContainer.java:2887)\n\t... 14 more\nCaused by: org.springframework.kafka.listener.ListenerExecutionFailedException: Listener method 'public void com.uidai.enu.biometric.messagingQueue.consumer.AbisMwResponseConsumer.consumeMessage(org.apache.kafka.clients.consumer.ConsumerRecord<java.lang.String, in.gov.uidai.uidabismiddlewaresb.kafka.model.EnrolmentEventResponse>,org.springframework.kafka.support.Acknowledgment)' threw exception\n\tat org.springframework.kafka.listener.adapter.MessagingMessageListenerAdapter.invokeHandler(MessagingMessageListenerAdapter.java:489)\n\tat org.springframework.kafka.listener.adapter.MessagingMessageListenerAdapter.invoke(MessagingMessageListenerAdapter.java:421)\n\tat org.springframework.kafka.listener.adapter.RecordMessagingMessageListenerAdapter.onMessage(RecordMessagingMessageListenerAdapter.java:85)\n\tat org.springframework.kafka.listener.adapter.RecordMessagingMessageListenerAdapter.onMessage(RecordMessagingMessageListenerAdapter.java:50)\n\tat org.springframework.kafka.listener.adapter.KafkaBackoffAwareMessageListenerAdapter.invokeDelegateOnMessage(KafkaBackoffAwareMessageListenerAdapter.java:106)\n\tat org.springframework.kafka.listener.adapter.KafkaBackoffAwareMessageListenerAdapter.onMessage(KafkaBackoffAwareMessageListenerAdapter.java:97)\n\t... 16 more\nCaused by: java.lang.RuntimeException: in.gov.uidai.common.exception.BusinessException: [INDEX_MASTER_DATA_NOT_FOUND] Index Master data not found for the current request\n\tat com.uidai.enu.biometric.messagingQueue.consumer.AbstractBaseConsumer.lambda$executeConsumption$0(AbstractBaseConsumer.java:37)\n\tat org.springframework.kafka.core.KafkaTemplate.executeInTransaction(KafkaTemplate.java:678)\n\tat com.uidai.enu.biometric.messagingQueue.consumer.AbstractBaseConsumer.executeConsumption(AbstractBaseConsumer.java:26)\n\tat com.uidai.enu.biometric.messagingQueue.consumer.AbisMwResponseConsumer.consumeMessage(AbisMwResponseConsumer.java:50)\n\tat jdk.internal.reflect.GeneratedMethodAccessor253.invoke(Unknown Source)\n\tat java.base/jdk.internal.reflect.DelegatingMethodAccessorImpl.invoke(DelegatingMethodAccessorImpl.java:43)\n\tat java.base/java.lang.reflect.Method.invoke(Method.java:569)\n\tat org.springframework.aop.support.AopUtils.invokeJoinpointUsingReflection(AopUtils.java:359)\n\tat org.springframework.aop.framework.ReflectiveMethodInvocation.invokeJoinpoint(ReflectiveMethodInvocation.java:196)\n\tat org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:163)\n\tat org.springframework.transaction.interceptor.TransactionAspectSupport.invokeWithinTransaction(TransactionAspectSupport.java:380)\n\tat org.springframework.transaction.interceptor.TransactionInterceptor.invoke(TransactionInterceptor.java:119)\n\tat org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:184)\n\tat org.springframework.aop.framework.CglibAopProxy$DynamicAdvisedInterceptor.intercept(CglibAopProxy.java:727)\n\tat com.uidai.enu.biometric.messagingQueue.consumer.AbisMwResponseConsumer$$SpringCGLIB$$0.consumeMessage(<generated>)\n\tat jdk.internal.reflect.GeneratedMethodAccessor253.invoke(Unknown Source)\n\tat java.base/jdk.internal.reflect.DelegatingMethodAccessorImpl.invoke(DelegatingMethodAccessorImpl.java:43)\n\tat java.base/java.lang.reflect.Method.invoke(Method.java:569)\n\tat org.springframework.messaging.handler.invocation.InvocableHandlerMethod.doInvoke(InvocableHandlerMethod.java:169)\n\tat org.springframework.kafka.listener.adapter.KotlinAwareInvocableHandlerMethod.doInvoke(KotlinAwareInvocableHandlerMethod.java:45)\n\tat org.springframework.messaging.handler.invocation.InvocableHandlerMethod.invoke(InvocableHandlerMethod.java:119)\n\tat org.springframework.kafka.listener.adapter.HandlerAdapter.invoke(HandlerAdapter.java:78)\n\tat org.springframework.kafka.listener.adapter.MessagingMessageListenerAdapter.invokeHandler(MessagingMessageListenerAdapter.java:474)\n\t... 21 more\nCaused by: in.gov.uidai.common.exception.BusinessException: [INDEX_MASTER_DATA_NOT_FOUND] Index Master data not found for the current request\n\tat in.gov.uidai.common.factory.CommonErrorFactory.instantiateException(CommonErrorFactory.java:25)\n\tat com.uidai.enu.biometric.service.impl.BioDataBaseHelperServiceImpl.getIndexMasterData(BioDataBaseHelperServiceImpl.java:190)\n\tat com.uidai.enu.biometric.service.impl.BioDeDuplicationServiceImpl.filterCandidatesAndBuildRefIdUidMap(BioDeDuplicationServiceImpl.java:4052)\n\tat com.uidai.enu.biometric.service.impl.BioDeDuplicationServiceImpl.prepareMDDPB0Request(BioDeDuplicationServiceImpl.java:4016)\n\tat com.uidai.enu.biometric.service.impl.BioDeDuplicationServiceImpl.processingAndHandlingPB0Preprocessing(BioDeDuplicationServiceImpl.java:4001)\n\tat com.uidai.enu.biometric.service.impl.BioDeDuplicationServiceImpl.processAbisMwOnlyIdentifyResponsePostUC(BioDeDuplicationServiceImpl.java:1563)\n\tat com.uidai.enu.biometric.service.impl.BioDeDuplicationServiceImpl.processAbisMwResponse(BioDeDuplicationServiceImpl.java:780)\n\tat com.uidai.enu.biometric.messagingQueue.consumer.AbisMwResponseConsumer.processPayload(AbisMwResponseConsumer.java:63)\n\tat com.uidai.enu.biometric.messagingQueue.consumer.AbisMwResponseConsumer.processPayload(AbisMwResponseConsumer.java:28)\n\tat com.uidai.enu.biometric.messagingQueue.consumer.AbstractBaseConsumer.lambda$executeConsumption$0(AbstractBaseConsumer.java:29)\n\t... 43 more\n",
+    "kafka_exception-fqcn": "org.springframework.kafka.listener.ListenerExecutionFailedException",
+    "kafka_exception-message": "Listener failed; in.gov.uidai.common.exception.BusinessException: [INDEX_MASTER_DATA_NOT_FOUND] Index Master data not found for the current request",
+    "__TypeId__": "in.gov.uidai.uidabismiddlewaresb.kafka.model.EnrolmentEventResponse",
+    "retry_topic-attempts": "5",
+    "retry_topic-backoff-timestamp": "01A0192B922D"
+  },
+  "payload": {
+    "event_id": "b733ab61-78c4-4aa9-b959-7216435c2544",
+    "category": "ONLY_IDENTIFY",
+    "event_type": "enr_pkt",
+    "eventTimestamp": "2026-08-17 19:07:47.552",
+    "sid": null,
+    "sidDate": null,
+    "version": "1.0",
+    "sourceTopic": null,
+    "callbackTopic": null,
+    "flowMetaData": null,
+    "abisMWResponseNewSeda": {
+      "requestType": "ONLY_IDENTIFY",
+      "responseStatus": "FAILURE",
+      "requestId": "bec31ff3-130e-4128-ba7a-fabdaa1f9fbd",
+      "refId": "c5d21184-08f4-4c32-9e5e-5c108c33eb14",
+      "abisResponses": {
+        "abisResponse": [
+          {
+            "abisId": "ABIS1",
+            "candidates": {
+              "matchedCandidate": []
+            },
+            "diagnostics": null
+          },
+          {
+            "abisId": "ABIS2",
+            "candidates": {
+              "matchedCandidate": [
+                {
+                  "candidateRefId": "80d00e27-b4be-4e69-83aa-ea65f38bf596",
+                  "scaledScore": 516,
+                  "faceScore": 0,
+                  "fingerLeftSlapScore": 77,
+                  "fingerRightSlapScore": 74,
+                  "fingerBothThumbsScore": 28,
+                  "leftIrisScore": 57,
+                  "rightIrisScore": 14
+                },
+                {
+                  "candidateRefId": "a1bc31ad-8dd7-4aee-918d-874816de50cb",
+                  "scaledScore": 501,
+                  "faceScore": 0,
+                  "fingerLeftSlapScore": 0,
+                  "fingerRightSlapScore": 0,
+                  "fingerBothThumbsScore": 0,
+                  "leftIrisScore": 0,
+                  "rightIrisScore": 497
+                }
+              ]
+            },
+            "diagnostics": null
+          },
+          {
+            "abisId": "ABIS3",
+            "candidates": {
+              "matchedCandidate": []
+            },
+            "diagnostics": null
+          }
+        ],
+        "referenceId": "c5d21184-08f4-4c32-9e5e-5c108c33eb14"
+      }
+    }
+  },
+  "payload_raw": null
+}

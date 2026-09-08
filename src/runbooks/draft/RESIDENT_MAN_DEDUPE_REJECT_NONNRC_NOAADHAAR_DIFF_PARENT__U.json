@@ -1,0 +1,28 @@
+{
+  "schema_version": "1.1",
+  "runbook_id": "RESIDENT_MAN_DEDUPE_REJECT_NONNRC_NOAADHAAR_DIFF_PARENT__U",
+  "reason_code": "RESIDENT_MAN_DEDUPE_REJECT_NONNRC_NOAADHAAR_DIFF_PARENT",
+  "enrolment_type": "U",
+  "status": "draft",
+  "version": 1,
+  "rule_fingerprint": "sha256:9b71f454cdfdfaa4a7a116d8b3067762329cf1024b896af4d55a945a636e6ac1",
+  "resolution": {
+    "rejection_description": "Rejected on a mandatory biometric update because the face matched candidates belonging to a different parent Aadhaar, and those candidates were in-process enrolments that do not yet hold an Aadhaar.",
+    "synthesis": "The resident submitted a first-time biometric update, which is de-duplicated like a fresh enrolment and must not match any other identity. The face matched enrolments still in flight under a different parent, which points to the same person already being enrolled elsewhere, so the packet was rejected. The competing enrolment must be resolved through the Regional Office.",
+    "action": "RO_APPROVAL",
+    "resident_action": "RO_APPLICATION"
+  },
+  "provenance": {
+    "source_event_ids": [],
+    "source_casebook_count": 0,
+    "source_rule_ids": [
+      "cre-7e25682c"
+    ],
+    "generated_from": "rule_data",
+    "generated_at": "2026-08-17T05:41:14.119306",
+    "generated_by_model": "claude-opus-5",
+    "max_retry_count_in_sources": 0
+  },
+  "approved_by": null,
+  "approved_at": null
+}

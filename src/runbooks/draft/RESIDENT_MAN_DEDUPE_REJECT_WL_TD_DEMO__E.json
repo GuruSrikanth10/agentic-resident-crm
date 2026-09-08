@@ -1,0 +1,28 @@
+{
+  "schema_version": "1.1",
+  "runbook_id": "RESIDENT_MAN_DEDUPE_REJECT_WL_TD_DEMO__E",
+  "reason_code": "RESIDENT_MAN_DEDUPE_REJECT_WL_TD_DEMO",
+  "enrolment_type": "E",
+  "status": "draft",
+  "version": 1,
+  "rule_fingerprint": "sha256:73bb615af71d3f2234e29de219e80920166f02b8f33e479489d260abe0dd7e66",
+  "resolution": {
+    "rejection_description": "Rejected because a true duplicate that also matched on face and already holds an Aadhaar was present in the candidate set, even though the applicant was whitelisted and not every candidate was a face match.",
+    "synthesis": "The resident applied for a fresh enrolment while carrying a whitelist that raises the manual-review threshold. De-duplication still found a candidate holding an Aadhaar whose fingerprint and iris matched completely and whose face also matched, which a whitelist cannot override, so the enrolment was rejected and the duplicate records were suspended with the earliest true duplicate retained. The resident already holds an Aadhaar and must pursue it through the Regional Office.",
+    "action": "RO_APPROVAL",
+    "resident_action": "RO_APPLICATION"
+  },
+  "provenance": {
+    "source_event_ids": [],
+    "source_casebook_count": 0,
+    "source_rule_ids": [
+      "cre-66955fa5"
+    ],
+    "generated_from": "rule_data",
+    "generated_at": "2026-08-17T05:41:14.119306",
+    "generated_by_model": "claude-opus-5",
+    "max_retry_count_in_sources": 0
+  },
+  "approved_by": null,
+  "approved_at": null
+}

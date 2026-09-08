@@ -1,0 +1,28 @@
+{
+  "schema_version": "1.1",
+  "runbook_id": "RESIDENT_MAN_DEDUPE_REJECT_FP_FROM_SAME_PARENT__U",
+  "reason_code": "RESIDENT_MAN_DEDUPE_REJECT_FP_FROM_SAME_PARENT",
+  "enrolment_type": "U",
+  "status": "draft",
+  "version": 1,
+  "rule_fingerprint": "sha256:d8df4c52c69256f605f032d6c7fa0ebfff8ad19a30883d0561225364a2fb6fcd",
+  "resolution": {
+    "rejection_description": "Rejected on a standard biometric update because at least one candidate from the resident's own parent Aadhaar was adjudicated a false positive while other same-parent candidates matched as true duplicates, leaving the parent's records inconsistently confirmed.",
+    "synthesis": "The resident submitted a biometric update, which must authenticate against every historical iteration of their own parent Aadhaar. Some iterations of that parent matched completely while at least one was marked a false positive, so the authentication was inconsistent and the packet was rejected. The false-positive marking on the resident's own records needs correcting, after which the packet can be replayed.",
+    "action": "REPLAY",
+    "resident_action": "PENDING"
+  },
+  "provenance": {
+    "source_event_ids": [],
+    "source_casebook_count": 0,
+    "source_rule_ids": [
+      "cre-468e9710"
+    ],
+    "generated_from": "rule_data",
+    "generated_at": "2026-08-17T05:41:14.119306",
+    "generated_by_model": "claude-opus-5",
+    "max_retry_count_in_sources": 0
+  },
+  "approved_by": null,
+  "approved_at": null
+}

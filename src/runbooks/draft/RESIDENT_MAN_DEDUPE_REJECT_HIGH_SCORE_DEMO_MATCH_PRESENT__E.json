@@ -1,0 +1,28 @@
+{
+  "schema_version": "1.1",
+  "runbook_id": "RESIDENT_MAN_DEDUPE_REJECT_HIGH_SCORE_DEMO_MATCH_PRESENT__E",
+  "reason_code": "RESIDENT_MAN_DEDUPE_REJECT_HIGH_SCORE_DEMO_MATCH_PRESENT",
+  "enrolment_type": "E",
+  "status": "draft",
+  "version": 1,
+  "rule_fingerprint": "sha256:2e20e995c8005102013ffe88bdcef0d3c37aa924059621a4cc3beddc3a0e76f0",
+  "resolution": {
+    "rejection_description": "Rejected because de-duplication returned at least one candidate that matched the applicant on face with a highest biometric match score above the false-positive threshold, and the matches were neither all false positives nor undeterminable.",
+    "synthesis": "The resident applied for a fresh enrolment, which requires globally unique biometrics. A face match backed by a high biometric score is treated as strong evidence that the applicant is already enrolled, so the applicant and the candidates without an Aadhaar were rejected and the matched records holding an Aadhaar were suspended. The resident should claim their existing Aadhaar through the Regional Office rather than enrol again.",
+    "action": "RO_APPROVAL",
+    "resident_action": "RO_APPLICATION"
+  },
+  "provenance": {
+    "source_event_ids": [],
+    "source_casebook_count": 0,
+    "source_rule_ids": [
+      "cre-660f5626"
+    ],
+    "generated_from": "rule_data",
+    "generated_at": "2026-08-17T05:41:14.119306",
+    "generated_by_model": "claude-opus-5",
+    "max_retry_count_in_sources": 0
+  },
+  "approved_by": null,
+  "approved_at": null
+}

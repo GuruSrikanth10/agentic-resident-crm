@@ -1,0 +1,29 @@
+{
+  "schema_version": "1.1",
+  "runbook_id": "RESIDENT_MAN_DEDUPE_REJECT_ALL_ANOMALOUS__U",
+  "reason_code": "RESIDENT_MAN_DEDUPE_REJECT_ALL_ANOMALOUS",
+  "enrolment_type": "U",
+  "status": "draft",
+  "version": 1,
+  "rule_fingerprint": "sha256:1dc2ffacbe0bb677994c353352b58a3fdcb9a8fed8326de493c58ee2dd6bd23b",
+  "resolution": {
+    "rejection_description": "Rejected on a standard biometric update because every de-duplication candidate came back anomalous, meaning some modalities matched and others did not, with no candidate confirmed as a duplicate on face.",
+    "synthesis": "The resident submitted a biometric update, which must authenticate cleanly against their own parent Aadhaar. Every candidate matched only partially, so the system could not confirm that the person updating the record is its owner and rejected the packet. A new packet with a careful, complete capture of fingerprint, iris and face is needed for the authentication to succeed.",
+    "action": "RESIDENT_PACKET_RESUBMIT",
+    "resident_action": "NEW_PACKET"
+  },
+  "provenance": {
+    "source_event_ids": [],
+    "source_casebook_count": 0,
+    "source_rule_ids": [
+      "cre-5c7a9d4e",
+      "cre-6b8f2e1a"
+    ],
+    "generated_from": "rule_data",
+    "generated_at": "2026-08-17T05:41:14.119306",
+    "generated_by_model": "claude-opus-5",
+    "max_retry_count_in_sources": 0
+  },
+  "approved_by": null,
+  "approved_at": null
+}

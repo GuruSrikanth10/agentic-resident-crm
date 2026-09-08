@@ -1,0 +1,28 @@
+{
+  "schema_version": "1.1",
+  "runbook_id": "RESIDENT_MAN_DEDUPE_REJECT_DEMO_NONNRC_NOAADHAAR__E",
+  "reason_code": "RESIDENT_MAN_DEDUPE_REJECT_DEMO_NONNRC_NOAADHAAR",
+  "enrolment_type": "E",
+  "status": "draft",
+  "version": 1,
+  "rule_fingerprint": "sha256:de7c3b54e25fa72dcddeba4610cb147dae081ead445b57a707635fee7c8a2b53",
+  "resolution": {
+    "rejection_description": "Rejected because every de-duplication candidate matched the applicant on face and the candidate set contained both records already holding an Aadhaar and in-process enrolments that do not yet have one.",
+    "synthesis": "The resident applied for a fresh enrolment, which requires uniqueness against issued Aadhaars as well as enrolments still in flight. The face matched across a candidate set spanning both, so the applicant is already represented in the system and the packet was rejected. The existing record and any competing enrolment must be resolved through the Regional Office instead of enrolling again.",
+    "action": "RO_APPROVAL",
+    "resident_action": "RO_APPLICATION"
+  },
+  "provenance": {
+    "source_event_ids": [],
+    "source_casebook_count": 0,
+    "source_rule_ids": [
+      "cre-b21fd83d"
+    ],
+    "generated_from": "rule_data",
+    "generated_at": "2026-08-17T05:41:14.119306",
+    "generated_by_model": "claude-opus-5",
+    "max_retry_count_in_sources": 0
+  },
+  "approved_by": null,
+  "approved_at": null
+}

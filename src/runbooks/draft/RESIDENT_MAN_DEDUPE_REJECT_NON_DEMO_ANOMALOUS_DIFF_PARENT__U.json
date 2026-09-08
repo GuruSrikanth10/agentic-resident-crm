@@ -1,0 +1,28 @@
+{
+  "schema_version": "1.1",
+  "runbook_id": "RESIDENT_MAN_DEDUPE_REJECT_NON_DEMO_ANOMALOUS_DIFF_PARENT__U",
+  "reason_code": "RESIDENT_MAN_DEDUPE_REJECT_NON_DEMO_ANOMALOUS_DIFF_PARENT",
+  "enrolment_type": "U",
+  "status": "draft",
+  "version": 1,
+  "rule_fingerprint": "sha256:b7ce8fc0c7da9d052289346c23e3894db81755c0b496185246c3e616dd23a34c",
+  "resolution": {
+    "rejection_description": "Rejected on a mandatory biometric update because fingerprint or iris matched a different parent Aadhaar only in part, with no face match of any kind against that parent.",
+    "synthesis": "The resident submitted a first-time biometric update, which is de-duplicated like a fresh enrolment and must not match another identity. Partial fingerprint or iris matches to a different parent, unsupported by any face match, left the comparison unresolved and the packet was rejected. A new packet with a careful, complete biometric capture is needed to settle those partial matches.",
+    "action": "RESIDENT_PACKET_RESUBMIT",
+    "resident_action": "NEW_PACKET"
+  },
+  "provenance": {
+    "source_event_ids": [],
+    "source_casebook_count": 0,
+    "source_rule_ids": [
+      "cre-9da382b1"
+    ],
+    "generated_from": "rule_data",
+    "generated_at": "2026-08-17T05:41:14.119306",
+    "generated_by_model": "claude-opus-5",
+    "max_retry_count_in_sources": 0
+  },
+  "approved_by": null,
+  "approved_at": null
+}

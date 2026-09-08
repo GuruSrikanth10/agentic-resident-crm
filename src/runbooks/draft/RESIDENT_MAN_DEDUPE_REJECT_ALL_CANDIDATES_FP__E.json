@@ -1,0 +1,28 @@
+{
+  "schema_version": "1.1",
+  "runbook_id": "RESIDENT_MAN_DEDUPE_REJECT_ALL_CANDIDATES_FP__E",
+  "reason_code": "RESIDENT_MAN_DEDUPE_REJECT_ALL_CANDIDATES_FP",
+  "enrolment_type": "E",
+  "status": "draft",
+  "version": 1,
+  "rule_fingerprint": "sha256:1c5d6b9c447b4f8504c68e62c3cd400c4e9869185560e8350b2afd697ca9b0b7",
+  "resolution": {
+    "rejection_description": "Rejected during manual de-duplication when every returned candidate was classified as a false positive, with no face match and a highest match score at or below the false-positive threshold. The packet was rejected even though no genuine duplicate was found.",
+    "synthesis": "The resident applied for a fresh enrolment, and de-duplication returned candidates that were all adjudicated as false positives, meaning spurious matches rather than real duplicates, with the best match score sitting under the threshold. Because the rejection was driven by matches that were themselves discounted, the applicant's uniqueness is not actually in doubt. Once the false-positive candidates are settled the packet can be replayed with no action from the resident.",
+    "action": "REPLAY",
+    "resident_action": "PENDING"
+  },
+  "provenance": {
+    "source_event_ids": [],
+    "source_casebook_count": 0,
+    "source_rule_ids": [
+      "cre-2e184509"
+    ],
+    "generated_from": "rule_data",
+    "generated_at": "2026-08-17T05:41:14.119306",
+    "generated_by_model": "claude-opus-5",
+    "max_retry_count_in_sources": 0
+  },
+  "approved_by": null,
+  "approved_at": null
+}

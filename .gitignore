@@ -1,0 +1,45 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+abd/
+*.xlsx
+*.csv
+*.log
+
+src/checkpoints.db
+
+local_casesheets/
+local_checkpoints/
+*.db
+*.db-shm
+*.db-wal
+
+
+# filelock artifacts
+*.lock
+
+# Offline log fixtures built by src/tools/build_log_fixture.py from downloaded
+# production logs. Real resident data -- never commit. `*.log` above already
+# covers current.log, but not the meta.json beside it.
+local_fixtures/
+
+# Captured DLT corpus (real production messages -- never commit)
+tests/fixtures/dlt/corpus/
+
+# ...but test fixture registries must be committed (DLT BusinessException registry)
+!tests/fixtures/**/*.csv
+
+# ...and so must the reason-code catalog. It is generated from the committed
+# reason_codes.txt by `python -m src.tools.parse_reason_codes`, and the running
+# system reads it: without it in the repo a fresh clone has no catalog, every
+# lookup misses, and classification silently reverts to pre-catalog behaviour
+# -- a technical code inside a BusinessException goes back to the expensive
+# lane with no error anywhere to say why. Published error codes, not operator
+# data, so unlike rules.csv it belongs in git.
+!reason_codes.csv
+
+# Local .env backups -- they hold the same secrets as .env, which is ignored
+# while its backups were not, so one `git add -A` would have published them.
+# `.env.bak*` rather than `.env.bak.*` so a plain `.env.bak` is caught too.
+.env.bak*

@@ -1,0 +1,28 @@
+{
+  "schema_version": "1.1",
+  "runbook_id": "RESIDENT_MAN_DEDUPE_REJECT_UNIQUE_CANDIDATE_LIMIT_EXCEEDED__E",
+  "reason_code": "RESIDENT_MAN_DEDUPE_REJECT_UNIQUE_CANDIDATE_LIMIT_EXCEEDED",
+  "enrolment_type": "E",
+  "status": "draft",
+  "version": 1,
+  "rule_fingerprint": "sha256:5af8795c6b01704dcb5cf0869e8797a47789711f6e61c48ab923a2a242e97fd9",
+  "resolution": {
+    "rejection_description": "Rejected because the number of unique de-duplication candidates exceeded the permitted limit for a non-whitelisted applicant. Above that ceiling the candidate set cannot be adjudicated within the packet.",
+    "synthesis": "The resident applied for a fresh enrolment and their biometrics matched more records than policy allows an operator to review for one packet, which usually points to a low-quality capture matching broadly rather than to a real duplicate. Uniqueness could not be assessed at all, so the packet was rejected together with the candidates that hold no Aadhaar. A new packet with a careful, high-quality capture of every modality is needed to narrow the candidate set.",
+    "action": "RESIDENT_PACKET_RESUBMIT",
+    "resident_action": "NEW_PACKET"
+  },
+  "provenance": {
+    "source_event_ids": [],
+    "source_casebook_count": 0,
+    "source_rule_ids": [
+      "cre-ee43980f"
+    ],
+    "generated_from": "rule_data",
+    "generated_at": "2026-08-17T05:41:14.119306",
+    "generated_by_model": "claude-opus-5",
+    "max_retry_count_in_sources": 0
+  },
+  "approved_by": null,
+  "approved_at": null
+}
