@@ -1,15 +1,18 @@
 """
 S3 casebook storage (ENHANCEMENT_PLAN.md 4.7).
 
+
 The local backend pins the system to one node: `filelock` coordinates
 processes on a shared filesystem, which two pods on different nodes do not
 have. This backend removes that ceiling.
+
 
 Atomicity differs from the local backend, and simplifies:
 `LocalFilesystemCasebookStorage` needs `.tmp` + `os.replace` because a
 partially written local file is readable. An S3 `PutObject` is atomic at the
 object level -- a reader sees either the previous object or the complete new
 one, never a partial write -- so no temp-key dance is needed.
+
 
 What S3 does NOT give us is mutual exclusion. Two processes writing the same
 key concurrently produce last-writer-wins rather than a merge. That is
@@ -60,8 +63,27 @@ def _get_client():
     with _s3_client_lock:
         if _s3_client is None:
             import boto3
-            _s3_client = boto3.client("s3")
+            from botocore.config import Config
+
+
+            endpoint = os.environ.get("S3_ENDPOINT_URL") or os.environ.get("AWS_ENDPOINT_URL")
+            kwargs = {}
+            if endpoint:
+                kwargs["endpoint_url"] = endpoint
+                # Self-hosted S3-compatible stores (MinIO, Ceph, etc.) need
+                # path-style addressing: they do not resolve
+                # <bucket>.<host> virtual-host style.
+                kwargs["config"] = Config(s3={"addressing_style": "path"})
+
+
+                if os.environ.get("S3_VERIFY_SSL", "true").lower() == "false":
+                    kwargs["verify"] = False
+
+
+            _s3_client = boto3.client("s3", **kwargs)
         return _s3_client
+
+
 
 
 class S3CasebookStorage(CasebookStorage):
@@ -176,6 +198,7 @@ class S3CasebookStorage(CasebookStorage):
                                filename=filename, error=f"{type(e).__name__}: {e}")
             return None
 
+
     def artifact_exists(self, event_id: str, filename: str) -> bool:
         try:
             _get_client().head_object(
@@ -185,13 +208,16 @@ class S3CasebookStorage(CasebookStorage):
         except Exception:
             return False
 
+
     def update_json(self, event_id: str, filename: str, mutate) -> dict:
         """Read-modify-write via an S3 conditional write.
+
 
         S3 gives no mutual exclusion, so a load-then-save pair is a lost-update
         race: two analysis pods incrementing the same DLT group counter both
         read N and both write N+1. `filelock` cannot help -- it coordinates
         processes on a shared filesystem, and two pods have none.
+
 
         The fix is compare-and-swap, which S3 does support: `If-None-Match: *`
         creates only when absent, `If-Match: <etag>` overwrites only when the
@@ -200,14 +226,17 @@ class S3CasebookStorage(CasebookStorage):
         """
         key = self._key(event_id, filename)
 
+
         for attempt in range(UPDATE_MAX_ATTEMPTS):
             current, etag = self._load_with_etag(key)
             updated = mutate(current)
             if "schema_version" not in updated:
                 updated["schema_version"] = CASEBOOK_SCHEMA_VERSION
 
+
             body = json.dumps(updated, indent=4, ensure_ascii=False).encode("utf-8")
             condition = {"IfMatch": etag} if etag else {"IfNoneMatch": "*"}
+
 
             try:
                 _get_client().put_object(
@@ -222,10 +251,12 @@ class S3CasebookStorage(CasebookStorage):
                             event_id=event_id, filename=filename,
                             attempt=attempt + 1)
 
+
         raise RuntimeError(
             f"Could not update {key} after {UPDATE_MAX_ATTEMPTS} attempts: "
             f"another writer won every round."
         )
+
 
     def _load_with_etag(self, key: str) -> tuple:
         """Return (document, etag), or (None, None) when the key is absent."""
@@ -244,8 +275,10 @@ class S3CasebookStorage(CasebookStorage):
                            error=f"{type(e).__name__}: {e}")
             return None, None
 
+
     def list_events(self) -> list:
         """List casebook prefixes, paginated.
+
 
         Delimiter="/" makes S3 return the directory-like CommonPrefixes rather
         than every object under them, so this stays one round-trip per 1000
