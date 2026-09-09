@@ -318,6 +318,35 @@ def classify(trace: ParsedTrace,
                               extract_business_code(root.message, exception_message),
                               "mapped to business class by DLT_CLASS_MAP")
 
+    # The root FQCN is not recognised, but Spring often wraps a
+    # BusinessException inside a RuntimeException -- the wrapper's message
+    # carries the real exception's FQCN and business code as text. Check
+    # whether the message names a known business exception type and carries
+    # an enumerated code before classifying as Unknown.
+    code = extract_business_code(root.message, exception_message)
+    if code:
+        message_mentions_business = (
+            _BUSINESS_SUFFIX in (root.message or "")
+            or any(be in (root.message or "") for be in business_exceptions())
+        )
+        if message_mentions_business:
+            if _catalog_class(code, code_class) == "C":
+                return Classification(
+                    failure_class=FailureClass.TECHNICAL,
+                    root_fqcn=fqcn,
+                    business_code=code,
+                    reason=f"root exception {fqcn} wraps a business exception "
+                           f"with code {code}, which the reason-code catalog "
+                           f"declares a technical fault",
+                )
+            return Classification(
+                failure_class=FailureClass.BUSINESS,
+                root_fqcn=fqcn,
+                business_code=code,
+                reason=f"root exception {fqcn} wraps a business exception "
+                       f"carrying code {code}",
+            )
+
     return Classification(
         failure_class=FailureClass.UNKNOWN,
         root_fqcn=fqcn,

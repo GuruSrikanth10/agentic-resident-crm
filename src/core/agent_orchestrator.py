@@ -506,6 +506,19 @@ def _build_agent():
                 "flowMetaData": {"stage": flow_meta.get("stage")},
             }
             prompt = f"Kafka Payload: {json.dumps(projected_payload)}\n\n"
+
+            # Enrolment type is the single most important framing fact for a
+            # rejection: New Enrolment (N) follows 1:N dedup rules, Biometric
+            # Update (U) follows 1:1 auth-and-append rules. Stating it
+            # explicitly prevents the LLM from missing it inside the JSON.
+            raw_etype = payload.get("packetMetaData", {}).get("enrolmentType", "")
+            etype_display = {
+                "N": "New Enrolment (1:N deduplication)",
+                "U": "Biometric Update (1:N deduplication and 1:1 authentication and append)",
+                "Z": "Reactivation (1:N deduplication and 1:1 authentication and append)",
+            }.get(str(raw_etype).strip().upper(), raw_etype or "Unknown")
+            prompt += f"Enrolment Type: {etype_display}\n\n"
+
             if logs and logs != "Log fetching disabled.":
                 prompt += f"Elasticsearch Logs: {logs}\n\n"
             prompt += f"Database Rule Configuration:\n{db_rule}\n\n"
