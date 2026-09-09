@@ -91,10 +91,17 @@ class LogWindow:
         instead", which nothing did. A case anchored 20 hours ago therefore
         kept every line from those 20 hours rather than the few minutes around
         the failure.
+
+        When the anchor is in the future -- which happens when Spring's
+        `retry_topic-backoff-timestamp` is the *scheduled next retry*, not the
+        last failure -- `start_ms` is also in the future and the look-back
+        would be zero. Clamping to the lead+trail window gives a reasonable
+        recent window to search rather than reading one second of logs.
         """
         now = now_ms if now_ms is not None else _now_ms()
+        lookback_ms = max(now - self.start_ms, (lead_seconds() + trail_seconds()) * 1000)
         return TimeWindow(
-            hours=max(0.0, (now - self.start_ms) / 3_600_000),
+            hours=lookback_ms / 3_600_000,
             until=datetime.fromtimestamp(self.end_ms / 1000, tz=timezone.utc),
         )
 

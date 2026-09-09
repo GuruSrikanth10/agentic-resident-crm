@@ -297,7 +297,7 @@ def parse_finding(text: str):
         return None, f"{type(e).__name__}: {e}"
 
 
-def investigate(case_id: str, failure: dict, corroboration: Corroboration,
+def investigate(ref_id: str, failure: dict, corroboration: Corroboration,
                 logs: str, payload_summary: Optional[str] = None) -> tuple:
     """Run the analysis lane. Returns (finding, parse_error).
 
@@ -306,7 +306,7 @@ def investigate(case_id: str, failure: dict, corroboration: Corroboration,
     """
     agent = get_dlt_agent()
     result = agent.invoke({
-        "case_id": case_id,
+        "case_id": ref_id,
         "failure": failure,
         "payload_summary": payload_summary,
         "corroboration": {

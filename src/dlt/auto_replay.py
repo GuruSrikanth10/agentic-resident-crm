@@ -230,15 +230,16 @@ def _code_check_veto(code_check) -> Optional[str]:
     return None
 
 
-def attempt(case_id: str, ref_id: str) -> dict:
+def attempt(ref_id: str, message_ref_id: Optional[str] = None) -> dict:
     """Call queue_for_replay via the same tool the rejection flow's synthesis
     agent uses. Never raises -- a replay-queue failure must not cost the
     casebook that is about to be saved; it must only be visible inside it.
     """
     from src.tools.tool_registry import get_tool_by_name
 
+    replay_id = message_ref_id or ref_id
     args = {
-        "id": ref_id,
+        "id": replay_id,
         "idType": id_type(),
         "priority": replay_priority(),
         "operatorName": operator_name(),
@@ -249,26 +250,26 @@ def attempt(case_id: str, ref_id: str) -> dict:
     try:
         tool = get_tool_by_name("queue_for_replay")
         result = tool.invoke(args)
-        logger.info("DLT auto-replay queued", case_id=case_id, ref_id=ref_id,
+        logger.info("DLT auto-replay queued", ref_id=ref_id,
                     result=result)
         return {"queued": True, "result": str(result), "args": args}
     except Exception as e:
-        logger.error("DLT auto-replay failed", case_id=case_id, ref_id=ref_id,
+        logger.error("DLT auto-replay failed", ref_id=ref_id,
                      error=f"{type(e).__name__}: {e}")
         return {"queued": False, "result": f"{type(e).__name__}: {e}",
                 "args": args}
 
 
-def maybe_replay(case_id: str, ref_id: Optional[str], finding,
+def maybe_replay(ref_id: str, message_ref_id: Optional[str], finding,
                  code_check=None) -> dict:
     """The one entry point `/analyze-dlt` calls. Always returns a dict --
     attempted or not, and why either way -- meant to be embedded verbatim in
     the casebook's `replay` block.
     """
-    decision = decide(finding, ref_id, code_check)
+    decision = decide(finding, message_ref_id or ref_id, code_check)
     if not decision.should_replay:
         return {"attempted": False, "reason": decision.reason,
                 "queued": False, "result": None}
 
-    outcome = attempt(case_id, ref_id)
+    outcome = attempt(ref_id, message_ref_id)
     return {"attempted": True, "reason": decision.reason, **outcome}

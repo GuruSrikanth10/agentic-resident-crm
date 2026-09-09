@@ -26,7 +26,7 @@ DLT_ROOT_NAME = "dlt_cases"
 DLT_GROUPS_ROOT_NAME = "dlt_groups"
 
 def get_dlt_storage() -> CasebookStorage:
-    """Storage for individual DLT cases, keyed by `case_id`."""
+    """Storage for individual DLT cases, keyed by `ref_id`."""
     return get_scoped_storage(DLT_ROOT_NAME)
 
 
@@ -40,6 +40,6 @@ def reset_cache() -> None:
     reset_scoped_cache()
 
 
-def terminal_status(case_id: str) -> Optional[str]:
+def terminal_status(ref_id: str) -> Optional[str]:
     """Recorded terminal status for a case, or None. Never raises on a miss."""
-    return get_dlt_storage().terminal_status(case_id)
+    return get_dlt_storage().terminal_status(ref_id)

@@ -59,7 +59,7 @@ def setup_logging():
         processors=[
             structlog.stdlib.add_log_level,
             structlog.stdlib.PositionalArgumentsFormatter(),
-            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.processors.TimeStamper(fmt="iso", utc=False),
             structlog.processors.StackInfoRenderer(),
             structlog.processors.format_exc_info,
             _add_section_separator,
