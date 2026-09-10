@@ -20,6 +20,7 @@ exceptional path rather than the norm.
 """
 import json
 import os
+import time
 import threading
 from typing import Optional
 
@@ -100,6 +101,11 @@ class S3CasebookStorage(CasebookStorage):
     def save(self, event_id: str, casebook: dict, filename: str = "casebook.json") -> None:
         if "schema_version" not in casebook:
             casebook["schema_version"] = CASEBOOK_SCHEMA_VERSION
+
+        # Stamp the last_updated timestamp on every save
+        if isinstance(casebook, dict):
+            meta = casebook.setdefault("casebook_metadata", {})
+            meta["last_updated"] = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
 
         _get_client().put_object(
             Bucket=self.bucket,

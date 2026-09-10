@@ -22,7 +22,6 @@ from src.utils.outcomes import (
     record_outcome,
 )
 from src.core.agent_orchestrator import get_agent, prompt_fingerprint
-from src.utils.s3_uploader import upload_logs_to_s3
 from src.storage.factory import get_casebook_storage
 from src.utils.dlq_publisher import publish_to_dlq
 from src.utils.analysis_queue_publisher import publish_to_analysis_queue
@@ -849,15 +848,13 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
     if not raw_logs or raw_logs == "Log fetching disabled.":
         processed_logs = {"path": "No logs found", "gaps": None}
     else:
-        # The largest single blocking call in this function: a PUT of the
-        # entire log body, previously issued from the event loop.
-        uploaded_url = await _off_loop(upload_logs_to_s3, event_id, raw_logs)
-        if uploaded_url:
-            path_str = uploaded_url
-        else:
-            log.warning("S3 upload unavailable; embedding local path instead", state="LOGS_TRUNCATED")
-            path_str = "Logs persisted to local storage (S3 unavailable)."
-        processed_logs = {"path": path_str, "gaps": extracted_gaps}
+        # Persist the logs as an artifact inside the casebook directory, so
+        # the evidence travels with the casebook regardless of backend.
+        # The path stored is relative to the casebook root, so it works
+        # identically on local disk and on S3.
+        await _off_loop(get_casebook_storage().save_artifact,
+                        event_id, "supported_logs.txt", raw_logs)
+        processed_logs = {"path": "supported_logs.txt", "gaps": extracted_gaps}
         
     # Resolve the fields the casebook needs from the validated model. On a
     # parse failure the evidence is still persisted -- metadata, rejection
@@ -905,9 +902,13 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
         }
 
     casebook_data = {
+        "casebook_metadata": {
+            "created_at": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
+            "last_updated": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
+        },
         "packet_metadata": {
             "srn": packet_meta.get("srn"),
-            "eid": event_id,
+            "sid": signal_dict.get("sid"),
             "ref_id": packet_meta.get("refId"),
             "source": signal_dict.get("sourceTopic"),
             "packet_type": packet_meta.get("pktSource"),
@@ -921,7 +922,7 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
             "status": packet_status,
             "service": flow_meta.get("stage"),
             "sub_service": flow_meta.get("subStage"),
-            "last_updated": None,
+            "last_updated": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
             "is_in_process": False if exec_summary.get("packetStatus") == "REJECTED" else None,
             "rejection_data": {
                 "rejection_code": rejection_code,

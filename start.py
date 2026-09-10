@@ -66,7 +66,7 @@ def main():
 
     # Give the API a moment to bind its port before either consumer starts
     # forwarding to it.
-    time.sleep(15)
+    time.sleep(20)
 
     print("Starting the fast consumer (fast_consumer.py) -- rejections -> /fetch-logs.")
     _children.append(("FastConsumer", subprocess.Popen([sys.executable, "src/fast_consumer.py"])))
