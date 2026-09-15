@@ -64,9 +64,34 @@ def main():
     print("Starting the API server (main_api.py).")
     _children.append(("API", subprocess.Popen([sys.executable, "src/main_api.py"])))
 
-    # Give the API a moment to bind its port before either consumer starts
-    # forwarding to it.
-    time.sleep(20)
+    # Give the API time to bind its port before the consumers start
+    # forwarding to it. The opencode harness (corpus download + server
+    # startup) can add 30+ seconds to the API's boot, so wait for the
+    # health endpoint rather than a fixed sleep.
+    #
+    # A proxy handler that sends NO_PROXY for localhost, so HTTP_PROXY
+    # env vars don't intercept the health check and route it to a proxy
+    # that has no idea what to do with localhost:8000.
+    import urllib.request
+    proxy_handler = urllib.request.ProxyHandler({
+        "http": None,
+        "https": None,
+    })
+    opener = urllib.request.build_opener(proxy_handler)
+
+    api_ready = False
+    for _ in range(120):
+        try:
+            opener.open("http://127.0.0.1:8000/health", timeout=1)
+            api_ready = True
+            break
+        except Exception:
+            time.sleep(1)
+
+    if not api_ready:
+        print("WARNING: API did not become healthy within 120s; starting consumers anyway.")
+    else:
+        print("API server is healthy.")
 
     print("Starting the fast consumer (fast_consumer.py) -- rejections -> /fetch-logs.")
     _children.append(("FastConsumer", subprocess.Popen([sys.executable, "src/fast_consumer.py"])))

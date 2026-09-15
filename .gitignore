@@ -11,6 +11,10 @@ src/checkpoints.db
 
 local_casesheets/
 local_checkpoints/
+
+# Downloaded service documentation corpus (DROA-generated, refreshed from S3)
+docs_cache/
+docs_cache.tmp
 *.db
 *.db-shm
 *.db-wal
