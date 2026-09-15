@@ -3,7 +3,7 @@
 FROM hbdc-harbor-registry-non-prod.uidai.net.in/base/node:20-slim AS node-src
 
 # 2. Base image
-FROM hbdc-harbor-registry-non-prod.uidai.net.in/base/python:3.12-slim
+FROM hbdc-harbor-registry-non-prod.uidai.net.in/base/python_base:3.14.6-slim
 
 # Configure Ubuntu mirrors
 RUN echo "deb http://10.81.213.11:8081/ubuntu/mirror/archive.ubuntu.com/ubuntu jammy restricted universe main multiverse\n\
