@@ -1,0 +1,15 @@
+.venv/
+.git/
+.github/
+.vscode/
+.DS_Store
+local_casesheets/
+local_checkpoints/
+__pycache__/
+*.pyc
+*.pyo
+.env
+docs_cache/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
