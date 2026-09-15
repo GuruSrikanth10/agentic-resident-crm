@@ -21,7 +21,6 @@ ENV HTTP_PROXY=http://10.10.206.59:8080 \
 # ---- Environment ----
 ENV PATH=/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH} \
     PIP_INDEX_URL=http://10.10.206.59:8080/repository/pypi-proxy/simple \
-    PIP_TRUSTED_HOST=10.10.206.59,10.10.204.46 \
     PIP_EXTRA_INDEX_URL=http://10.10.204.46:8080/repository/pypi-proxy/simple \
     PIP_ROOT_USER_ACTION=ignore \
     PIP_NO_CACHE_DIR=1 \
@@ -54,9 +53,18 @@ RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
 # ---- Python dependencies (in an isolated venv) ----
 COPY requirements.txt .
 RUN python3 -m venv /venv && \
-    /venv/bin/pip install --no-cache-dir --upgrade "pip>=23.3" setuptools wheel && \
-    /venv/bin/pip install --no-cache-dir "cyclonedx-bom" && \
-    /venv/bin/pip install --no-cache-dir -r requirements.txt
+    /venv/bin/pip install --no-cache-dir \
+        --trusted-host 10.10.206.59 \
+        --trusted-host 10.10.204.46 \
+        --upgrade "pip>=23.3" setuptools wheel && \
+    /venv/bin/pip install --no-cache-dir \
+        --trusted-host 10.10.206.59 \
+        --trusted-host 10.10.204.46 \
+        "cyclonedx-bom" && \
+    /venv/bin/pip install --no-cache-dir \
+        --trusted-host 10.10.206.59 \
+        --trusted-host 10.10.204.46 \
+        -r requirements.txt
 
 ENV PATH="/venv/bin:/usr/local/bin:${PATH}"
 
