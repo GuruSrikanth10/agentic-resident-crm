@@ -30,6 +30,12 @@ logger = get_logger(__name__)
 DEFAULT_DOCS_DIR = "docs_cache"
 DEFAULT_S3_PREFIX = "nalanda/corpus"
 
+# Set to True while a download is in progress, False otherwise.
+# /ready checks this so it can return 503 "Downloading" even when
+# docs_cache/ has files from a previous run.
+_download_in_progress = False
+_download_complete = False
+
 
 def docs_cache_dir() -> Path:
     raw = os.environ.get("DOCS_CACHE_DIR", "").strip()
@@ -59,11 +65,15 @@ def download_corpus() -> bool:
 
     Returns True on success, False on failure (logs and continues).
     """
+    global _download_in_progress, _download_complete
+
     bucket = _bucket()
     if not bucket:
         logger.info("S3 bucket not configured; skipping corpus download")
+        _download_complete = True
         return False
 
+    _download_in_progress = True
     target = docs_cache_dir()
     prefix = s3_prefix()
     logger.info("Downloading documentation corpus from S3",
@@ -94,6 +104,8 @@ def download_corpus() -> bool:
         if file_count == 0:
             logger.warning("Corpus download found no files",
                            bucket=bucket, prefix=prefix)
+            _download_in_progress = False
+            _download_complete = True
             return False
 
         if target.exists():
@@ -102,15 +114,31 @@ def download_corpus() -> bool:
 
         logger.info("Corpus download complete",
                     files=file_count, target=str(target))
+        _download_in_progress = False
+        _download_complete = True
         return True
 
     except Exception as e:
         logger.warning("Corpus download failed; using existing docs if available",
                        error=f"{type(e).__name__}: {e}")
+        _download_in_progress = False
+        _download_complete = True
         return False
 
 
 def corpus_available() -> bool:
+    """True when the corpus is ready for the agent to read.
+
+    Returns False while a download is in progress (even if old files exist
+    on disk), and True once the download completes (or if no download was
+    ever started and files are on disk from a previous run).
+    """
+    if _download_in_progress:
+        return False
+    if _download_complete:
+        target = docs_cache_dir()
+        return target.is_dir() and any(target.iterdir())
+    # No download was initiated — check disk directly (e.g. manual copy)
     target = docs_cache_dir()
     return target.is_dir() and any(target.iterdir())
 

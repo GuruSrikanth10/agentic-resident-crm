@@ -504,6 +504,18 @@ def readiness_check():
     except Exception as e:
         logger.error("Readiness check failed on the checkpoint store", backend=backend, error=f"{type(e).__name__}: {e}")
 
+    # When the opencode harness is enabled, the API is not ready until the
+    # documentation corpus has been downloaded to disk. Without this, the
+    # consumers start forwarding packets before the agent can read the docs.
+    from src.utils.opencode_runner import is_enabled as harness_enabled
+    if harness_enabled():
+        from src.utils import docs_loader
+        if not docs_loader.corpus_available():
+            raise HTTPException(status_code=503, detail="Downloading documentation corpus")
+        from src.utils.opencode_runner import server_ready
+        if not server_ready():
+            raise HTTPException(status_code=503, detail="Starting opencode server")
+
     kafka_ready = _check_kafka_producer_ready()
 
     if db_ready and kafka_ready:

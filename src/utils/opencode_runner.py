@@ -184,6 +184,11 @@ def current_session() -> Optional[Session]:
 # Task execution
 # ======================================================================
 
+def server_ready() -> bool:
+    """True when the opencode server is running and ready to accept tasks."""
+    return _ACTIVE is not None and _ACTIVE._process is not None and _ACTIVE._process.poll() is None
+
+
 def run_task(prompt: str, output_path: str,
              session: Optional[Session] = None,
              timeout: Optional[int] = None) -> Dict[str, Any]:
