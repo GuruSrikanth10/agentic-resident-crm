@@ -37,6 +37,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
     ca-certificates \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 # ---- Verify Python >= 3.12 ----
@@ -80,14 +81,19 @@ COPY src /app/src
 COPY start.py /app/start.py
 COPY local_run.py /app/local_run.py
 COPY agent_policy_context.md /app/agent_policy_context.md
+COPY opencode.json /app/opencode.json
 COPY reason_codes.csv /app/reason_codes.csv
 COPY version.json /app/version.json
+COPY entrypoint.sh /app/entrypoint.sh
 
 # ---- Runtime directories ----
-RUN mkdir -p /app/local_casesheets /app/local_checkpoints
+RUN mkdir -p /app/local_casesheets /app/local_checkpoints /app/docs_cache
 
-# ---- Non-root user ----
-RUN useradd -u 8888 appuser && chown -R appuser:appuser /app
+# ---- Non-root user (with home dir for opencode config) ----
+RUN useradd -m -u 8888 appuser && \
+    chmod +x /app/entrypoint.sh && \
+    chown -R appuser:appuser /app
+
 USER appuser
 
 # ---- API port ----
@@ -98,4 +104,4 @@ ENV HTTP_PROXY="" \
     HTTPS_PROXY=""
 
 # ---- Default: start the process supervisor (API + Kafka consumers) ----
-CMD ["python3", "start.py"]
+ENTRYPOINT ["/app/entrypoint.sh"]

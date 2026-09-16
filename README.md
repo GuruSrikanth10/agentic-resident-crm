@@ -1,9 +1,41 @@
 # Agentic Resident CRM: Deep Dive and Architecture
 
 ## Overview
-**Agentic Resident CRM** is an AI-driven, self-learning service built to ingest, analyze, and resolve rejected biometric packets within the UIDAI ecosystem. 
+**Agentic Resident CRM** is an AI-driven service that investigates two kinds of
+packet failure in the UIDAI biometric enrolment/update pipeline and produces a
+structured JSON casebook for each, explaining why it failed and what should be
+done next.
 
-When a packet fails enrollment or deduplication (e.g., due to a `RESIDENT_MAN_DEDUP_REJECT_TD` error), the system automatically spins up a suite of LangGraph-powered LLM agents. These agents investigate the error against a rules database, validate their findings, permanently learn from their mistakes, and format the output into structured JSON casebooks.
+**Two parallel lanes** share one codebase -- log pipeline, storage abstraction,
+consumer scaffolding, and confidence policy -- but solve different problems:
+
+- **Rejection lane** (`/fetch-logs` -> `/analyze-rejection`): a packet was
+  *processed* and *rejected* by a business rule (e.g.
+  `RESIDENT_MAN_DEDUP_REJECT_TD`). A deterministic LangGraph `StateGraph` runs
+  a cache-first log fetch, an optional runbook short-circuit (zero LLM calls
+  when a served runbook matches), then an Investigator -> Reviewer ->
+  Synthesis agent chain that correlates the reason code with the DB rule and
+  the reduced log trace. A reviewer-validated learning loop stages corrections
+  to `pending_rules.jsonl` for human promotion -- nothing reaches the
+  Investigator's prompt without an operator running `promote_rules.py`.
+- **Dead-letter topic (DLT) lane** (`/fetch-dlt-logs` -> `/analyze-dlt`): a
+  packet *crashed* -- an unhandled exception, not a business rejection.
+  `dlt_consumer.py` consumes the Spring `@RetryableTopic` dead-letter topic,
+  fingerprints the failure from its stack trace, corroborates that trace
+  against the service's own pod logs (the mis-cast detector), and writes an
+  advisory casebook. An opt-in replay precheck joins the stack trace to
+  `release` in Bitbucket through the running pod's image version and may
+  **park** a replay -- the "ON HOLD" state -- until the fix that would resolve
+  it has actually deployed (section 4.4.1). Everything in this lane is off by
+  default (`DLT_ENABLED=false`).
+
+Each lane is split into two independently-scalable stages -- bounded
+Kubernetes/Elasticsearch log fetch (fast) and unbounded LLM analysis (slow) --
+connected by a second Kafka topic, so an LLM backlog can never stall log
+collection and let short-retention pod logs rotate away before a packet is
+even fetched (section 3.11). Replay actions are human-gated unless
+`ENABLE_AUTO_REPLAY=true`. Section 1 has the complete flow with every branch
+and duplicate-arrival guard; section 4.4 covers the DLT lane in full.
 
 ---
 
@@ -556,24 +588,56 @@ The repository follows standard Python backend architecture for modularity and s
 agentic-resident-crm/
 ├── .agents/
 │   └── AGENTS.md                   # Agentic configurations and behavioral rules
+├── .env.example                    # Annotated env-var template (the .env itself is gitignored)
 ├── agent_policy_context.md         # Foundational business logic & rules mapping for AI agents
+├── DLT_PLAN.md                     # Dead-letter topic (DLT) analysis lane: engineering design
+├── KUBERNETES_LOGS_PLAN.md         # Kubernetes log source: engineering design
+├── RUNBOOK_PLAN.md                 # Standard runbook implementation plan
+├── REMEDIATION_PLAN_2026_08_21.md  # 2026-08-21 codebase audit remediation programme
 ├── start.py                        # Process supervisor: spawns main_api.py + fast_consumer.py + slow_consumer.py
 ├── local_run.py                    # CLI: POST a local packet JSON to the running API
-├── test_payload.py                 # Static Pydantic validation smoke test
-├── rules.csv                       # Rules export used by check_drift.py
+├── rules.csv                       # Rules DB export consumed by check_drift.py (gitignored;
+│                                   #   operator-generated, not checked in)
 ├── reason_codes.csv                # 760 reject codes -> description, category, failure class
 │                                   #   (generated from the BusinessReasonCode Java source by
 │                                   #    src/tools/parse_reason_codes.py; the .txt source is an
 │                                   #    input, not a runtime dependency, and is not kept here)
+├── Dockerfile                      # Container image build
+├── pyproject.toml                  # Project metadata, dependencies, ruff/pytest config
+├── requirements.txt                # Pinned runtime dependencies
+├── version.json                    # Image/service version tag
+├── opencode.json                   # opencode (Rejection Investigator agent) configuration
 ├── tests/
-│   ├── test_resilience.py          # Resilience/idempotency/DLQ regression tests
+│   ├── conftest.py                 # Test-suite isolation from the developer's .env
+│   ├── manual_payload_demo.py      # Manual demo: parse a real rejection payload, print extracts
+│   ├── test_end_to_end.py          # End-to-end contract test (audit G22a, N4)
+│   ├── test_fetch_analyze_split.py # Fetch/analyze consumer split (two topics, two consumers)
+│   ├── test_api_concurrency.py     # API concurrency (REMEDIATION_PLAN phase 2)
+│   ├── test_resilience.py          # Resilience / idempotency / DLQ regression tests
+│   ├── test_shutdown_lifecycle.py  # Shutdown and lifecycle (REMEDIATION_PLAN phase 4)
+│   ├── test_atomic_replace.py      # Windows-lock regression tests for atomic replace
+│   ├── test_multipod_state.py      # Multi-pod correctness (REMEDIATION_PLAN phase 5)
+│   ├── test_cleanups.py            # Cleanup correctness and observability (REMEDIATION phase 6)
+│   ├── test_evidence_integrity.py  # Evidence integrity (REMEDIATION_PLAN phase 1)
+│   ├── test_context_line_attribution.py # Context-line attribution: this packet's lines vs noise
+│   ├── test_reducer_noise_floor.py # Stage 2.5 noise floor and the Stage 4 collapse fix
 │   ├── test_phase0_fixes.py        # Phase 0 correctness regression tests
 │   ├── test_phase1_fixes.py        # Phase 1 reliability regression tests
 │   ├── test_phase2_fixes.py        # Phase 2 optimization regression tests
+│   ├── test_phase_a_fixes.py       # Phase A regression tests (ENHANCEMENT_PLAN section 5)
+│   ├── test_phase_b_fixes.py       # Phase B regression tests (ENHANCEMENT_PLAN section 5)
+│   ├── test_phase_c_fixes.py       # Phase C regression tests (ENHANCEMENT_PLAN section 5)
+│   ├── test_phase_d_fixes.py       # Phase D regression tests (ENHANCEMENT_PLAN section 5)
+│   ├── test_phase_e_fixes.py       # Phase E regression tests (ENHANCEMENT_PLAN section 5)
+│   ├── test_phase_f_fixes.py       # Phase F regression tests (ENHANCEMENT_PLAN section 5)
+│   ├── test_audit_phase1.py        # Phase 1 regression tests (AUDIT_2026_08.md section 6)
+│   ├── test_audit_phase2.py        # Phase 2 regression tests (AUDIT_2026_08.md section 6)
+│   ├── test_audit_phase3.py        # Phase 3 regression tests (AUDIT_2026_08.md section 6)
 │   ├── test_runbooks.py            # Runbook store, validator, and serving tests
+│   ├── test_operator_tools.py      # Operator CLIs must read through CasebookStorage
 │   ├── test_log_sources.py         # LogSource Protocol and ElasticLogSource tests
 │   ├── test_log_source_chain.py    # Fallback chain (LOG_SOURCE) tests
-│   ├── test_log_snapshot.py        # Evidence snapshot persistence tests
+│   ├── test_log_snapshot.py        # Evidence snapshot persistence and pruning tests
 │   ├── test_redaction.py           # PII redaction tests
 │   ├── test_prompt_gap_guidance.py # Prompt evidence-gap banner tests
 │   ├── test_es_diagnostic.py       # ES diagnostic tool tests
@@ -584,22 +648,33 @@ agentic-resident-crm/
 │   ├── test_k8s_parser.py          # Kubernetes log line parser tests
 │   ├── test_k8s_retrieval.py       # Kubernetes pod log retrieval tests
 │   ├── test_k8s_retry.py           # Kubernetes HTTP retry logic tests
+│   ├── test_k8s_mockfile.py        # Offline mock log file for the K8s source
 │   ├── test_dlt_stacktrace.py      # DLT lane: headers, `Caused by:` parsing, fingerprint
 │   ├── test_dlt_classify.py        # DLT lane: failure taxonomy A/B/C/U
+│   ├── test_dlt_reason_codes.py    # DLT lane: reason-code catalog parse, store, use
+│   ├── test_dlt_payload.py         # DLT lane: payload identifier extraction, case identity
+│   ├── test_dlt_abis_payload.py    # DLT lane: EnrolmentEventResponse schema, refId resolution
+│   ├── test_dlt_multi_structure.py # DLT lane: several original topics from one prompt set
+│   ├── test_dlt_consumer.py        # DLT lane: message-adapter seam and consumer
 │   ├── test_dlt_fetch.py           # DLT lane: /fetch-dlt-logs, log window, evidence
 │   ├── test_dlt_corroborate.py     # DLT lane: trace-vs-log verdicts
+│   ├── test_dlt_reuse.py           # DLT lane: group records and the reuse policy
 │   ├── test_dlt_analysis.py        # DLT lane: /analyze-dlt with a mocked LLM
 │   ├── test_dlt_analysis_replay.py # DLT lane: auto-replay and precheck, end to end
-│   ├── test_dlt_{payload,reuse,report,sample,reason_codes,...}.py  # remaining phases
-│   │                               #   -- Replay precheck (section 4.4.1) --
+│   ├── test_dlt_auto_replay.py     # DLT lane: auto-replay confidence gate
+│   ├── test_dlt_report.py          # DLT lane: operator CLI and observability wiring
+│   ├── test_dlt_sample.py          # DLT lane: corpus capture tooling (Phase 0 gate)
+│   ├── test_dlt_lane_parity.py     # DLT lane parity (REMEDIATION_PLAN phase 3)
 │   ├── test_code_check_probe.py    # C0: the probe's own decisions about what it reads
 │   ├── test_dlt_deployed.py        # C1: running image version, and every way it degrades
-│   ├── test_dlt_versions.py        # C3: ordering, incl. a brute-forced total-order check
+│   ├── test_dlt_versions.py        # C3: version parsing and ordering (never lexical)
 │   ├── test_dlt_bitbucket.py       # C4: source adapter against recorded responses, no network
 │   ├── test_dlt_code_check.py      # C5: the four verdicts and all three asymmetries
-│   └── test_dlt_parked.py          # C7: parking, release, expiry, and the cap
+│   ├── test_dlt_parked.py          # C7: parking, release, expiry, and the cap
+│   └── fixtures/dlt/                # Recorded DLT corpus fixtures (CSV + JSON)
 ├── src/
 │   ├── main_api.py                 # FastAPI entry point (uvicorn, port 8000)
+│   ├── fast_consumer.py            # Fast consumer entry point: rejections topic -> /fetch-logs
 │   ├── slow_consumer.py            # Slow consumer entry point: analysis queue -> /analyze-rejection
 │   ├── dlt_consumer.py             # DLT consumer entry point: dead-letter topic -> /fetch-dlt-logs
 │   ├── dlt_analysis_consumer.py    # DLT analysis entry point: DLT queue -> /analyze-dlt
@@ -607,7 +682,8 @@ agentic-resident-crm/
 │   │   ├── routes.py               # REST endpoints (/fetch-logs, /analyze-rejection, /process-rejection, /health, /ready)
 │   │   └── dlt_routes.py           # DLT endpoints (/fetch-dlt-logs, /analyze-dlt)
 │   ├── core/
-│   │   └── agent_orchestrator.py   # LangGraph StateGraph build + LLM provisioning
+│   │   ├── agent_orchestrator.py   # LangGraph StateGraph build + LLM provisioning
+│   │   └── checkpointer.py         # Checkpointer backend: sqlite (default) or postgres
 │   ├── dlt/                        # Dead-letter topic analysis (parallel flow; see DLT_PLAN.md)
 │   │   ├── headers.py              # Spring DLT header contract, hex epoch decoding
 │   │   ├── stacktrace.py           # `Caused by:` chain parsing, frames, fingerprint, FrameLocation
@@ -656,13 +732,16 @@ agentic-resident-crm/
 │   │   ├── tool_registry.py        # Custom Python tools (DB lookup, logs, replay queue)
 │   │   ├── approve_replays.py      # CLI: approve queued packet replays
 │   │   ├── promote_rules.py        # CLI: promote + git-commit learned rules
+│   │   ├── record_outcome.py       # CLI: attach a ground-truth verdict to a completed investigation
 │   │   ├── check_drift.py          # CLI: rules.csv schema drift detector
 │   │   ├── build_catalog.py        # CLI: Stage 0 offline template catalog builder
 │   │   ├── eval_harness.py         # CLI: Stage 6 evaluation harness for pipeline accuracy
+│   │   ├── accuracy_report.py      # CLI: resolution accuracy by reason code (Phase E runbook gate)
 │   │   ├── prune_checkpoints.py    # CLI: SQLite checkpoint pruning utility
 │   │   ├── prune_casesheets.py     # CLI: Old/orphaned casesheet cleanup
 │   │   ├── es_diagnostic.py        # CLI: Elasticsearch connectivity and query diagnostics
 │   │   ├── fetch_pod_logs.py       # CLI: Direct Kubernetes pod log retrieval
+│   │   ├── build_log_fixture.py    # CLI: turn a prod log dump into a Kubernetes fixture tree
 │   │   ├── build_runbooks.py       # CLI: Mine casebooks to draft generic runbook templates
 │   │   ├── promote_runbooks.py     # CLI: Human-gate review and promotion of runbook drafts
 │   │   ├── dlt_report.py           # CLI: read DLT output (--top, --group, --case, --unreviewed,
@@ -685,8 +764,9 @@ agentic-resident-crm/
 │   │       ├── elastic.py          # ElasticLogSource: wraps fetcher.py
 │   │       ├── chain.py            # FallbackChain: ordered LOG_SOURCE cascade
 │   │       └── k8s/                # Kubernetes pod log source
-│   │           ├── source.py       # KubernetesLogSource entry point
-│   │           ├── client.py       # HTTP client for Kubernetes API
+│   │               ├── source.py       # KubernetesLogSource entry point
+│   │               ├── mockfile.py     # Offline mock log file source (K8S_MOCK_LOG_FILE)
+│   │               ├── client.py       # HTTP client for Kubernetes API
 │   │           ├── discovery.py    # Pod/namespace discovery, multi-service fan-out
 │   │           ├── retrieval.py    # Pod log fan-out and retrieval
 │   │           ├── parser.py       # Raw log line parser
@@ -709,7 +789,11 @@ agentic-resident-crm/
 │       ├── analysis_queue_publisher.py # Publishes fetched payloads onto the analysis queue
 │       ├── s3_uploader.py          # Uploads large Elastic logs to S3
 │       ├── runbook_store.py        # Runbook load/save, TTL cache, fingerprinting, path guard
-│       └── runbook_validator.py    # Generic-text regex validator (no UUIDs/dates/SRNs)
+│       ├── runbook_validator.py    # Generic-text regex validator (no UUIDs/dates/SRNs)
+│       ├── docs_loader.py          # S3 corpus downloader for the opencode harness (docs_cache/)
+│       ├── kafka_producer.py       # Single shared KafkaProducer for DLQ + analysis + DLT queues
+│       ├── opencode_runner.py      # opencode subprocess harness: shared serve, per-task run
+│       └── outcomes.py             # Resolution outcome recording (ground-truth verdict storage)
 ├── local_casesheets/               # Generated. Five roots under one storage backend:
 │                                   #   casebook_<eventId>/  rejection casebooks + logs
 │                                   #   dlt_cases/           DLT casebooks + trace/header artifacts
@@ -1042,20 +1126,25 @@ versa. Section 4.4 covers what actually runs in each.
    On Windows, leave every path value **unquoted** (`MOCK_DB_PATH=C:\Users\you\rules.csv`) --
    see section 3.1 for why double quotes corrupt backslash paths.
 
-3. **Start all three services:**
+3. **Start all services:**
    ```bash
    python3 start.py
    ```
    *This supervisor spawns `src/main_api.py` (FastAPI on port 8000),
    `src/fast_consumer.py` (rejections -> `/fetch-logs`), and
    `src/slow_consumer.py` (analysis queue -> `/analyze-rejection`) as three
-   separate processes. See section 3.11 for the fetch/analyze split.*
+   separate processes. Setting `DLT_ENABLED=true` additionally spawns
+   `src/dlt_consumer.py` (dead-letter topic -> `/fetch-dlt-logs`) and
+   `src/dlt_analysis_consumer.py` (DLT queue -> `/analyze-dlt`). See section
+   3.11 for the fetch/analyze split and section 4.4 for the DLT lane.*
 
    To run them individually:
    ```bash
-   python3 src/main_api.py        # API only
-   python3 src/fast_consumer.py   # Fast consumer only
-   python3 src/slow_consumer.py   # Slow consumer only
+   python3 src/main_api.py             # API only
+   python3 src/fast_consumer.py        # Fast consumer only (rejections)
+   python3 src/slow_consumer.py        # Slow consumer only (analysis)
+   python3 src/dlt_consumer.py         # DLT consumer (dead-letter topic)
+   python3 src/dlt_analysis_consumer.py # DLT analysis consumer
    ```
 
 ### 4.2 API Documentation (Swagger UI)
@@ -1065,9 +1154,8 @@ Because the application is built on FastAPI with populated metadata, interactive
 
 4. **Testing Pipeline (No Kafka Required):**
    ```bash
-   python3 test_payload.py                 # static Pydantic validation smoke test
    python3 local_run.py path/to/packet.json # POST a real packet to a running API
-   PYTHONPATH=. python3 -m pytest tests/ -q # full regression suite
+   PYTHONPATH=. python3 -m pytest tests/ -q # full regression suite (1000+ tests)
    ```
 
 ### 4.3 Operator CLIs
