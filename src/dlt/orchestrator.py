@@ -162,9 +162,80 @@ def _build_dlt_agent():
         log = logger.bind(case_id=state.get("case_id"))
         log.info("DLT investigator started", state="DLT_INVESTIGATING")
 
-        prompt = _evidence_block(state)
         feedback = state.get("reviewer_feedback", "")
-        if feedback and not is_approved(feedback):
+        is_retry = bool(feedback) and not is_approved(feedback)
+
+        # Check if the opencode harness is enabled
+        from src.utils.opencode_runner import is_enabled as harness_enabled
+        use_harness = harness_enabled() and not is_retry
+
+        if use_harness:
+            from src.utils import opencode_runner, docs_loader
+            from src.utils.paths import LOCAL_CASESHEETS_DIR
+
+            # DLT cases live under dlt_cases/ in the casebook store, but for
+            # the opencode agent we write context to the local filesystem.
+            ref_id = state.get("case_id", "unknown")
+            case_dir = LOCAL_CASESHEETS_DIR / f"casebook_{ref_id}"
+            case_dir.mkdir(parents=True, exist_ok=True)
+
+            # Write context files for the agent
+            evidence = _evidence_block(state)
+            (case_dir / "dlt_evidence.txt").write_text(evidence, encoding="utf-8")
+
+            failure = state.get("failure") or {}
+            (case_dir / "dlt_failure.json").write_text(
+                json.dumps(failure, indent=2, ensure_ascii=False), encoding="utf-8")
+
+            output_path = str(case_dir / "dlt_investigation.json")
+
+            # Wait for corpus if not yet available
+            if not docs_loader.corpus_available():
+                for _ in range(60):
+                    if docs_loader.corpus_available():
+                        break
+                    import time
+                    time.sleep(1)
+
+            harness_prompt = (
+                f"Investigate the DLT failure for case {ref_id}.\n\n"
+                f"Read the case evidence:\n"
+                f"- local_casesheets/casebook_{ref_id}/dlt_evidence.txt (full evidence block)\n"
+                f"- local_casesheets/casebook_{ref_id}/dlt_failure.json (parsed failure details)\n\n"
+                f"Understand the service using the documentation corpus in docs_cache/:\n"
+                f"- Use Glob to find module docs: Glob docs_cache/enu-biometric/docs/modules/*<ClassName>*\n"
+                f"- Use Grep to search for error codes or method names across the corpus\n"
+                f"- Read architecture docs: docs_cache/enu-biometric/docs/architecture/components.md\n"
+                f"- Read dataflow: docs_cache/enu-biometric/docs/architecture/dataflow.md\n\n"
+                f"Analyze why the dead-lettered message failed. Cross-reference the stack trace\n"
+                f"and logs with the service documentation to pinpoint the exact failure. Cite\n"
+                f"specific log lines and documentation references.\n\n"
+                f"CRITICAL: You MUST write your output to EXACTLY this file path:\n"
+                f"  {output_path}\n"
+                f"Do NOT write to any other filename.\n"
+                f"Write a JSON object with this schema:\n"
+                f'{{"investigation": "<your detailed analysis text>", "citations": [<list of cited evidence>]}}\n\n'
+                f"Follow the rules in AGENTS.md."
+            )
+
+            try:
+                result = opencode_runner.run_task_json(
+                    prompt=harness_prompt,
+                    output_path=output_path,
+                    timeout=int(os.environ.get("OPENCODE_TASK_TIMEOUT_SECONDS", "300")),
+                )
+                investigation = result["result"].get("investigation", "")
+                log.info("DLT investigator finished (opencode harness)",
+                         elapsed=result.get("seconds"))
+                return {"investigation": investigation}
+            except Exception as e:
+                log.warning("opencode harness failed for DLT investigator; falling back to direct LLM",
+                            error=f"{type(e).__name__}: {e}")
+                # Fall through to the direct LLM path below
+
+        # Direct LLM path (original)
+        prompt = _evidence_block(state)
+        if is_retry:
             prompt += (f"\n### Reviewer feedback on your previous attempt\n"
                        f"{feedback}\n\nRevise your findings to address it.\n")
 
@@ -185,9 +256,73 @@ def _build_dlt_agent():
         log = logger.bind(case_id=state.get("case_id"))
         log.info("DLT reviewer started", state="DLT_REVIEWING")
 
+        investigation = state.get("investigation", "")
+
+        # Check if the opencode harness is enabled
+        from src.utils.opencode_runner import is_enabled as harness_enabled
+        use_harness = harness_enabled()
+
+        if use_harness:
+            from src.utils import opencode_runner
+            from src.utils.paths import LOCAL_CASESHEETS_DIR
+
+            ref_id = state.get("case_id", "unknown")
+            case_dir = LOCAL_CASESHEETS_DIR / f"casebook_{ref_id}"
+
+            # Write the investigation for the agent to read
+            (case_dir / "dlt_investigation_text.txt").write_text(
+                investigation, encoding="utf-8")
+
+            output_path = str(case_dir / "dlt_review.json")
+
+            reviewer_harness_prompt = (
+                f"Review the DLT investigation for case {ref_id}.\n\n"
+                f"Read the investigation:\n"
+                f"- local_casesheets/casebook_{ref_id}/dlt_investigation_text.txt\n\n"
+                f"Verify the investigation's claims against the case evidence:\n"
+                f"- local_casesheets/casebook_{ref_id}/dlt_evidence.txt (full evidence block)\n"
+                f"- local_casesheets/casebook_{ref_id}/dlt_failure.json (parsed failure details)\n\n"
+                f"Verify the investigation's claims against the service documentation in docs_cache/:\n"
+                f"- Use Glob to find module docs: Glob docs_cache/enu-biometric/docs/modules/*<ClassName>*\n"
+                f"- Use Grep to search for error codes or method names across the corpus\n"
+                f"- Read architecture docs: docs_cache/enu-biometric/docs/architecture/components.md\n"
+                f"- Read dataflow: docs_cache/enu-biometric/docs/architecture/dataflow.md\n\n"
+                f"Check for these common errors:\n"
+                f"1. Claims not grounded in the stack trace or logs.\n"
+                f"2. Misinterpretation of the exception chain (the LAST entry is the root cause).\n"
+                f"3. Claims about service behaviour that contradict the documentation.\n"
+                f"4. Corroboration verdict ignored (CORROBORATED vs CONTRADICTED vs UNVERIFIABLE).\n\n"
+                f"CRITICAL: You MUST write your output to EXACTLY this file path:\n"
+                f"  {output_path}\n"
+                f"Do NOT write to any other filename.\n"
+                f"Write a JSON object with this schema:\n"
+                f'{{"verdict": "APPROVED" or "REJECTED", "feedback": "<if rejected, explain what is wrong; if approved, empty string>"}}\n\n'
+                f"Follow the rules in AGENTS.md."
+            )
+
+            try:
+                result = opencode_runner.run_task_json(
+                    prompt=reviewer_harness_prompt,
+                    output_path=output_path,
+                    timeout=int(os.environ.get("OPENCODE_TASK_TIMEOUT_SECONDS", "300")),
+                )
+                verdict = result["result"].get("verdict", "REJECTED").upper()
+                feedback = result["result"].get("feedback", "")
+                if verdict == "APPROVED":
+                    feedback = "APPROVED"
+                log.info("DLT reviewer finished (opencode harness)",
+                         elapsed=result.get("seconds"), verdict=verdict)
+                return {"reviewer_feedback": feedback,
+                        "retry_count": state.get("retry_count", 0) + 1}
+            except Exception as e:
+                log.warning("opencode harness failed for DLT reviewer; falling back to direct LLM",
+                            error=f"{type(e).__name__}: {e}")
+                # Fall through to the direct LLM path below
+
+        # Direct LLM path (original)
         prompt = (f"{_evidence_block(state)}\n"
                   f"### Investigator findings to validate\n"
-                  f"{state.get('investigation', '')}\n")
+                  f"{investigation}\n")
 
         @llm_breaker
         @retry_transient

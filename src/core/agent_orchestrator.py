@@ -651,6 +651,67 @@ def _build_agent():
         _current_event_id.set(event_id)
         _current_investigation.set(investigation)
 
+        # Check if the opencode harness is enabled
+        from src.utils.opencode_runner import is_enabled as harness_enabled
+        use_harness = harness_enabled()
+
+        if use_harness:
+            from src.utils import opencode_runner
+            from src.utils.paths import LOCAL_CASESHEETS_DIR
+
+            case_dir = LOCAL_CASESHEETS_DIR / f"casebook_{event_id}"
+
+            # Write the investigation to a file for the agent to read
+            investigation_file = case_dir / "investigation_text.txt"
+            investigation_file.write_text(investigation, encoding="utf-8")
+
+            output_path = str(case_dir / "review.json")
+
+            reviewer_prompt = (
+                f"Review the investigation for event {event_id}.\n\n"
+                f"Read the investigation:\n"
+                f"- local_casesheets/casebook_{event_id}/investigation_text.txt\n\n"
+                f"Verify the investigation's claims against the case evidence:\n"
+                f"- local_casesheets/casebook_{event_id}/supported_logs.txt (the log trace)\n"
+                f"- local_casesheets/casebook_{event_id}/context.json (payload, enrolment type, DB rule)\n\n"
+                f"Verify the investigation's claims against the service documentation in docs_cache/:\n"
+                f"- Use Glob to find module docs: Glob docs_cache/enu-biometric/docs/modules/*<ClassName>*\n"
+                f"- Use Grep to search for error codes or method names across the corpus\n"
+                f"- Read architecture docs: docs_cache/enu-biometric/docs/architecture/components.md\n"
+                f"- Read dataflow: docs_cache/enu-biometric/docs/architecture/dataflow.md\n\n"
+                f"Check for these common errors:\n"
+                f"1. Glossary violations: 'demo' = face modality, 'nonDemo' = fingerprints and iris. 'TD' = all nonDemo matched.\n"
+                f"2. Reason code mismatches: verify the reason code in the investigation matches the one in context.json.\n"
+                f"3. Enrolment type misapplication: N = 1:N dedup, U = 1:1 auth and append, MBU = treated as 1:N.\n"
+                f"4. Claims not grounded in logs: verify cited log lines actually exist in supported_logs.txt.\n"
+                f"5. Claims not grounded in docs: verify service behaviour claims against the documentation.\n\n"
+                f"CRITICAL: You MUST write your output to EXACTLY this file path:\n"
+                f"  {output_path}\n"
+                f"Do NOT write to any other filename.\n"
+                f"Write a JSON object with this schema:\n"
+                f'{{"verdict": "APPROVED" or "REJECTED", "feedback": "<if rejected, explain what is wrong; if approved, empty string>"}}\n\n'
+                f"Follow the rules in AGENTS.md."
+            )
+
+            try:
+                result = opencode_runner.run_task_json(
+                    prompt=reviewer_prompt,
+                    output_path=output_path,
+                    timeout=int(os.environ.get("OPENCODE_TASK_TIMEOUT_SECONDS", "300")),
+                )
+                verdict = result["result"].get("verdict", "REJECTED").upper()
+                feedback = result["result"].get("feedback", "")
+                if verdict == "APPROVED":
+                    feedback = "APPROVED"
+                log.info("Reviewer finished (opencode harness)",
+                         elapsed=result.get("seconds"), verdict=verdict)
+                return {"reviewer_feedback": feedback,
+                        "retry_count": state.get("retry_count", 0) + 1}
+            except Exception as e:
+                log.warning("opencode harness failed for reviewer; falling back to direct LLM",
+                            error=f"{type(e).__name__}: {e}")
+                # Fall through to the direct LLM path below
+
         prompt = f"Validate this investigation:\n{investigation}\n\nIf it's perfect, reply with exactly 'APPROVED'. If not, explain what is wrong."
 
         @llm_breaker
