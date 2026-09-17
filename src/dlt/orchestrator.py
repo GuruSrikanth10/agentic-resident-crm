@@ -197,25 +197,11 @@ def _build_dlt_agent():
                     import time
                     time.sleep(1)
 
-            harness_prompt = (
-                f"Investigate the DLT failure for case {ref_id}.\n\n"
-                f"Read the case evidence:\n"
-                f"- local_casesheets/casebook_{ref_id}/dlt_evidence.txt (full evidence block)\n"
-                f"- local_casesheets/casebook_{ref_id}/dlt_failure.json (parsed failure details)\n\n"
-                f"Understand the service using the documentation corpus in docs_cache/:\n"
-                f"- Use Glob to find module docs: Glob docs_cache/enu-biometric/docs/modules/*<ClassName>*\n"
-                f"- Use Grep to search for error codes or method names across the corpus\n"
-                f"- Read architecture docs: docs_cache/enu-biometric/docs/architecture/components.md\n"
-                f"- Read dataflow: docs_cache/enu-biometric/docs/architecture/dataflow.md\n\n"
-                f"Analyze why the dead-lettered message failed. Cross-reference the stack trace\n"
-                f"and logs with the service documentation to pinpoint the exact failure. Cite\n"
-                f"specific log lines and documentation references.\n\n"
-                f"CRITICAL: You MUST write your output to EXACTLY this file path:\n"
-                f"  {output_path}\n"
-                f"Do NOT write to any other filename.\n"
-                f"Write a JSON object with this schema:\n"
-                f'{{"investigation": "<your detailed analysis text>", "citations": [<list of cited evidence>]}}\n\n'
-                f"Follow the rules in AGENTS.md."
+            from src.utils.prompt_loader import render as render_prompt
+            harness_prompt = render_prompt(
+                "DltInvestigator",
+                ref_id=ref_id,
+                output_path=output_path,
             )
 
             try:
@@ -275,29 +261,11 @@ def _build_dlt_agent():
 
             output_path = str(case_dir / "dlt_review.json")
 
-            reviewer_harness_prompt = (
-                f"Review the DLT investigation for case {ref_id}.\n\n"
-                f"Read the investigation:\n"
-                f"- local_casesheets/casebook_{ref_id}/dlt_investigation_text.txt\n\n"
-                f"Verify the investigation's claims against the case evidence:\n"
-                f"- local_casesheets/casebook_{ref_id}/dlt_evidence.txt (full evidence block)\n"
-                f"- local_casesheets/casebook_{ref_id}/dlt_failure.json (parsed failure details)\n\n"
-                f"Verify the investigation's claims against the service documentation in docs_cache/:\n"
-                f"- Use Glob to find module docs: Glob docs_cache/enu-biometric/docs/modules/*<ClassName>*\n"
-                f"- Use Grep to search for error codes or method names across the corpus\n"
-                f"- Read architecture docs: docs_cache/enu-biometric/docs/architecture/components.md\n"
-                f"- Read dataflow: docs_cache/enu-biometric/docs/architecture/dataflow.md\n\n"
-                f"Check for these common errors:\n"
-                f"1. Claims not grounded in the stack trace or logs.\n"
-                f"2. Misinterpretation of the exception chain (the LAST entry is the root cause).\n"
-                f"3. Claims about service behaviour that contradict the documentation.\n"
-                f"4. Corroboration verdict ignored (CORROBORATED vs CONTRADICTED vs UNVERIFIABLE).\n\n"
-                f"CRITICAL: You MUST write your output to EXACTLY this file path:\n"
-                f"  {output_path}\n"
-                f"Do NOT write to any other filename.\n"
-                f"Write a JSON object with this schema:\n"
-                f'{{"verdict": "APPROVED" or "REJECTED", "feedback": "<if rejected, explain what is wrong; if approved, empty string>"}}\n\n'
-                f"Follow the rules in AGENTS.md."
+            from src.utils.prompt_loader import render as render_prompt
+            reviewer_harness_prompt = render_prompt(
+                "DltReviewer",
+                ref_id=ref_id,
+                output_path=output_path,
             )
 
             try:

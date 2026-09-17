@@ -114,11 +114,18 @@ PROMPT_FILES = (
     "ReviewerAgent.md",
     "SynthesisAgent.md",
     "LogFilterAgent.md",
+    "DltInvestigatorAgent.md",
+    "DltReviewerAgent.md",
+    "DltSynthesisAgent.md",
+    "harness/RejectionInvestigator.md",
+    "harness/RejectionReviewer.md",
+    "harness/DltInvestigator.md",
+    "harness/DltReviewer.md",
 )
 
 
 def compute_prompt_fingerprint(base_dir: str) -> str:
-    """SHA256 over the four agent prompts plus the shared policy context.
+    """SHA256 over the agent system prompts, harness templates, and policy.
 
     Sorted and length-prefixed so the digest cannot be changed by reordering
     or by content shifting across a boundary.
@@ -536,27 +543,12 @@ def _build_agent():
 
             output_path = str(case_dir / "investigation.json")
 
-            harness_prompt = (
-                f"Investigate the rejection for event {event_id}.\n\n"
-                f"Read these files for the case evidence:\n"
-                f"- local_casesheets/casebook_{event_id}/supported_logs.txt (the log trace)\n"
-                f"- local_casesheets/casebook_{event_id}/context.json (payload, enrolment type, DB rule)\n\n"
-                f"Understand the service using the documentation corpus in docs_cache/:\n"
-                f"- Use Glob to find module docs: Glob docs_cache/enu-biometric/docs/modules/*<ClassName>*\n"
-                f"- Use Grep to search for error codes or method names across the corpus\n"
-                f"- Read architecture docs: docs_cache/enu-biometric/docs/architecture/components.md\n"
-                f"- Read dataflow: docs_cache/enu-biometric/docs/architecture/dataflow.md\n\n"
-                f"Enrolment Type: {etype_display}\n\n"
-                f"Analyze why the packet was rejected. Cross-reference the logs with the\n"
-                f"service documentation to pinpoint the exact failure. Cite specific log\n"
-                f"lines and documentation references.\n\n"
-                f"CRITICAL: You MUST write your output to EXACTLY this file path:\n"
-                f"  {output_path}\n"
-                f"Do NOT write to any other filename (not findings.json, not output.json).\n"
-                f"The file MUST be named investigation.json at the path above.\n"
-                f"Write a JSON object with this schema:\n"
-                f'{{"investigation": "<your detailed analysis text>", "citations": [<list of cited evidence>]}}\n\n'
-                f"Follow the rules in AGENTS.md."
+            from src.utils.prompt_loader import render as render_prompt
+            harness_prompt = render_prompt(
+                "RejectionInvestigator",
+                event_id=event_id,
+                etype_display=etype_display,
+                output_path=output_path,
             )
 
             try:
@@ -667,35 +659,16 @@ def _build_agent():
 
             output_path = str(case_dir / "review.json")
 
-            reviewer_prompt = (
-                f"Review the investigation for event {event_id}.\n\n"
-                f"Read the investigation:\n"
-                f"- local_casesheets/casebook_{event_id}/investigation_text.txt\n\n"
-                f"Verify the investigation's claims against the case evidence:\n"
-                f"- local_casesheets/casebook_{event_id}/supported_logs.txt (the log trace)\n"
-                f"- local_casesheets/casebook_{event_id}/context.json (payload, enrolment type, DB rule)\n\n"
-                f"Verify the investigation's claims against the service documentation in docs_cache/:\n"
-                f"- Use Glob to find module docs: Glob docs_cache/enu-biometric/docs/modules/*<ClassName>*\n"
-                f"- Use Grep to search for error codes or method names across the corpus\n"
-                f"- Read architecture docs: docs_cache/enu-biometric/docs/architecture/components.md\n"
-                f"- Read dataflow: docs_cache/enu-biometric/docs/architecture/dataflow.md\n\n"
-                f"Check for these common errors:\n"
-                f"1. Glossary violations: 'demo' = face modality, 'nonDemo' = fingerprints and iris. 'TD' = all nonDemo matched.\n"
-                f"2. Reason code mismatches: verify the reason code in the investigation matches the one in context.json.\n"
-                f"3. Enrolment type misapplication: N = 1:N dedup, U = 1:1 auth and append, MBU = treated as 1:N.\n"
-                f"4. Claims not grounded in logs: verify cited log lines actually exist in supported_logs.txt.\n"
-                f"5. Claims not grounded in docs: verify service behaviour claims against the documentation.\n\n"
-                f"CRITICAL: You MUST write your output to EXACTLY this file path:\n"
-                f"  {output_path}\n"
-                f"Do NOT write to any other filename.\n"
-                f"Write a JSON object with this schema:\n"
-                f'{{"verdict": "APPROVED" or "REJECTED", "feedback": "<if rejected, explain what is wrong; if approved, empty string>"}}\n\n'
-                f"Follow the rules in AGENTS.md."
+            from src.utils.prompt_loader import render as render_prompt
+            harness_prompt = render_prompt(
+                "RejectionReviewer",
+                event_id=event_id,
+                output_path=output_path,
             )
 
             try:
                 result = opencode_runner.run_task_json(
-                    prompt=reviewer_prompt,
+                    prompt=harness_prompt,
                     output_path=output_path,
                     timeout=int(os.environ.get("OPENCODE_TASK_TIMEOUT_SECONDS", "300")),
                 )
