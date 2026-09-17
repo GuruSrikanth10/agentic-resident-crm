@@ -589,6 +589,8 @@ async def analyze_dlt(message: DltMessage):
                       timeout_seconds=budget, state="FAILED_TIMEOUT")
             await _off_loop(storage.save_terminal, ref_id,
                             _timeout_casebook(ref_id, message.ref_id, budget))
+            from src.utils.case_cleanup import cleanup_casebook_dir
+            cleanup_casebook_dir(ref_id)
             return {"status": "failed_timeout", "case_id": case_id}
         provenance = "agent"
         if finding is None:
@@ -666,6 +668,9 @@ async def analyze_dlt(message: DltMessage):
         return {"status": "already_processed", "case_id": case_id}
 
     await _off_loop(storage.save_terminal, ref_id, casebook)
+
+    from src.utils.case_cleanup import cleanup_casebook_dir
+    cleanup_casebook_dir(ref_id)
 
     log.info("DLT case analysed", failure_class=failure["failure_class"],
              corroboration=corroboration.verdict.value,

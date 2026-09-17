@@ -171,6 +171,8 @@ def drain_and_shutdown() -> None:
                         "packet will be redelivered."
                     )},
                 })
+                from src.utils.case_cleanup import cleanup_casebook_dir
+                cleanup_casebook_dir(event_id)
             except Exception as e:
                 logger.error("Could not mark an abandoned investigation",
                              event_id=event_id,
@@ -787,6 +789,8 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
                 "packet_status": {"status": "FAILED_TIMEOUT"},
                 "resolution": {"synthesis": f"Investigation exceeded the server-side budget of {agent_invoke_timeout_seconds}s."}
             })
+            from src.utils.case_cleanup import cleanup_casebook_dir
+            cleanup_casebook_dir(event_id)
             return {"status": "failed_timeout", "event_id": event_id}
     except Exception as e:
         import traceback
@@ -805,6 +809,8 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
             "packet_status": {"status": "DLQ"},
             "resolution": {"synthesis": f"Failed with {type(e).__name__}: {str(e)}"}
         })
+        from src.utils.case_cleanup import cleanup_casebook_dir
+        cleanup_casebook_dir(event_id)
         return {"status": "dlq", "event_id": event_id, "error": str(e)}
 
     log.info("Agent investigation complete", state="COMPLETED_GRAPH")
@@ -988,6 +994,9 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
     # casebook.json and status.json reach the terminal status together, so a
     # crash between them can't leave status.json stuck at IN_PROGRESS.
     await _off_loop(storage.save_terminal, event_id, casebook_data)
+
+    from src.utils.case_cleanup import cleanup_casebook_dir
+    cleanup_casebook_dir(event_id)
 
     final_status = casebook_data["packet_status"]["status"]
     resolution_source = casebook_data["resolution"]["source"] or "agent"

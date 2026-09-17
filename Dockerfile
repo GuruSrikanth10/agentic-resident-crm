@@ -39,6 +39,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     build-essential \
     libsqlite3-0 \
+    ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
 # ---- Verify Python >= 3.12 ----
@@ -83,6 +84,7 @@ COPY start.py /app/start.py
 COPY local_run.py /app/local_run.py
 COPY agent_policy_context.md /app/agent_policy_context.md
 COPY opencode.json /app/opencode.json
+COPY AGENTS.md /app/AGENTS.md
 COPY reason_codes.csv /app/reason_codes.csv
 COPY version.json /app/version.json
 COPY entrypoint.sh /app/entrypoint.sh

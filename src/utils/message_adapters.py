@@ -128,8 +128,10 @@ class RejectionAdapter:
 
     def save_terminal(self, identity: str, casebook: dict) -> None:
         from src.storage.factory import get_casebook_storage
+        from src.utils.case_cleanup import cleanup_casebook_dir
 
         get_casebook_storage().save_terminal(identity, casebook)
+        cleanup_casebook_dir(identity)
 
 
 # ---------------------------------------------------------------------------
@@ -261,8 +263,10 @@ class DltAdapter:
 
     def save_terminal(self, identity: str, casebook: dict) -> None:
         from src.dlt.case_storage import get_dlt_storage
+        from src.utils.case_cleanup import cleanup_casebook_dir
 
         get_dlt_storage().save_terminal(identity, casebook)
+        cleanup_casebook_dir(identity)
 
 
 def for_role(role: str) -> MessageAdapter:

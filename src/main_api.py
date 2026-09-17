@@ -60,6 +60,12 @@ async def lifespan(app: FastAPI):
     # starts serving, so this has to run after that to be able to chain to them.
     _install_draining_signal_handlers()
 
+    # Background reaper: removes stale local casebook directories left
+    # behind by crashes, timeouts, or any path where the immediate cleanup
+    # after save_terminal did not run.
+    from src.utils.case_cleanup import start_reaper
+    start_reaper()
+
     # Start the opencode harness in a background thread so the API binds
     # its port immediately. The corpus download and `opencode serve` cold
     # boot take 15-30s; doing them in the lifespan blocked the API from
