@@ -1,5 +1,6 @@
 import os
 import json
+import time
 from pathlib import Path
 from typing import Optional
 from filelock import FileLock
@@ -55,6 +56,11 @@ class LocalFilesystemCasebookStorage(CasebookStorage):
         # Enforce schema version for backwards compatibility
         if "schema_version" not in casebook:
             casebook["schema_version"] = CASEBOOK_SCHEMA_VERSION
+
+        # Stamp the last_updated timestamp on every save
+        if isinstance(casebook, dict):
+            meta = casebook.setdefault("casebook_metadata", {})
+            meta["last_updated"] = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
 
         with FileLock(str(lock_path), timeout=10):
             with open(tmp_path, "w", encoding="utf-8") as f:

@@ -197,6 +197,7 @@ def lookup_error_code(error_code: str) -> str:
 _ENROLMENT_TYPE_ALIASES = {
     "U": "UPDATE",
     "UPDATE": "UPDATE",
+    "N": "ENROLMENT",
     "E": "ENROLMENT",
     "ENROLMENT": "ENROLMENT",
     "ENROLLMENT": "ENROLMENT",

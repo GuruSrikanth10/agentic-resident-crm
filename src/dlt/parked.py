@@ -89,11 +89,11 @@ def cap() -> int:
 # Parking
 # ---------------------------------------------------------------------------
 
-def _usable_key(case_id: str) -> bool:
-    """The case id is interpolated into a storage path, so it carries the same
+def _usable_key(ref_id: str) -> bool:
+    """The ref id is interpolated into a storage path, so it carries the same
     guard `_queue_pending_replay` applies to a packet id (0.11)."""
     from src.models.schemas import EVENT_ID_PATTERN
-    return bool(case_id and re.fullmatch(EVENT_ID_PATTERN, str(case_id).strip()))
+    return bool(ref_id and re.fullmatch(EVENT_ID_PATTERN, str(ref_id).strip()))
 
 
 def would_replay_but_for_the_version(finding, ref_id, code_check) -> bool:
@@ -115,17 +115,17 @@ def would_replay_but_for_the_version(finding, ref_id, code_check) -> bool:
     return auto_replay.decide(finding, ref_id, code_check=None).should_replay
 
 
-def park(case_id: str, ref_id: str, code_check, finding=None) -> dict:
+def park(ref_id: str, code_check, finding=None) -> dict:
     """Record one packet as waiting for a version. Never raises."""
     required = getattr(code_check, "required_version", None)
     if not required:
         return {"parked": False,
                 "reason": "the verdict named no version to wait for"}
 
-    if not _usable_key(case_id):
-        logger.error("Refusing to park a replay under an unusable case id",
-                     case_id=case_id)
-        return {"parked": False, "reason": "the case id is not a usable storage key"}
+    if not _usable_key(ref_id):
+        logger.error("Refusing to park a replay under an unusable ref id",
+                     ref_id=ref_id)
+        return {"parked": False, "reason": "the ref id is not a usable storage key"}
 
     storage = get_parked_storage()
 
@@ -136,12 +136,11 @@ def park(case_id: str, ref_id: str, code_check, finding=None) -> dict:
         waiting = 0
     if waiting >= cap():
         logger.warning("Parked-replay queue is at its cap; refusing to park",
-                       cap=cap(), waiting=waiting, case_id=case_id)
+                       cap=cap(), waiting=waiting, ref_id=ref_id)
         return {"parked": False,
                 "reason": f"the parked queue is at its cap of {cap()}"}
 
     entry = {
-        "case_id": case_id,
         "ref_id": ref_id,
         "required_version": str(required),
         "baseline_version": getattr(code_check, "baseline_version", None),
@@ -154,20 +153,20 @@ def park(case_id: str, ref_id: str, code_check, finding=None) -> dict:
     }
 
     try:
-        storage.save(case_id, entry, filename=PARKED_FILENAME)
+        storage.save(ref_id, entry, filename=PARKED_FILENAME)
     except Exception as e:
-        logger.error("Failed to park a replay", case_id=case_id,
+        logger.error("Failed to park a replay", ref_id=ref_id,
                      error=f"{type(e).__name__}: {e}")
         return {"parked": False, "reason": f"{type(e).__name__}: {e}"}
 
-    logger.info("Parked a replay until the fix deploys", case_id=case_id,
+    logger.info("Parked a replay until the fix deploys", ref_id=ref_id,
                 required_version=required)
     return {"parked": True,
             "reason": f"waiting for the pods to reach {required}",
             "required_version": str(required)}
 
 
-def maybe_park(case_id: str, ref_id: Optional[str], code_check,
+def maybe_park(ref_id: str, message_ref_id: Optional[str], code_check,
                finding=None) -> dict:
     """The one entry point `/analyze-dlt` calls.
 
@@ -176,12 +175,12 @@ def maybe_park(case_id: str, ref_id: Optional[str], code_check,
     """
     if not park_enabled():
         return {"parked": False, "reason": "DLT_CODE_CHECK_PARK_ENABLED is off"}
-    if not ref_id:
+    if not message_ref_id:
         return {"parked": False, "reason": "no refId; nothing to replay later"}
-    if not would_replay_but_for_the_version(finding, ref_id, code_check):
+    if not would_replay_but_for_the_version(finding, message_ref_id, code_check):
         return {"parked": False,
                 "reason": "this packet was not going to be replayed anyway"}
-    return park(case_id, ref_id, code_check, finding)
+    return park(ref_id, code_check, finding)
 
 
 # ---------------------------------------------------------------------------
@@ -197,9 +196,9 @@ def _entries(storage=None) -> list:
         logger.warning("Could not list parked replays",
                        error=f"{type(e).__name__}: {e}")
         return []
-    for case_id in identifiers:
+    for ref_id in identifiers:
         try:
-            entry = storage.load(case_id, filename=PARKED_FILENAME)
+            entry = storage.load(ref_id, filename=PARKED_FILENAME)
         except Exception:
             continue
         if entry:
@@ -215,7 +214,7 @@ def list_parked(include_finished: bool = False) -> list:
     return sorted(entries, key=lambda e: e.get("parked_at") or 0)
 
 
-def _mark(storage, case_id: str, status: str, **extra) -> None:
+def _mark(storage, ref_id: str, status: str, **extra) -> None:
     def mutate(current: Optional[dict]) -> dict:
         entry = dict(current or {})
         entry["status"] = status
@@ -223,9 +222,9 @@ def _mark(storage, case_id: str, status: str, **extra) -> None:
         return entry
 
     try:
-        storage.update_json(case_id, PARKED_FILENAME, mutate)
+        storage.update_json(ref_id, PARKED_FILENAME, mutate)
     except Exception as e:
-        logger.error("Could not update a parked replay", case_id=case_id,
+        logger.error("Could not update a parked replay", ref_id=ref_id,
                      status=status, error=f"{type(e).__name__}: {e}")
 
 
@@ -253,36 +252,36 @@ def release_ready(running_versions=(), dry_run: bool = False) -> dict:
                "waiting": 0, "unknown": 0, "entries": []}
 
     for entry in list_parked():
-        case_id = entry.get("case_id")
+        ref_id = entry.get("ref_id")
         summary["examined"] += 1
 
         age = now - float(entry.get("parked_at") or now)
         if ttl > 0 and age > ttl:
             summary["expired"] += 1
-            summary["entries"].append({"case_id": case_id, "outcome": STATUS_EXPIRED})
+            summary["entries"].append({"ref_id": ref_id, "outcome": STATUS_EXPIRED})
             logger.warning("Parked replay expired before its fix deployed",
-                           case_id=case_id, age_days=round(age / 86400, 1),
+                           ref_id=ref_id, age_days=round(age / 86400, 1),
                            required_version=entry.get("required_version"))
             if not dry_run:
-                _mark(storage, case_id, STATUS_EXPIRED, expired_at=now)
+                _mark(storage, ref_id, STATUS_EXPIRED, expired_at=now)
             continue
 
         satisfied = versions.at_least(running, entry.get("required_version"))
         if satisfied is None:
             summary["unknown"] += 1
-            summary["entries"].append({"case_id": case_id, "outcome": "unknown"})
+            summary["entries"].append({"ref_id": ref_id, "outcome": "unknown"})
             continue
         if not satisfied:
             summary["waiting"] += 1
-            summary["entries"].append({"case_id": case_id, "outcome": "waiting"})
+            summary["entries"].append({"ref_id": ref_id, "outcome": "waiting"})
             continue
 
         summary["released"] += 1
-        outcome = {"case_id": case_id, "outcome": STATUS_RELEASED}
+        outcome = {"ref_id": ref_id, "outcome": STATUS_RELEASED}
         if not dry_run:
-            result = auto_replay.attempt(case_id, entry.get("ref_id"))
+            result = auto_replay.attempt(ref_id, entry.get("ref_id"))
             outcome["queued"] = result.get("queued")
-            _mark(storage, case_id, STATUS_RELEASED, released_at=now,
+            _mark(storage, ref_id, STATUS_RELEASED, released_at=now,
                   released_at_version=str(running) if running else None,
                   release_result=result.get("result"))
         summary["entries"].append(outcome)

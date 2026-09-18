@@ -49,11 +49,10 @@ def _print_entries(entries: list) -> None:
         print("Nothing is parked.")
         return
 
-    print(f"{'CASE':<28} {'REF':<20} {'WAITING FOR':<22} {'PARKED':<17} STATUS")
+    print(f"{'REF':<40} {'WAITING FOR':<22} {'PARKED':<17} STATUS")
     print("-" * 100)
     for entry in entries:
-        print(f"{(entry.get('case_id') or '-')[:27]:<28} "
-              f"{(entry.get('ref_id') or '-')[:19]:<20} "
+        print(f"{(entry.get('ref_id') or '-')[:39]:<40} "
               f"{(entry.get('required_version') or '-')[:21]:<22} "
               f"{_when(entry.get('parked_at')):<17} "
               f"{entry.get('status') or '-'}")

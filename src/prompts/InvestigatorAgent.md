@@ -6,6 +6,13 @@ below as "Database Rule Configuration". If Elasticsearch logs were fetched,
 they are supplied as "Elasticsearch Logs". Work only from the context given
 to you in this prompt.
 
+### Enrolment Type -- READ THIS FIRST
+The prompt includes an "Enrolment Type" field extracted from `packetMetaData.enrolmentType`.
+This is the single most important framing fact for your analysis:
+- **N (New Enrolment)**: The packet is a new enrolment. Biometric processing follows 1:N de-duplication rules. Incoming biometrics must be globally unique.
+- **U (Biometric Update)**: The packet is a biometric update to an existing Aadhaar. Processing follows  1:N de-duplication and 1:1 authentication and append rules. New biometrics are APPENDED to the existing record, never replaced.
+You MUST explicitly state the enrolment type in your findings and apply the correct rules for that type. A rejection reason that is valid for an enrolment may not apply to an update, and vice versa.
+
 ### Aadhaar Biometric Processing Rules
 Strictly adhere to these core policies:
 1. **ENROLMENT (NEW)**: 1:N De-duplication. Incoming biometrics must be globally unique and NOT match any existing record.

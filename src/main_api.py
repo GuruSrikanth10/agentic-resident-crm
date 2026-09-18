@@ -59,11 +59,48 @@ async def lifespan(app: FastAPI):
     # Installed here, not at import: uvicorn registers its own handlers as it
     # starts serving, so this has to run after that to be able to chain to them.
     _install_draining_signal_handlers()
+
+    # Background reaper: removes stale local casebook directories left
+    # behind by crashes, timeouts, or any path where the immediate cleanup
+    # after save_terminal did not run.
+    from src.utils.case_cleanup import start_reaper
+    start_reaper()
+
+    # Start the opencode harness in a background thread so the API binds
+    # its port immediately. The corpus download and `opencode serve` cold
+    # boot take 15-30s; doing them in the lifespan blocked the API from
+    # accepting connections, causing consumers to fail with connection
+    # refused errors.
+    from src.utils.opencode_runner import is_enabled as harness_enabled
+    _harness_thread = None
+    if harness_enabled():
+        import threading
+        from src.utils import docs_loader, opencode_runner
+
+        def _start_harness():
+            try:
+                docs_loader.download_corpus()
+                global _opencode_session
+                _opencode_session = opencode_runner.session_scope()
+                _opencode_session.__enter__()
+            except Exception as e:
+                print(f"opencode harness failed to start: {e}")
+
+        _harness_thread = threading.Thread(target=_start_harness, daemon=True)
+        _harness_thread.start()
+
     yield
+
     # Run the drain off the event loop: it blocks for up to
     # API_SHUTDOWN_DRAIN_SECONDS and would otherwise stall the loop that the
     # in-flight investigations are still being awaited on.
     await asyncio.to_thread(drain_and_shutdown)
+
+    if _harness_thread is not None:
+        from src.utils import opencode_runner
+        session = opencode_runner.current_session()
+        if session:
+            session.__exit__(None, None, None)
 
 app = FastAPI(
     title="Agentic Resident CRM API",

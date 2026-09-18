@@ -114,11 +114,18 @@ PROMPT_FILES = (
     "ReviewerAgent.md",
     "SynthesisAgent.md",
     "LogFilterAgent.md",
+    "DltInvestigatorAgent.md",
+    "DltReviewerAgent.md",
+    "DltSynthesisAgent.md",
+    "harness/RejectionInvestigator.md",
+    "harness/RejectionReviewer.md",
+    "harness/DltInvestigator.md",
+    "harness/DltReviewer.md",
 )
 
 
 def compute_prompt_fingerprint(base_dir: str) -> str:
-    """SHA256 over the four agent prompts plus the shared policy context.
+    """SHA256 over the agent system prompts, harness templates, and policy.
 
     Sorted and length-prefixed so the digest cannot be changed by reordering
     or by content shifting across a boundary.
@@ -472,6 +479,93 @@ def _build_agent():
                 db_rule = "No errorReasonCode found in payload."
 
         is_retry = bool(feedback)
+
+        # Check if the opencode harness is enabled
+        from src.utils.opencode_runner import is_enabled as harness_enabled
+        use_harness = harness_enabled()
+
+        if use_harness and not is_retry:
+            # opencode harness path: the agent reads files from disk and
+            # writes its output to a file. Context (logs, payload, db_rule)
+            # is written to the LOCAL filesystem directly — not through the
+            # storage abstraction — because the opencode agent can only read
+            # local files, and under CASEBOOK_STORAGE_BACKEND=s3 the storage
+            # layer writes to S3, not to disk.
+            from src.utils import opencode_runner, docs_loader
+
+            # Wait for the corpus download to finish if it's still running.
+            # The download happens in a background thread at API startup;
+            # if a packet arrives before it completes, the agent would read
+            # a partial corpus. 60s is generous for a corpus that's usually
+            # already on disk from a previous run.
+            if not docs_loader.corpus_available():
+                log.info("Waiting for documentation corpus download to complete...")
+                for _ in range(60):
+                    if docs_loader.corpus_available():
+                        break
+                    time.sleep(1)
+                if not docs_loader.corpus_available():
+                    log.warning("Corpus not available; proceeding without docs")
+
+            # Resolve the local casebook directory (independent of the
+            # storage backend — always on disk).
+            from src.utils.paths import LOCAL_CASESHEETS_DIR
+            case_dir = LOCAL_CASESHEETS_DIR / f"casebook_{event_id}"
+            case_dir.mkdir(parents=True, exist_ok=True)
+
+            # Write context files for the agent to read
+            flow_meta = payload.get("flowMetaData") or {}
+            projected_payload = {
+                "eventId": payload.get("eventId"),
+                "packetMetaData": payload.get("packetMetaData"),
+                "packetExecutionSummary": payload.get("packetExecutionSummary"),
+                "flowMetaData": {"stage": flow_meta.get("stage")},
+            }
+            raw_etype = payload.get("packetMetaData", {}).get("enrolmentType", "")
+            etype_display = {
+                "N": "New Enrolment (1:N deduplication)",
+                "U": "Biometric Update (1:1 authentication and append)",
+                "E": "New Enrolment (1:N deduplication)",
+            }.get(str(raw_etype).strip().upper(), raw_etype or "Unknown")
+
+            # Write the logs to the local casebook directory
+            if logs and logs != "Log fetching disabled.":
+                (case_dir / "supported_logs.txt").write_text(logs, encoding="utf-8")
+
+            # Write payload + db_rule to a context file
+            context_file = case_dir / "context.json"
+            with open(context_file, "w", encoding="utf-8") as f:
+                json.dump({
+                    "payload": projected_payload,
+                    "enrolment_type": etype_display,
+                    "db_rule": db_rule,
+                }, f, indent=2, ensure_ascii=False)
+
+            output_path = str(case_dir / "investigation.json")
+
+            from src.utils.prompt_loader import render as render_prompt
+            harness_prompt = render_prompt(
+                "RejectionInvestigator",
+                event_id=event_id,
+                etype_display=etype_display,
+                output_path=output_path,
+            )
+
+            try:
+                result = opencode_runner.run_task_json(
+                    prompt=harness_prompt,
+                    output_path=output_path,
+                    timeout=int(os.environ.get("OPENCODE_TASK_TIMEOUT_SECONDS", "120")),
+                )
+                investigation = result["result"].get("investigation", "")
+                log.info("Investigator finished (opencode harness)",
+                         elapsed=result.get("seconds"))
+                return {"investigation": investigation, "db_rule": db_rule}
+            except Exception as e:
+                log.warning("opencode harness failed; falling back to direct LLM",
+                            error=f"{type(e).__name__}: {e}")
+                # Fall through to the direct LLM path below
+
         if is_retry:
             # Retry: send the delta plus the evidence.
             #
@@ -506,6 +600,19 @@ def _build_agent():
                 "flowMetaData": {"stage": flow_meta.get("stage")},
             }
             prompt = f"Kafka Payload: {json.dumps(projected_payload)}\n\n"
+
+            # Enrolment type is the single most important framing fact for a
+            # rejection: New Enrolment (N) follows 1:N dedup rules, Biometric
+            # Update (U) follows 1:1 auth-and-append rules. Stating it
+            # explicitly prevents the LLM from missing it inside the JSON.
+            raw_etype = payload.get("packetMetaData", {}).get("enrolmentType", "")
+            etype_display = {
+                "N": "New Enrolment (1:N deduplication)",
+                "U": "Biometric Update (1:N deduplication and 1:1 authentication and append)",
+                "Z": "Reactivation (1:N deduplication and 1:1 authentication and append)",
+            }.get(str(raw_etype).strip().upper(), raw_etype or "Unknown")
+            prompt += f"Enrolment Type: {etype_display}\n\n"
+
             if logs and logs != "Log fetching disabled.":
                 prompt += f"Elasticsearch Logs: {logs}\n\n"
             prompt += f"Database Rule Configuration:\n{db_rule}\n\n"
@@ -535,6 +642,48 @@ def _build_agent():
         # values directly.
         _current_event_id.set(event_id)
         _current_investigation.set(investigation)
+
+        # Check if the opencode harness is enabled
+        from src.utils.opencode_runner import is_enabled as harness_enabled
+        use_harness = harness_enabled()
+
+        if use_harness:
+            from src.utils import opencode_runner
+            from src.utils.paths import LOCAL_CASESHEETS_DIR
+
+            case_dir = LOCAL_CASESHEETS_DIR / f"casebook_{event_id}"
+
+            # Write the investigation to a file for the agent to read
+            investigation_file = case_dir / "investigation_text.txt"
+            investigation_file.write_text(investigation, encoding="utf-8")
+
+            output_path = str(case_dir / "review.json")
+
+            from src.utils.prompt_loader import render as render_prompt
+            harness_prompt = render_prompt(
+                "RejectionReviewer",
+                event_id=event_id,
+                output_path=output_path,
+            )
+
+            try:
+                result = opencode_runner.run_task_json(
+                    prompt=harness_prompt,
+                    output_path=output_path,
+                    timeout=int(os.environ.get("OPENCODE_TASK_TIMEOUT_SECONDS", "300")),
+                )
+                verdict = result["result"].get("verdict", "REJECTED").upper()
+                feedback = result["result"].get("feedback", "")
+                if verdict == "APPROVED":
+                    feedback = "APPROVED"
+                log.info("Reviewer finished (opencode harness)",
+                         elapsed=result.get("seconds"), verdict=verdict)
+                return {"reviewer_feedback": feedback,
+                        "retry_count": state.get("retry_count", 0) + 1}
+            except Exception as e:
+                log.warning("opencode harness failed for reviewer; falling back to direct LLM",
+                            error=f"{type(e).__name__}: {e}")
+                # Fall through to the direct LLM path below
 
         prompt = f"Validate this investigation:\n{investigation}\n\nIf it's perfect, reply with exactly 'APPROVED'. If not, explain what is wrong."
 

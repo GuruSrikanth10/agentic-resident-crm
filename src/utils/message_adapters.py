@@ -128,8 +128,10 @@ class RejectionAdapter:
 
     def save_terminal(self, identity: str, casebook: dict) -> None:
         from src.storage.factory import get_casebook_storage
+        from src.utils.case_cleanup import cleanup_casebook_dir
 
         get_casebook_storage().save_terminal(identity, casebook)
+        cleanup_casebook_dir(identity)
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +171,24 @@ class DltAdapter:
                 payload = json.loads(raw_text)
             except (ValueError, TypeError):
                 payload = None  # headers and the key still carry the evidence
+
+        # When this message was republished onto the analysis queue by the
+        # fetch stage, the original DLT headers travelled inside the body
+        # (as DltMessage.headers), NOT as Kafka transport headers. So a
+        # message read from the analysis queue already carries its case_id
+        # and its parsed headers -- re-deriving from msg.headers would
+        # produce a different id (from the queue's own topic/partition/offset)
+        # and the analysis stage would never find the fetched artifacts.
+        if isinstance(payload, dict) and "case_id" in payload and "headers" in payload:
+            try:
+                message = DltMessage(**payload)
+            except Exception as validation_err:
+                logger.error("Republished DLT message failed validation",
+                             case_id=payload.get("case_id"),
+                             error=str(validation_err))
+                return ParseResult(raw_text=raw_text or "",
+                                   error=f"DLT validation failed: {validation_err}")
+            return ParseResult(body=message.model_dump(), raw_text=raw_text)
 
         headers = decode_kafka_headers(msg.headers)
         parsed_headers = parse_headers(headers)
@@ -226,11 +246,16 @@ class DltAdapter:
         return None
 
     def identity_of(self, body: dict) -> Optional[str]:
-        return body.get("case_id")
+        # Storage is keyed on ref_id, not case_id: an operator who only knows
+        # the refId can find the casebook directly. case_id is still carried
+        # inside the casebook for audit (it encodes the original topic/
+        # partition/offset), but it is no longer the storage key.
+        return body.get("ref_id") or body.get("case_id")
 
     def timeout_casebook(self, body: dict) -> dict:
+        identity = self.identity_of(body)
         return {
-            "packet_metadata": {"eid": self.identity_of(body),
+            "packet_metadata": {"eid": identity,
                                 "ref_id": body.get("ref_id")},
             "packet_status": {"status": "FAILED_TIMEOUT"},
             "resolution": {"synthesis": "DLT analysis exceeded maximum allowed time."},
@@ -238,8 +263,10 @@ class DltAdapter:
 
     def save_terminal(self, identity: str, casebook: dict) -> None:
         from src.dlt.case_storage import get_dlt_storage
+        from src.utils.case_cleanup import cleanup_casebook_dir
 
         get_dlt_storage().save_terminal(identity, casebook)
+        cleanup_casebook_dir(identity)
 
 
 def for_role(role: str) -> MessageAdapter:

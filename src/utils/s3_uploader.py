@@ -18,7 +18,15 @@ def _get_s3_client():
     global _s3_client
     with _s3_client_lock:
         if _s3_client is None:
-            _s3_client = boto3.client("s3")
+            endpoint = os.environ.get("S3_ENDPOINT_URL") or os.environ.get("AWS_ENDPOINT_URL")
+            kwargs = {}
+            if endpoint:
+                from botocore.config import Config
+                kwargs["endpoint_url"] = endpoint
+                kwargs["config"] = Config(s3={"addressing_style": "path"})
+                if os.environ.get("S3_VERIFY_SSL", "true").lower() == "false":
+                    kwargs["verify"] = False
+            _s3_client = boto3.client("s3", **kwargs)
         return _s3_client
 
 
@@ -34,7 +42,7 @@ def upload_logs_to_s3(event_id: str, logs: str) -> Optional[str]:
     discarded (1.12).
     """
     log = logger.bind(event_id=event_id)
-    bucket_name = os.environ.get("S3_LOGS_BUCKET")
+    bucket_name = os.environ.get("S3_LOGS_BUCKET") or os.environ.get("CASEBOOK_S3_BUCKET")
 
     if not bucket_name:
         log.info("S3_LOGS_BUCKET not configured; cannot upload logs.")

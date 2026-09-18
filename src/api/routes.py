@@ -22,7 +22,6 @@ from src.utils.outcomes import (
     record_outcome,
 )
 from src.core.agent_orchestrator import get_agent, prompt_fingerprint
-from src.utils.s3_uploader import upload_logs_to_s3
 from src.storage.factory import get_casebook_storage
 from src.utils.dlq_publisher import publish_to_dlq
 from src.utils.analysis_queue_publisher import publish_to_analysis_queue
@@ -172,6 +171,8 @@ def drain_and_shutdown() -> None:
                         "packet will be redelivered."
                     )},
                 })
+                from src.utils.case_cleanup import cleanup_casebook_dir
+                cleanup_casebook_dir(event_id)
             except Exception as e:
                 logger.error("Could not mark an abandoned investigation",
                              event_id=event_id,
@@ -505,6 +506,18 @@ def readiness_check():
     except Exception as e:
         logger.error("Readiness check failed on the checkpoint store", backend=backend, error=f"{type(e).__name__}: {e}")
 
+    # When the opencode harness is enabled, the API is not ready until the
+    # documentation corpus has been downloaded to disk. Without this, the
+    # consumers start forwarding packets before the agent can read the docs.
+    from src.utils.opencode_runner import is_enabled as harness_enabled
+    if harness_enabled():
+        from src.utils import docs_loader
+        if not docs_loader.corpus_available():
+            raise HTTPException(status_code=503, detail="Downloading documentation corpus")
+        from src.utils.opencode_runner import server_ready
+        if not server_ready():
+            raise HTTPException(status_code=503, detail="Starting opencode server")
+
     kafka_ready = _check_kafka_producer_ready()
 
     if db_ready and kafka_ready:
@@ -776,6 +789,8 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
                 "packet_status": {"status": "FAILED_TIMEOUT"},
                 "resolution": {"synthesis": f"Investigation exceeded the server-side budget of {agent_invoke_timeout_seconds}s."}
             })
+            from src.utils.case_cleanup import cleanup_casebook_dir
+            cleanup_casebook_dir(event_id)
             return {"status": "failed_timeout", "event_id": event_id}
     except Exception as e:
         import traceback
@@ -794,6 +809,8 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
             "packet_status": {"status": "DLQ"},
             "resolution": {"synthesis": f"Failed with {type(e).__name__}: {str(e)}"}
         })
+        from src.utils.case_cleanup import cleanup_casebook_dir
+        cleanup_casebook_dir(event_id)
         return {"status": "dlq", "event_id": event_id, "error": str(e)}
 
     log.info("Agent investigation complete", state="COMPLETED_GRAPH")
@@ -849,15 +866,13 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
     if not raw_logs or raw_logs == "Log fetching disabled.":
         processed_logs = {"path": "No logs found", "gaps": None}
     else:
-        # The largest single blocking call in this function: a PUT of the
-        # entire log body, previously issued from the event loop.
-        uploaded_url = await _off_loop(upload_logs_to_s3, event_id, raw_logs)
-        if uploaded_url:
-            path_str = uploaded_url
-        else:
-            log.warning("S3 upload unavailable; embedding local path instead", state="LOGS_TRUNCATED")
-            path_str = "Logs persisted to local storage (S3 unavailable)."
-        processed_logs = {"path": path_str, "gaps": extracted_gaps}
+        # Persist the logs as an artifact inside the casebook directory, so
+        # the evidence travels with the casebook regardless of backend.
+        # The path stored is relative to the casebook root, so it works
+        # identically on local disk and on S3.
+        await _off_loop(get_casebook_storage().save_artifact,
+                        event_id, "supported_logs.txt", raw_logs)
+        processed_logs = {"path": "supported_logs.txt", "gaps": extracted_gaps}
         
     # Resolve the fields the casebook needs from the validated model. On a
     # parse failure the evidence is still persisted -- metadata, rejection
@@ -905,9 +920,13 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
         }
 
     casebook_data = {
+        "casebook_metadata": {
+            "created_at": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
+            "last_updated": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
+        },
         "packet_metadata": {
             "srn": packet_meta.get("srn"),
-            "eid": event_id,
+            "sid": signal_dict.get("sid"),
             "ref_id": packet_meta.get("refId"),
             "source": signal_dict.get("sourceTopic"),
             "packet_type": packet_meta.get("pktSource"),
@@ -921,7 +940,7 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
             "status": packet_status,
             "service": flow_meta.get("stage"),
             "sub_service": flow_meta.get("subStage"),
-            "last_updated": None,
+            "last_updated": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
             "is_in_process": False if exec_summary.get("packetStatus") == "REJECTED" else None,
             "rejection_data": {
                 "rejection_code": rejection_code,
@@ -975,6 +994,9 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
     # casebook.json and status.json reach the terminal status together, so a
     # crash between them can't leave status.json stuck at IN_PROGRESS.
     await _off_loop(storage.save_terminal, event_id, casebook_data)
+
+    from src.utils.case_cleanup import cleanup_casebook_dir
+    cleanup_casebook_dir(event_id)
 
     final_status = casebook_data["packet_status"]["status"]
     resolution_source = casebook_data["resolution"]["source"] or "agent"

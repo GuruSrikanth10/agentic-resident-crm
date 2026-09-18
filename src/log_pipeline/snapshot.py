@@ -117,7 +117,13 @@ def save(event_id: str, records: list, gaps: Optional[list] = None,
 
 
 def load(event_id: str) -> Optional[tuple]:
-    """Return (records, gaps) from a snapshot, or None when unusable."""
+    """Return (records, gaps) from a snapshot, or None when unusable.
+
+    Returns None for an empty snapshot too: a snapshot with zero records
+    was either never written (empty file from a reset) or captured nothing,
+    and in both cases the caller should fetch fresh rather than trust an
+    empty result that may be stale.
+    """
     try:
         storage = get_casebook_storage()
 
@@ -126,6 +132,8 @@ def load(event_id: str) -> Optional[tuple]:
             return None
 
         records = [json.loads(line) for line in body.splitlines() if line.strip()]
+        if not records:
+            return None
 
         gaps = []
         captured_at = None

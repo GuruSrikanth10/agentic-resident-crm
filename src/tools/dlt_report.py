@@ -148,15 +148,15 @@ def cmd_group(prefix: str) -> None:
         print(f"\nInspect one with --case {members[-1]}")
 
 
-def cmd_case(case_id: str) -> None:
+def cmd_case(ref_id: str) -> None:
     storage = get_dlt_storage()
-    casebook = storage.load(case_id)
+    casebook = storage.load(ref_id)
     if not casebook:
-        raise SystemExit(f"No casebook for '{case_id}'.")
+        raise SystemExit(f"No casebook for '{ref_id}'.")
 
     print(json.dumps(casebook, indent=2, ensure_ascii=False))
 
-    trace = storage.load_artifact(case_id, "trace.txt")
+    trace = storage.load_artifact(ref_id, "trace.txt")
     if trace:
         print("\n--- trace.txt ---")
         print(trace[:8000])
@@ -191,11 +191,10 @@ def cmd_parked() -> None:
               "has\nnot deployed yet, and leave when the pods reach its version.")
         return
 
-    print(f"{'CASE':<28} {'REF':<20} {'WAITING FOR':<22} {'PARKED':<17} REPO")
+    print(f"{'REF':<40} {'WAITING FOR':<22} {'PARKED':<17} REPO")
     print("-" * 110)
     for entry in entries:
-        print(f"{(entry.get('case_id') or '-')[:27]:<28} "
-              f"{(entry.get('ref_id') or '-')[:19]:<20} "
+        print(f"{(entry.get('ref_id') or '-')[:39]:<40} "
               f"{(entry.get('required_version') or '-')[:21]:<22} "
               f"{_when(entry.get('parked_at')):<17} "
               f"{(entry.get('repo') or '-')[:30]}")
@@ -266,13 +265,13 @@ def cmd_code_check_accuracy() -> None:
     """
     storage = get_dlt_storage()
     try:
-        case_ids = storage.list_events()
+        ref_ids = storage.list_events()
     except Exception as e:
         raise SystemExit(f"Could not list DLT cases: {e}")
 
     cases = []
-    for case_id in case_ids:
-        casebook = storage.load(case_id)
+    for ref_id in ref_ids:
+        casebook = storage.load(ref_id)
         if casebook:
             cases.append(casebook)
 

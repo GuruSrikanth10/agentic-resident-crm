@@ -1,18 +1,28 @@
 """Phase 5 of DLT_PLAN.md -- deriving the log window from DLT headers.
 
-Trap 2 (DLT_PLAN.md 3.2) lives here. In the reference sample the original
-message was produced at `2026-08-16T07:20:05Z` and the final attempt failed at
-`2026-08-18T02:20:08Z` -- **43 hours apart**. Anchoring on
-`kafka_original-timestamp` searches a window that is 43 hours stale, and with
-the `K8S_DEFAULT_SINCE_HOURS=2` default it finds nothing at all, with no error
-anywhere to say why.
+Three timestamps are available on a Spring DLT message, and the choice of
+anchor matters:
 
-The anchor is therefore `retry_topic-backoff-timestamp`: when the last attempt
-actually ran. That attempt is recent, and because Spring already retried the
-message several times, the last attempt reproduces the same failure -- which is
-why this system never needs to replay a packet to generate evidence.
+* `kafka_original-timestamp` -- when the original message was produced. The
+  furthest in the past; the failure may have happened hours or days later
+  after multiple retries.
 
-Pure functions, no I/O.
+* `retry_topic-original-timestamp` -- when Spring's retry mechanism first
+  received the message. Always in the past, and close to when the failures
+  started occurring.
+
+* `retry_topic-backoff-timestamp` -- Spring's scheduled next retry time. In
+  the reference sample this was in the past (the retry had already fired and
+  failed), making it the most accurate "when the last attempt ran". But when
+  a message is dead-lettered before the scheduled retry fires, this
+  timestamp is in the future -- and anchoring a log window on a future time
+  searches the wrong window entirely.
+
+The anchor is therefore selected at derivation time: the backoff timestamp
+when it is in the past (the normal, most-accurate case), falling back to the
+retry-original timestamp when the backoff is in the future or absent.
+
+Pure functions, no I/O (other than reading the clock for `now`).
 """
 import os
 from dataclasses import dataclass
@@ -60,9 +70,9 @@ class LogWindow:
     #: True when the window is older than `DLT_MAX_LOG_AGE_SECONDS`; the
     #: caller skips the fetch and records a LOGS_TOO_OLD gap.
     too_old: bool
-    #: True when `retry_topic-backoff-timestamp` was missing and the anchor
-    #: fell back to the original produce time. A degradation, not an
-    #: equivalence -- see the module docstring.
+    #: True when the anchor fell back from the backoff timestamp to the
+    #: retry-original or original-produce timestamp. A degradation, not an
+    #: equivalence -- the fallback is further from the actual failure time.
     anchor_is_fallback: bool
     age_seconds: float
 
@@ -93,8 +103,9 @@ class LogWindow:
         the failure.
         """
         now = now_ms if now_ms is not None else _now_ms()
+        lookback_ms = max(now - self.start_ms, (lead_seconds() + trail_seconds()) * 1000)
         return TimeWindow(
-            hours=max(0.0, (now - self.start_ms) / 3_600_000),
+            hours=lookback_ms / 3_600_000,
             until=datetime.fromtimestamp(self.end_ms / 1000, tz=timezone.utc),
         )
 
@@ -107,6 +118,33 @@ def _now_ms() -> int:
     return int(datetime.now(timezone.utc).timestamp() * 1000)
 
 
+def _select_anchor(headers: DltHeaders, now_ms: int) -> tuple:
+    """Choose the best past timestamp to anchor the log window on.
+
+    Returns (anchor_ms, is_fallback). Preference order:
+      1. backoff_timestamp_ms, when it is in the past -- the most recent
+         attempt, and the most accurate "when the failure happened".
+      2. retry_original_timestamp_ms -- when the retry flow started. Always
+         in the past, but may be hours before the final attempt.
+      3. original_timestamp_ms -- when the original message was produced.
+         The furthest from the failure; a last resort.
+
+    A future backoff timestamp means the message was dead-lettered before the
+    scheduled retry fired, so the backoff time does not correspond to any
+    actual processing. The retry-original timestamp is the next best thing.
+    """
+    if headers.backoff_timestamp_ms is not None and headers.backoff_timestamp_ms <= now_ms:
+        return headers.backoff_timestamp_ms, False
+
+    if headers.retry_original_timestamp_ms is not None:
+        return headers.retry_original_timestamp_ms, True
+
+    if headers.original_timestamp_ms is not None:
+        return headers.original_timestamp_ms, True
+
+    return None, True
+
+
 def derive_window(headers: DltHeaders,
                   now_ms: Optional[int] = None) -> Optional[LogWindow]:
     """Build the log window for a dead-lettered record.
@@ -114,11 +152,11 @@ def derive_window(headers: DltHeaders,
     Returns None when the headers carry no usable timestamp at all -- the
     caller then skips the log lane and records the case header-only.
     """
-    anchor = headers.last_attempt_ms
+    now = now_ms if now_ms is not None else _now_ms()
+    anchor, is_fallback = _select_anchor(headers, now)
     if anchor is None:
         return None
 
-    now = now_ms if now_ms is not None else _now_ms()
     start = anchor - lead_seconds() * 1000
     end = anchor + trail_seconds() * 1000
     age = max(0.0, (now - start) / 1000.0)
@@ -128,6 +166,6 @@ def derive_window(headers: DltHeaders,
         start_ms=start,
         end_ms=end,
         too_old=age > max_age_seconds(),
-        anchor_is_fallback=headers.anchor_is_fallback,
+        anchor_is_fallback=is_fallback,
         age_seconds=age,
     )

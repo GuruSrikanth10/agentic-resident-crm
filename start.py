@@ -64,9 +64,70 @@ def main():
     print("Starting the API server (main_api.py).")
     _children.append(("API", subprocess.Popen([sys.executable, "src/main_api.py"])))
 
-    # Give the API a moment to bind its port before either consumer starts
-    # forwarding to it.
-    time.sleep(8)
+    # Wait for the API to bind its port, then wait for the corpus download
+    # to complete (if the opencode harness is enabled).
+    #
+    # Uses http.client directly instead of urllib to completely bypass
+    # proxy env vars — on Windows, urllib's ProxyHandler({"http": None})
+    # does not reliably bypass the corporate proxy for localhost.
+    import http.client
+    import socket
+
+    def _http_get(path):
+        """GET /path on 127.0.0.1:8000. Returns (status_code, body) or (None, error)."""
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", 8000, timeout=2)
+            conn.request("GET", path)
+            resp = conn.getresponse()
+            body = resp.read().decode("utf-8", errors="replace")
+            code = resp.status
+            conn.close()
+            return code, body
+        except Exception as e:
+            return None, str(e)
+
+    # Step 1: wait for the API to bind its port
+    api_ready = False
+    for _ in range(120):
+        code, _ = _http_get("/health")
+        if code == 200:
+            api_ready = True
+            break
+        time.sleep(1)
+
+    if not api_ready:
+        print("WARNING: API did not bind within 120s; starting consumers anyway.")
+    else:
+        print("API server is listening.")
+
+    # Step 2: if the opencode harness is enabled, wait for the corpus
+    # download AND the opencode server to be ready. The /ready endpoint
+    # returns 503 "Downloading documentation corpus" while downloading,
+    # 503 "Starting opencode server" while the server boots, and 503 with
+    # other details for Kafka/checkpoint issues (which we accept).
+    harness_enabled = os.environ.get("USE_OPENCODE_HARNESS", "false").lower() == "true"
+    if harness_enabled:
+        print("Waiting for documentation corpus and opencode server...")
+        harness_ready = False
+        for i in range(300):
+            code, body = _http_get("/ready")
+            if code == 200:
+                harness_ready = True
+                print("API ready (corpus + opencode + services).")
+                break
+            if code == 503:
+                # "Downloading" and "Starting opencode" mean not ready
+                # Any other 503 (Kafka, checkpoint) is fine — consumers handle it
+                if "Downloading" not in body and "Starting opencode" not in body:
+                    harness_ready = True
+                    print("Corpus and opencode ready; starting consumers.")
+                    break
+            if i % 15 == 0:
+                print(f"  ...still waiting ({i*2}s). /ready: {code} {body[:80] if body else ''}")
+            time.sleep(2)
+
+        if not harness_ready:
+            print("WARNING: Harness did not become ready within 600s; starting consumers anyway.")
 
     print("Starting the fast consumer (fast_consumer.py) -- rejections -> /fetch-logs.")
     _children.append(("FastConsumer", subprocess.Popen([sys.executable, "src/fast_consumer.py"])))

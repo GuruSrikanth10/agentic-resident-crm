@@ -176,6 +176,14 @@ def _open_stream(target: PodTarget, window: TimeWindow, previous: bool):
     if api is None:
         raise RuntimeError("Kubernetes client unavailable")
 
+    # since_seconds=0 is rejected by the API (422 "must be greater than 0").
+    # A zero arises when the window start is in the future -- a DLT message
+    # whose retry_topic-backoff-timestamp hasn't elapsed yet, or clock skew
+    # between the message source and this process. Flooring at 1 second makes
+    # the call valid; the identifier filter and the window's `until` bound
+    # still narrow the result to the relevant lines.
+    since_seconds = max(1, window.seconds)
+
     # Retries 429/5xx with jitter, never retries 403/404/400 (F8). Jitter
     # matters here specifically: K8S_FETCH_CONCURRENCY workers retrying a 429
     # in lockstep is a self-inflicted herd against an API server that has
@@ -185,7 +193,7 @@ def _open_stream(target: PodTarget, window: TimeWindow, previous: bool):
         name=target.pod_name,
         namespace=target.namespace,
         container=target.container,
-        since_seconds=window.seconds,
+        since_seconds=since_seconds,
         timestamps=True,
         limit_bytes=max_bytes,
         _request_timeout=_request_timeout(),
