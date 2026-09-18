@@ -20,11 +20,26 @@ if [ "${USE_OPENCODE_HARNESS}" = "true" ]; then
     # Read the LLM endpoint and key from the same env vars llm_utils.py uses.
     BASE_URL="${LLM_BASE_URL_COMPLEX:-http://localhost:8000/v1}"
     API_KEY="${LLM_API_KEY_COMPLEX:-dummy}"
-    MODEL="${OPENCODE_MODEL:-opencode/glm-5.2-fp8}"
+
+    # MUST match opencode_runner.DEFAULT_MODEL exactly. The first segment is
+    # the provider key: this script writes the provider block under that name,
+    # and opencode_runner asks for a model under that name. Two different
+    # defaults means the config declares a provider nobody requests, every
+    # harness task fails, and every node falls back to the direct LLM -- which
+    # looks like the harness doing nothing rather than like a broken config.
+    # tests/test_opencode_harness.py asserts the two stay equal.
+    MODEL="${OPENCODE_MODEL:-uidai/glm-5.2-fp8}"
 
     # The model id in OPENCODE_MODEL is "provider/model" — split on "/".
     PROVIDER="${MODEL%%/*}"
     MODEL_NAME="${MODEL#*/}"
+
+    if [ "${PROVIDER}" = "${MODEL}" ]; then
+        echo "ERROR: OPENCODE_MODEL must be 'provider/model', got '${MODEL}'." >&2
+        echo "       Without a provider segment the generated config declares" >&2
+        echo "       a provider the harness never asks for." >&2
+        exit 1
+    fi
 
     cat > "${CONFIG_DIR}/config.json" <<EOF
 {

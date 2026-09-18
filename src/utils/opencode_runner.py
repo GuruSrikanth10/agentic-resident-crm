@@ -18,7 +18,6 @@ import os
 import re
 import secrets
 import subprocess
-import tempfile
 import threading
 import time
 from typing import Any, Dict, Optional
@@ -33,7 +32,23 @@ ENV_BINARY = "OPENCODE_BINARY"
 ENV_MODEL = "OPENCODE_MODEL"
 ENV_DISABLE = "USE_OPENCODE_HARNESS"
 
+#: The model every task requests when OPENCODE_MODEL is unset.
+#:
+#: The first segment is the PROVIDER key, and entrypoint.sh writes the
+#: provider block in ~/.config/opencode/config.json under that same key. The
+#: two defaults must therefore be identical: if they disagree, the generated
+#: config declares a provider nothing asks for, every task fails, and every
+#: node falls back to the direct LLM -- a silent degradation that reads as
+#: "the harness is doing nothing" rather than as a broken configuration.
+#: tests/test_opencode_harness.py asserts they stay equal.
 DEFAULT_MODEL = "uidai/glm-5.2-fp8"
+
+#: Wall-clock budget for one task. Read via _task_timeout(), which is the
+#: ONLY reader of OPENCODE_TASK_TIMEOUT_SECONDS: the four harness call sites
+#: pass no timeout of their own, so all four agree by construction. They did
+#: not always -- the rejection Investigator carried its own 120s default while
+#: the other three carried 300s, putting the shortest budget on the task that
+#: reads the documentation corpus from cold.
 DEFAULT_TIMEOUT_SECONDS = 300
 
 

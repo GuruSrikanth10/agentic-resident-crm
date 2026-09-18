@@ -19,6 +19,8 @@ docs_cache.tmp
 *.db-shm
 *.db-wal
 
+#Pdf maker
+tools/pdf
 
 # filelock artifacts
 *.lock

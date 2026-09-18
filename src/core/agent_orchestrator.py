@@ -2,6 +2,7 @@ import os
 import json
 import contextvars
 import threading
+import time
 from typing import TypedDict
 from langgraph.graph import StateGraph, START, END
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -552,10 +553,15 @@ def _build_agent():
             )
 
             try:
+                # No `timeout=` here: opencode_runner._task_timeout() is the
+                # single reader of OPENCODE_TASK_TIMEOUT_SECONDS. This site used
+                # to default to 120s while the other three defaulted to 300s, so
+                # with the variable unset the heaviest task of the four -- the
+                # one that reads the docs corpus from cold -- got the shortest
+                # budget, timed out, and fell back to the direct LLM.
                 result = opencode_runner.run_task_json(
                     prompt=harness_prompt,
                     output_path=output_path,
-                    timeout=int(os.environ.get("OPENCODE_TASK_TIMEOUT_SECONDS", "120")),
                 )
                 investigation = result["result"].get("investigation", "")
                 log.info("Investigator finished (opencode harness)",
@@ -670,7 +676,6 @@ def _build_agent():
                 result = opencode_runner.run_task_json(
                     prompt=harness_prompt,
                     output_path=output_path,
-                    timeout=int(os.environ.get("OPENCODE_TASK_TIMEOUT_SECONDS", "300")),
                 )
                 verdict = result["result"].get("verdict", "REJECTED").upper()
                 feedback = result["result"].get("feedback", "")

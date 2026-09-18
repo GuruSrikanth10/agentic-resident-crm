@@ -208,7 +208,6 @@ def _build_dlt_agent():
                 result = opencode_runner.run_task_json(
                     prompt=harness_prompt,
                     output_path=output_path,
-                    timeout=int(os.environ.get("OPENCODE_TASK_TIMEOUT_SECONDS", "300")),
                 )
                 investigation = result["result"].get("investigation", "")
                 log.info("DLT investigator finished (opencode harness)",
@@ -272,7 +271,6 @@ def _build_dlt_agent():
                 result = opencode_runner.run_task_json(
                     prompt=reviewer_harness_prompt,
                     output_path=output_path,
-                    timeout=int(os.environ.get("OPENCODE_TASK_TIMEOUT_SECONDS", "300")),
                 )
                 verdict = result["result"].get("verdict", "REJECTED").upper()
                 feedback = result["result"].get("feedback", "")

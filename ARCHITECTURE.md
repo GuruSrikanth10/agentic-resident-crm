@@ -234,7 +234,7 @@ flowchart TD
 
     subgraph SLOW["slow_consumer.py -- CONSUMER_ROLE=slow, same module"]
         K2 --> POLL2["identical guards:<br/>poison pill, REJECTED, terminal dedupe"]
-        POLL2 --> POST2["POST /analyze-rejection<br/>PACKET_TIMEOUT_SECONDS=500"]
+        POLL2 --> POST2["POST /analyze-rejection<br/>PACKET_TIMEOUT_SECONDS=300"]
     end
 
     subgraph AN["POST /analyze-rejection -- _investigate_packet, async"]
@@ -256,12 +256,10 @@ flowchart TD
         OUT -->|"unhandled exception"| DQ["publish_to_dlq +<br/>save_terminal DLQ"]
         OUT -->|"returned a state"| PARSE{"parse_synthesis<br/>against the contract"}
         PARSE -->|invalid| FSP["FAILED_SYNTHESIS_PARSE<br/>evidence kept, verdict replaced"]
-        PARSE -->|valid| LOGSZ{"raw logs size"}
-        LOGSZ -->|"none / 'Log fetching disabled.'"| BUILD
-        LOGSZ -->|"5000 chars or fewer"| BUILD["build casebook"]
-        LOGSZ -->|"over 5000 chars"| S3{"upload_logs_to_s3"}
-        S3 -->|"URL"| BUILD
-        S3 -->|"None: no bucket or failed"| TRUNC["truncate to 5000 + notice"] --> BUILD
+        PARSE -->|valid| LOGSZ{"raw logs present?"}
+        LOGSZ -->|"none / 'Log fetching disabled.'"| NOLOG["rejection_logs.path =<br/>'No logs found'"] --> BUILD
+        LOGSZ -->|yes| ART2["save_artifact supported_logs.txt<br/>through CasebookStorage -- no size threshold"]
+        ART2 --> BUILD["build casebook<br/>rejection_logs.path = 'supported_logs.txt'"]
         FSP --> BUILD
         BUILD --> LATE{"terminal_status in<br/>PROTECTED_TERMINAL_STATUSES<br/>FAILED_TIMEOUT, DLQ?"}
         LATE -->|"yes: another actor won"| DISC["discard late result"]
@@ -280,7 +278,7 @@ flowchart TD
     class PP,DLQ1,DQ,FT dlq
     class SK1,SK2,AP1,AP2,BUSY,DISC,KEEP,NOSAVE skip
     class SAVE,Q200,RC1,RC2,CLEAN good
-    class SAVEA,WSTAT,STUB store
+    class SAVEA,WSTAT,STUB,ART2 store
     class E403,E429,E500,FSP term
 ```
 
@@ -366,15 +364,17 @@ flowchart TD
     NONE["no source returned logs"] --> EMPTY["'No logs found for ID: X'<br/>+ gap banner"]
 
     WIN --> RED2["redact before ANY persistence"]
-    RED2 --> RAW["save raw_logs.txt"]
-    RAW --> SIZE{"record count under 50?"}
+    RED2 --> RAW["save raw_logs.txt<br/>the complete audit copy"]
+    RAW --> NF["Stage 2.5 noise floor<br/>drop below LOG_MIN_LEVEL, collapse SQL<br/>kept if it would empty the trace"]
+    NF --> SIZE{"record count under 50?"}
     SIZE -->|yes| DIRECT["emit full trace verbatim"]
     SIZE -->|no| BR{"any level == ERROR?"}
-    BR -->|"yes: stuck path"| ERRP["ERROR + 200 lines before<br/>+ 200 lines after"]
+    BR -->|"yes: stuck path"| ERRP["ERROR + 200 lines before<br/>+ 200 lines after,<br/>repeats folded at 3x"]
     BR -->|"no: approve/reject path"| CLU["Drain3 clustering<br/>+ evidence guardrails"]
-    DIRECT --> RDX
-    ERRP --> RDX
-    CLU --> RDX["save reduced_logs.txt<br/>banner FIRST if gaps exist"]
+    DIRECT --> CAPC
+    ERRP --> CAPC
+    CLU --> CAPC["trim middle to<br/>LOG_MAX_REDUCED_CHARS"]
+    CAPC --> RDX["save reduced_logs.txt<br/>banner FIRST if gaps exist"]
     RDX --> PERSIST["save_artifact fetched_logs.txt"]
     EMPTY --> PERSIST
     DIS --> PERSIST
@@ -625,6 +625,8 @@ agentic-resident-crm/
 ├── .agents/
 │   └── AGENTS.md                   # Agentic configurations and behavioral rules
 ├── AGENTS.md                        # opencode agent instructions (Rejection Investigator)
+├── README.md                       # Copy of this document for the repo landing page. Regenerate
+│                                   #   it from ARCHITECTURE.md; it currently lags by one revision.
 ├── .env.example                    # Annotated env-var template (the .env itself is gitignored)
 ├── agent_policy_context.md         # Foundational business logic & rules mapping for AI agents
 ├── DLT_PLAN.md                     # Dead-letter topic (DLT) analysis lane: engineering design
@@ -718,7 +720,8 @@ agentic-resident-crm/
 │   ├── dlt_consumer.py             # DLT consumer entry point: dead-letter topic -> /fetch-dlt-logs
 │   ├── dlt_analysis_consumer.py    # DLT analysis entry point: DLT queue -> /analyze-dlt
 │   ├── api/
-│   │   ├── routes.py               # REST endpoints (/fetch-logs, /analyze-rejection, /process-rejection, /health, /ready)
+│   │   ├── routes.py               # REST endpoints (/fetch-logs, /analyze-rejection, /process-rejection,
+│   │   │                           #   /health, /ready, /metrics, /outcome/{event_id})
 │   │   └── dlt_routes.py           # DLT endpoints (/fetch-dlt-logs, /analyze-dlt)
 │   ├── core/
 │   │   ├── agent_orchestrator.py   # LangGraph StateGraph build + LLM provisioning
@@ -831,7 +834,8 @@ agentic-resident-crm/
 │       ├── resilience.py           # tenacity retries + pybreaker circuit breakers
 │       ├── dlq_publisher.py        # Dead Letter Queue producer
 │       ├── analysis_queue_publisher.py # Publishes fetched payloads onto the analysis queue
-│       ├── s3_uploader.py          # Uploads large Elastic logs to S3
+│       ├── s3_uploader.py          # Standalone S3 log upload. NOT on the request path any more --
+│       │                           #   logs go through CasebookStorage.save_artifact (section 3.3)
 │       ├── runbook_store.py        # Runbook load/save, TTL cache, fingerprinting, path guard
 │       ├── runbook_validator.py    # Generic-text regex validator (no UUIDs/dates/SRNs)
 │       ├── docs_loader.py          # S3 corpus downloader for the opencode harness (docs_cache/)
@@ -840,13 +844,17 @@ agentic-resident-crm/
 │       ├── prompt_loader.py        # Harness prompt template loader ({{var}} substitution, pluggable backend)
 │       ├── case_cleanup.py         # Local casebook dir cleanup: immediate on terminal + background reaper
 │       └── outcomes.py             # Resolution outcome recording (ground-truth verdict storage)
-├── local_casesheets/               # Generated. Five roots under one storage backend:
+├── docs_cache/                     # Generated: DROA documentation corpus pulled from S3 for the
+│                                   #   opencode harness (DOCS_CACHE_DIR; gitignored, dockerignored)
+├── local_casesheets/               # Generated (LOCAL_CASESHEETS_DIR). Five roots under one backend:
 │                                   #   casebook_<eventId>/  rejection casebooks + logs
 │                                   #   dlt_cases/           DLT casebooks + trace/header artifacts
 │                                   #   dlt_groups/          per-fingerprint records
 │                                   #   dlt_parked_replays/  packets waiting for a deploy (C7)
 │                                   #   pending_replays/     replays awaiting human approval
-└── local_checkpoints/              # Generated: checkpoints.db, drain3_state/, consumer heartbeat
+│                                   # plus _prompts/, harness prompt spill -- not a storage root
+└── local_checkpoints/              # Generated (LOCAL_CHECKPOINTS_DIR): checkpoints.db, drain3_state/,
+                                    #   template_catalog.json, one heartbeat file per consumer role
 ```
 
 ---
@@ -864,7 +872,7 @@ The system manages all operational feature flags, LLM credentials, MySQL databas
 
   | Variable | Derived default | Why the relationship matters |
   | --- | --- | --- |
-  | `AGENT_INVOKE_TIMEOUT_SECONDS` | `PACKET_TIMEOUT_SECONDS - 30` | The server-side budget must expire *before* the consumer's. Set equal (or higher) and both sides time out together: the consumer writes `FAILED_TIMEOUT` and DLQs the message while the API keeps running and later overwrites that verdict with a "successful" casebook. |
+  | `AGENT_INVOKE_TIMEOUT_SECONDS` | `max(PACKET_TIMEOUT_SECONDS - 30, 30)` | The server-side budget must expire *before* the consumer's. Set equal (or higher) and both sides time out together: the consumer writes `FAILED_TIMEOUT` and DLQs the message while the API keeps running and later overwrites that verdict with a "successful" casebook. |
   | `DLT_ANALYZE_TIMEOUT_SECONDS` | `DLT_ANALYSIS_TIMEOUT_SECONDS - 30` | Same invariant for the DLT lane, which inherited the bug the rejection lane had already fixed. |
   | `MAX_CONCURRENT_DLT_ANALYSES` | `MAX_CONCURRENT_INVESTIGATIONS` | The DLT executor is a *sibling* of the rejection lane's, not a share of it, so a DLT backlog cannot starve rejections. |
   | `RATE_LIMIT_PER_MINUTE` | `max(60, MAX_CONCURRENT_INVESTIGATIONS x 20)` | The ceiling tracks the concurrency the API is actually built to serve; a fixed limit throttled this system's own consumer, which forwards every packet from a single IP. |
@@ -903,27 +911,69 @@ can independently explore the DROA-generated service documentation corpus
 architecture.
 
 **Architecture:**
-- A single `opencode serve` process runs for the API's lifetime (started in
-  `main_api.py` lifespan via a daemon thread). Cold boot is ~15s; attached
-  `opencode run --attach` calls take ~3s each.
-- Each investigation/review call sends a task prompt to the server via
-  `opencode run --attach --dir <repo_root> <prompt>`. The prompt is loaded from
-  a template file in `src/prompts/harness/` via `prompt_loader.render()`, which
-  substitutes `{{variable}}` placeholders (event_id, output_path, etc.).
+- A single `opencode serve` process runs for the API's lifetime, started in
+  `main_api.py` lifespan on a daemon thread so the API binds its port
+  immediately rather than waiting out a 15-30s boot behind a socket that is
+  not yet accepting connections. It listens on `127.0.0.1:4096` and is
+  guarded by a per-process `secrets.token_urlsafe(24)` password passed as
+  `OPENCODE_SERVER_PASSWORD`. Cold boot is ~15s; attached calls take ~3s.
+  `NO_PROXY` is force-extended with `127.0.0.1,localhost` on both the server
+  and every task, because a corporate proxy that intercepts loopback returns
+  an HTML error page that surfaces as "Request is not supported by this
+  version of OpenCode Server".
+- Each investigation/review call runs
+  `opencode run --attach <url> --auto --model <OPENCODE_MODEL> --dir <repo_root> <prompt>`
+  as a fresh subprocess -- a fresh conversation, so no context bleeds between
+  cases even though the server is shared. The prompt is loaded from a template
+  file in `src/prompts/harness/` via `prompt_loader.render()`, which
+  substitutes `{{variable}}` placeholders (`event_id`/`ref_id`, `output_path`,
+  `etype_display`) and raises `KeyError` on any placeholder left unfilled.
+- **The agent is sandboxed by capability, not by trust.** `OPENCODE_PERMISSION`
+  denies `bash` and `webfetch` outright, so the agent's whole world is the
+  filesystem it can `Glob`/`Grep`/`Read` and the one file it is told to
+  `Write`. It cannot shell out and it cannot reach the network.
 - The agent reads context files (`context.json`, `supported_logs.txt`,
   `investigation_text.txt`) written to the local `casebook_{event_id}/`
   directory by the orchestrator, plus the documentation corpus in
-  `docs_cache/`, and writes its JSON output to a specified file path.
-- On any harness failure (timeout, subprocess error, server not ready), the
-  node falls back to the direct `ChatOpenAI` path -- so a harness outage
-  degrades rather than breaks the pipeline.
+  `docs_cache/`, and writes its JSON output to a specified file path. Two
+  accommodations for a model that does not always follow instructions: a
+  prompt over 30,000 characters is spilled to
+  `local_casesheets/_prompts/<output>.prompt.txt` and replaced by an
+  instruction to read it (Windows command-line limit), and if the expected
+  output file is absent the runner accepts any other `.json` in the same
+  directory whose mtime is newer than the task's start.
+- **One task timeout, one reader.** `OPENCODE_TASK_TIMEOUT_SECONDS` is read
+  only by `opencode_runner._task_timeout()` (default
+  `DEFAULT_TIMEOUT_SECONDS`, 300s); none of the four harness call sites passes
+  a `timeout=` of its own, so all four agree by construction. They did not
+  always: the rejection Investigator carried a 120s fallback while the other
+  three carried 300s, putting the shortest budget on the heaviest task -- the
+  one that reads the corpus from cold -- so it timed out first and degraded to
+  the direct LLM. `tests/test_opencode_harness.py` parses both orchestrators
+  and fails if any call site reintroduces its own timeout.
+- On any harness failure (timeout, subprocess error, server not ready, output
+  that is not JSON), the node logs a warning and falls through to the direct
+  `ChatOpenAI` path -- so a harness outage degrades rather than breaks the
+  pipeline. The harness is skipped outright on an Investigator **retry** in
+  both lanes: a retry's whole purpose is to carry the Reviewer's feedback
+  back in, which the file-based contract has no slot for. Reviewers use the
+  harness on every pass.
 
 **Corpus download (`src/utils/docs_loader.py`):**
-The DROA documentation corpus is downloaded from S3
-(`DOCS_S3_PREFIX` on `CASEBOOK_S3_BUCKET`) to `docs_cache/` at startup,
-concurrently with the opencode server boot. The `/ready` endpoint returns 503
-until both the corpus download and the opencode server are ready, so consumers
-do not forward packets before the harness can serve them.
+The DROA documentation corpus is downloaded from S3 (`DOCS_S3_PREFIX`,
+default `nalanda/corpus`, on `CASEBOOK_S3_BUCKET` falling back to
+`S3_LOGS_BUCKET`) into `DOCS_CACHE_DIR` (default `docs_cache/`). It downloads
+into `docs_cache.tmp/` and renames on success, so a failed or partial
+download never leaves the agent reading half a corpus. The two startup steps
+are **sequential, not concurrent**: the background thread downloads the corpus
+and only then starts `opencode serve`, which is why `/ready` reports them as
+two distinct 503 reasons ("Downloading documentation corpus", then "Starting
+opencode server") and why `start.py` waits on both before launching consumers.
+If S3 is unconfigured or unreachable the download is skipped or abandoned and
+whatever is already on disk is used -- the corpus changes on deploy, not per
+message, so a stale copy beats no copy. Each harness node additionally polls
+`corpus_available()` for up to 60s before giving up and proceeding without
+docs, which covers a packet that arrives while a download is still running.
 
 **Prompt templates (`src/utils/prompt_loader.py`):**
 Harness instruction prompts live as `.md` files in `src/prompts/harness/`
@@ -933,6 +983,31 @@ placeholders via regex. The backend (`_load_text`) is pluggable for future
 Langfuse integration without caller changes. Templates are included in
 `compute_prompt_fingerprint()` so prompt changes are tracked in every
 casebook's provenance block.
+
+**Provider configuration lives outside the process.**
+`opencode_runner._harness_config()` deliberately returns `{}` -- sending
+opencode a partial config via `OPENCODE_CONFIG_CONTENT` *replaces* the
+operator's config rather than merging into it, losing the `baseURL` and
+producing the same "Request is not supported by this version of OpenCode
+Server" error a proxied loopback does. So the provider block (npm package,
+`baseURL`, API key, model names) must be in `~/.config/opencode/config.json`.
+In a container `entrypoint.sh` writes that file from the runtime environment
+-- reading `LLM_BASE_URL_COMPLEX` and `LLM_API_KEY_COMPLEX`, the same
+variables `llm_utils.py` reads -- before exec'ing `start.py`, because the LLM
+endpoint comes from a ConfigMap at run time and cannot be baked into the
+image. It writes nothing at all unless `USE_OPENCODE_HARNESS=true`.
+
+> **`OPENCODE_MODEL`'s default is shared across the language boundary.**
+> The first path segment is the *provider name*: `entrypoint.sh` uses it as
+> the key of the provider block it writes, and `opencode_runner` asks for a
+> model under that same key. The two defaults are therefore pinned equal at
+> `uidai/glm-5.2-fp8` -- they were not, and the container's default declared a
+> provider called `opencode` while every task asked for one called `uidai`,
+> which no config defined. Every task failed and every node fell back to the
+> direct LLM, which reads as the harness doing nothing rather than as a broken
+> configuration. `tests/test_opencode_harness.py` now asserts the two stay
+> equal, and `entrypoint.sh` refuses to boot on an `OPENCODE_MODEL` with no
+> `provider/` segment rather than writing a config that cannot work.
 
 **Not on the harness path:** The Log Filter node (mechanical text operation),
 the Synthesis node (future work), and the DLT Synthesis node (future work)
@@ -947,12 +1022,14 @@ Instead of relying on an unpredictable LLM to orchestrate the subagents, the sys
 4. **Reviewer Node**: A distinct React agent, built once at graph-construction time (not per review) and bound to the `simple` LLM tier, that acts as a strict QC validator holding one tool (`add_learning_rule`). The tool no longer closes over the current `event_id`/investigation text per call -- it reads them from a pair of `contextvars.ContextVar`s that `reviewer_node` sets before each invocation, since each packet already runs on its own dedicated thread. When `USE_OPENCODE_HARNESS=true`, the node writes `investigation_text.txt` and renders the `RejectionReviewer` harness prompt template, giving the reviewer agent the same corpus access to verify the investigator's claims against service documentation. Falls back to direct LLM on harness failure.
 5. **Conditional Router & Loop Guard**: A pure Python control edge that checks the Reviewer's output via `is_reviewer_approved()`: the (markdown/whitespace-stripped) feedback must *start with* the literal token `APPROVED`, not merely contain it -- this closes the "NOT APPROVED"/"DISAPPROVED" false-positive that a substring match would produce. Otherwise it increments `retry_count`; once `retry_count >= MAX_INVESTIGATION_RETRIES` it routes to the `escalate` node (preventing infinite LLM loops), else it loops back to the Investigator Node. A fresh (non-resumed) invocation always starts `retry_count` at 0, so a redelivered packet can never resume a stale checkpoint with the retry budget already exhausted.
 6. **Synthesis Node**: The final agent that takes the approved, heavily vetted technical diagnosis and translates it into a human-readable JSON `Casebook`. It holds the `queue_for_replay` tool. In shadow mode, it also compares its output to the runbook's pre-built resolution and logs a warning on any `action` divergence.
-7. **Log Processor & S3 Uploader**: After the graph completes, `routes.py` structures the final casebook's `packet_status.rejection_data.rejection_logs` field into an object containing `path` and `gaps`. `upload_logs_to_s3()` pushes raw logs to AWS S3 via `boto3` (`src/utils/s3_uploader.py`), and the resulting `s3://...` URL is embedded in the `path` field. If `S3_LOGS_BUCKET` is unset or upload fails, `path` instead embeds a local file reference rather than losing the trace. The `gaps` field explicitly parses and captures any missing timeframe banners from the raw trace so operators retain full context without inline clutter.
+7. **Log Processor**: After the graph completes, `routes.py` structures the final casebook's `packet_status.rejection_data.rejection_logs` field into an object containing `path` and `gaps`. The trace itself is written through `CasebookStorage.save_artifact(event_id, "supported_logs.txt", ...)` and `path` records the **relative** name `"supported_logs.txt"`, so the evidence travels with the casebook and resolves identically on local disk and on S3. There is no size threshold and no truncation: whatever was fetched is persisted whole. When no logs were obtained (or `ENABLE_LOG_FETCHING=false`), `path` is the literal string `"No logs found"` and `gaps` is `null`. The `gaps` field carries the evidence-gap banner lifted out of the raw trace (matched on `BANNER_HEADER`/`BANNER_FOOTER` from `k8s/gaps.py`) so operators retain the incompleteness warning without inline clutter.
+
+   > **`upload_logs_to_s3()` is no longer on this path.** `src/utils/s3_uploader.py` still exists and still works, but nothing in `src/` calls it -- only its own tests do. Routing the trace through the storage abstraction instead means a deployment on `CASEBOOK_STORAGE_BACKEND=s3` already lands the logs in S3, beside the casebook that cites them, under one set of credentials and one retention policy. `S3_LOGS_BUCKET` survives only as a fallback name for `CASEBOOK_S3_BUCKET` (in `config_validator` and `docs_loader`).
 
 ### 3.4 Resilience & Hardening (Phase 1 & 2)
 The architecture incorporates several resilience mechanisms to prevent runaway costs, silent failures, file corruption, and pipeline deadlocks:
-- **Idempotency & Staleness Guards**: The API intercepts requests and validates against the `CasebookStorage` interface. `IN_PROGRESS` stubs are written immediately to a separate `status.json` file to prevent duplicate runs without polluting the final `casebook.json`. Upon successful completion, `status.json` is overwritten with the terminal status. If an `IN_PROGRESS` stub goes stale (exceeding `MAX_IN_PROGRESS_AGE_SECONDS`), the pipeline safely resumes from a LangGraph checkpoint or fresh start. Terminal statuses include `COMPLETED`, `REJECTED`, `NEEDS_MANUAL_REVIEW`, `FAILED_PERMANENT`, `DLQ`, and `FAILED_TIMEOUT`. `POST /fetch-logs` writes a non-terminal `LOGS_FETCHED` status ahead of `IN_PROGRESS` (section 3.11); it only ever advances `status.json` from absent/`LOGS_FETCHED`, never overwriting an `IN_PROGRESS` or terminal status a concurrent `/analyze-rejection` call may already have written, so a redelivered fetch can't hide the marker that `_investigate_packet`'s own dedupe guard depends on.
-- **6-Stage Log Reduction Pipeline (`src/log_pipeline/`)**: Elasticsearch logs are no longer dumped raw into the LLM context. Instead, they pass through a production-grade pipeline: Stage 1 (source-filtered fetch with `search_after` and an `_id` tiebreaker for broad ES version compatibility, a hard `LOG_MAX_DOCUMENTS` cap, TLS verification on by default (`ES_VERIFY_CERTS`), and local Kibana CSV mock support via `ES_MOCK_FILE` for offline testing), Stage 2 (branch on ERROR -- stuck packets skip clustering, with both a leading *and* trailing context window so a cascading failure can't pull in the entire trace), Stage 3 (Drain3 clustering with file-persisted state for stable template IDs, held as a process-wide `TemplateMiner` singleton so the state file is only read/deserialized once per process rather than per packet, serialized by a thread lock + cross-process `FileLock` so concurrent packets can't corrupt the shared parse tree, and scoped to emit only the clusters this call's own logs actually matched -- never another packet's templates), and Stage 4 (evidence assembly guardrails enforcing decision-vocabulary regex matches, rare-template retention, and flow-boundary context). An offline Stage 0 catalog (`build_catalog.py`) classifies templates as boilerplate/informative/decision-marker and flags an implausibly high boilerplate share, and a Stage 6 eval harness (`eval_harness.py`) validates pipeline accuracy before production use.
+- **Idempotency & Staleness Guards**: The API intercepts requests and validates against the `CasebookStorage` interface. `IN_PROGRESS` stubs are written immediately to a separate `status.json` file to prevent duplicate runs without polluting the final `casebook.json`. Upon successful completion, `status.json` is overwritten with the terminal status. If an `IN_PROGRESS` stub goes stale (exceeding `MAX_IN_PROGRESS_AGE_SECONDS`), the pipeline safely resumes from a LangGraph checkpoint or fresh start. `TERMINAL_STATUSES` (`src/storage/base.py`, the single definition the routes, the consumer and the storage backends all import) is `COMPLETED`, `REJECTED`, `NEEDS_MANUAL_REVIEW`, `FAILED_PERMANENT`, `DLQ`, `FAILED_TIMEOUT`, `FAILED_SYNTHESIS_PARSE` (the agents breached the Synthesis contract even after the repair attempt -- named distinctly so it is never confused with a packet they genuinely could not classify) and `FAILED_SHUTDOWN` (the API stopped mid-investigation; terminal so the packet is not stranded at `IN_PROGRESS`, and redelivered anyway because its offset never committed). `PROTECTED_TERMINAL_STATUSES` -- the subset a late-finishing run may never overwrite -- is `FAILED_TIMEOUT` and `DLQ`. `POST /fetch-logs` writes a non-terminal `LOGS_FETCHED` status ahead of `IN_PROGRESS` (section 3.11); it only ever advances `status.json` from absent/`LOGS_FETCHED`, never overwriting an `IN_PROGRESS` or terminal status a concurrent `/analyze-rejection` call may already have written, so a redelivered fetch can't hide the marker that `_investigate_packet`'s own dedupe guard depends on.
+- **Log Reduction Pipeline (`src/log_pipeline/`, section 3.6)**: Fetched logs are no longer dumped raw into the LLM context. Instead, they pass through a production-grade pipeline: Stage 1 (source-filtered fetch with `search_after` and an `_id` tiebreaker for broad ES version compatibility, a hard `LOG_MAX_DOCUMENTS` cap, TLS verification on by default (`ES_VERIFY_CERTS`), and local Kibana CSV mock support via `ES_MOCK_FILE` for offline testing), Stage 2 (branch on ERROR -- stuck packets skip clustering, with both a leading *and* trailing context window so a cascading failure can't pull in the entire trace), Stage 2.5 (a severity floor and SQL-column collapse applied only to the model's copy, after `raw_logs.txt` is written), Stage 3 (Drain3 clustering with file-persisted state for stable template IDs, held as a process-wide `TemplateMiner` singleton so the state file is only read/deserialized once per process rather than per packet, serialized by a thread lock + cross-process `FileLock` so concurrent packets can't corrupt the shared parse tree, and scoped to emit only the clusters this call's own logs actually matched -- never another packet's templates), and Stage 4 (evidence assembly guardrails enforcing decision-vocabulary regex matches, rare-template retention, and flow-boundary context, each bounded so an exemption cannot make the output larger than its input). An offline Stage 0 catalog (`build_catalog.py`) classifies templates as boilerplate/informative/decision-marker and flags an implausibly high boilerplate share, and a Stage 6 eval harness (`eval_harness.py`) validates pipeline accuracy before production use.
 - **Pluggable Log Sources (`src/log_pipeline/sources/`)**: Stage 1 sits behind a `LogSource` Protocol (mirroring `CasebookStorage`), so Stages 2-4 are source-agnostic -- any source emitting the canonical `LogRecord` (`timestamp`/`level`/`message`/`app_name`, defined in `src/log_pipeline/types.py`) works with Drain3 clustering, the guardrails, the S3 offload, and the casebook wiring unchanged. `ElasticLogSource` wraps the existing fetcher without modifying it, so the `ES_MOCK_FILE` CSV workflow is unchanged. See section 3.10 for the Kubernetes log source and the fallback chain architecture.
 - **Decoupled Fetch/Analyze Consumers, Bounded Concurrency, & At-Least-Once Delivery**: `fast_consumer.py` and `slow_consumer.py` (both thin entry points over `src/utils/kafkaConsumer.py`, selected by `CONSUMER_ROLE`; section 3.11) each isolate their own Kafka polling loop and submit tasks to a `ThreadPoolExecutor` bounded by a `Semaphore` (`MAX_CONCURRENT_INVESTIGATIONS`, sized independently per process). To guarantee At-Least-Once delivery and prevent consumer rebalances during slow AI processing, each consumer is configured with `KAFKA_MAX_POLL_RECORDS` and a high `KAFKA_MAX_POLL_INTERVAL_MS`. Offsets are never committed immediately upon dispatch; instead, an `OffsetTracker` records completions and each poll cycle commits only the safe low-water mark -- the highest offset below which every dispatched message on that partition has completed -- so a batch that finishes out of order can never commit past one still in flight. If a crash or 429 error occurs, the offset is not marked complete, and Kafka safely redelivers the packet.
 - **DLQ, Poison-pill, & Checkpointing**: LangGraph uses `SqliteSaver` (with WAL mode enabled) for scalable crash recovery. Structurally invalid Kafka messages (poison-pills) and unrecoverable pipeline crashes are immediately published to a Dead Letter Queue (`rejected-packets-dlq`) via `dlq_publisher.py`.
@@ -961,9 +1038,9 @@ The architecture incorporates several resilience mechanisms to prevent runaway c
 - **Safe Self-Learning & Drift Checks**: The Reviewer's `add_learning_rule` tool stages suggestions to `src/prompts/pending_rules.jsonl` using `filelock`. A human runs `src/tools/promote_rules.py` (which includes top-level locking and git-status safety checks) to approve and Git-commit the rules; only promoted entries are removed from the pending file, so skipped/errored/concurrently-appended entries survive. Additionally, `src/tools/check_drift.py` detects database schema/policy drift, and distinguishes a genuinely changed schema from a malformed single-column CSV export.
 - **External Call Resilience**: `tenacity` handles exponential backoff retries, and `pybreaker` provides circuit breakers for database, Elasticsearch, LLM, Kubernetes, and Bitbucket calls (`db_breaker`, `es_breaker`, `llm_breaker`, `k8s_breaker`, `bitbucket_breaker` -- all `fail_max=3`, `reset_timeout=60`). Every one is sampled onto the `breaker_state` gauge at scrape time rather than on transition, so a breaker that reset on a timeout doesn't leave a stale "open" reading behind. The two newest are read-only paths whose failure must only ever *degrade* a result: a tripped `k8s_breaker` makes the running image version unknown, and a tripped `bitbucket_breaker` makes a replay-precheck verdict `UNKNOWN` -- neither raises into the analysis lane.
 - **Storage Abstraction & Schema Versioning**: The `CasebookStorage` interface implements retried atomic `.tmp` writes (to safely handle concurrent readers/AV scanners holding the file on Windows) and enforces a `"schema_version"` field on every saved casebook for backwards compatibility.
-- **Structured Logging & Health Checks**: `agent_orchestrator.py`, `tool_registry.py`, `kafkaConsumer.py`, `dlq_publisher.py`, `analysis_queue_publisher.py`, `s3_uploader.py` and the entire `log_pipeline/` package log through the same `structlog` logger as `routes.py` (bound to `event_id` where available) rather than bare `print()`. Verbosity is set by `LOG_LEVEL`. The operator CLIs still print to stdout deliberately -- they are interactive tools, not services. The FastAPI server provides `/health` (reporting both the fast and slow consumers' heartbeats, under `fast_consumer`/`slow_consumer`, plus a top-level `last_heartbeat`/`consumer_alive` alias for the fast consumer that predates the split) and `/ready` endpoints. `/ready` verifies checkpoint store connectivity and Kafka producer reachability (cached for `PRODUCER_HEALTH_TTL_SECONDS`, default 30s). When `USE_OPENCODE_HARNESS=true`, `/ready` additionally waits for the DROA corpus download (`docs_loader.corpus_available()`) and the opencode server (`opencode_runner.server_ready()`), returning 503 with "Downloading documentation corpus" or "Starting opencode server" respectively until both are ready -- so consumers do not forward packets before the harness can serve them. `validate_config()` provides fail-fast configuration validation at boot.
+- **Structured Logging & Health Checks**: `agent_orchestrator.py`, `tool_registry.py`, `kafkaConsumer.py`, `dlq_publisher.py`, `analysis_queue_publisher.py`, `s3_uploader.py` and the entire `log_pipeline/` package log through the same `structlog` logger as `routes.py` (bound to `event_id` where available) rather than bare `print()`. Verbosity is set by `LOG_LEVEL`. The operator CLIs still print to stdout deliberately -- they are interactive tools, not services. The FastAPI server provides `/health` and `/ready`. `/health` reports this process's own `status`/`draining`/`in_flight`/`capacity`, plus a heartbeat block for each of the four consumer roles (`fast_consumer`, `slow_consumer`, `dlt_consumer`, `dlt_analysis_consumer`) and a top-level `last_heartbeat`/`consumer_alive` alias for the fast consumer that predates the split. A heartbeat file that is absent reads as `null`, not `false` -- "unknown", not "dead" -- because a split-pod deployment has no local heartbeat file for any consumer, and the DLT roles are off by default; each consumer answers its own liveness on `CONSUMER_HEALTH_PORT` / `SLOW_CONSUMER_HEALTH_PORT` / `DLT_HEALTH_PORT` / `DLT_ANALYSIS_HEALTH_PORT` instead. `/ready` verifies checkpoint store connectivity and Kafka producer reachability (cached for `PRODUCER_HEALTH_TTL_SECONDS`, default 30s). When `USE_OPENCODE_HARNESS=true`, `/ready` additionally waits for the DROA corpus download (`docs_loader.corpus_available()`) and the opencode server (`opencode_runner.server_ready()`), returning 503 with "Downloading documentation corpus" or "Starting opencode server" respectively until both are ready -- so consumers do not forward packets before the harness can serve them. `validate_config()` provides fail-fast configuration validation at boot.
 - **Agent Caching**: Investigator, Synthesis, and Reviewer React agents are all created once at graph construction time and reused across invocations, avoiding per-packet (and, for the Reviewer, per-retry) LLM handshake overhead.
-- **Local Casebook Cleanup**: Every `save_terminal()` call site -- success, timeout, DLQ, shutdown straggler, consumer-side timeout, and both DLT lanes -- is followed by `cleanup_casebook_dir()`, which removes the local `casebook_{id}/` working directory. This is safe because the terminal casebook is already persisted in the storage backend (S3 or local), and the dedupe check (`storage.exists(..., terminal_only=True)`) reads from that backend, not from local disk. A background reaper daemon (started in `main_api.py` lifespan) scans `LOCAL_CASESHEETS_DIR` every `CASEBOOK_REAPER_INTERVAL_SECONDS` (default 300s) and removes any directory older than `CASEBOOK_LOCAL_TTL_SECONDS` (default 3600s), catching directories left by crashes, OOM kills, or any path where the immediate cleanup did not run. `src/utils/case_cleanup.py`.
+- **Local Casebook Cleanup**: Every `save_terminal()` call site -- success, timeout, DLQ, shutdown straggler, consumer-side timeout, and both DLT lanes -- is followed by `cleanup_casebook_dir()`, which removes the local `casebook_{id}/` working directory. This is safe because the terminal casebook is already persisted in the storage backend (S3 or local), and the dedupe check (`storage.exists(..., terminal_only=True)`) reads from that backend, not from local disk. A background reaper daemon (started in `main_api.py` lifespan) scans `LOCAL_CASESHEETS_DIR` every `CASEBOOK_REAPER_INTERVAL_SECONDS` (default 300s) and removes directories whose mtime is older than `CASEBOOK_LOCAL_TTL_SECONDS` (default 3600s), catching those left by crashes, OOM kills, or any path where the immediate cleanup did not run. It matches **only entries named `casebook_*`**, which is load-bearing rather than incidental: `dlt_cases/`, `dlt_groups/`, `dlt_parked_replays/` and `pending_replays/` sit in the same directory under a local storage backend and are durable state -- a parked replay legitimately waits weeks for a deploy (section 4.4.1), and an unscoped TTL sweep would delete it. Neither layer ever raises: a cleanup failure must not turn a successful case into a failed one. `src/utils/case_cleanup.py`.
 - **Non-Blocking Request Handling**: `/process-rejection` and `/analyze-rejection` are both `async def`; `agent.invoke()` runs on a dedicated `ThreadPoolExecutor` sized to `MAX_CONCURRENT_INVESTIGATIONS`, separate from Starlette's own sync-dispatch threadpool. A multi-minute investigation therefore can't starve `/health`, `/ready`, `/fetch-logs`, or the sync auth/rate-limit dependencies of a worker slot. `/fetch-logs` is deliberately plain `def`, not `async def` -- its bounded I/O runs on Starlette's own threadpool, the same one `/health`/`/ready` use, since it never needs the dedicated executor a multi-minute LLM call does.
 - **Indexed Mock Rule Lookups**: `lookup_rule_by_reason_code` builds a `reason_code -> row positions` index over the mock rules table once (cached for the process lifetime) instead of rescanning and re-casting every row on every lookup; a missing/unreadable mock DB file is also cached so the filesystem isn't re-probed on every call.
 - **Rate Limiter Eviction**: The in-memory IP rate limiter evicts stale entries when it exceeds 1000 tracked IPs to prevent unbounded memory growth.
@@ -977,14 +1054,18 @@ The intelligence of the system relies on a multi-agent hierarchy. Both the Inves
 - **ReviewerAgent**: The auditor. It checks the Investigator's homework to eliminate hallucinations. When the opencode harness is enabled, it independently verifies the Investigator's claims against the same documentation corpus and the case evidence files (`supported_logs.txt`, `context.json`), rather than relying solely on the text passed to it in the prompt.
 - **SynthesisAgent**: The resolution writer. Once the investigation is validated, this agent synthesizes the findings into plain English, categorizes the remediation steps into strict enums (e.g., `NEW_PACKET`, `REPLAY`), and generates the analytical JSON block.
 
-### 3.6 6-Stage Log Reduction Pipeline
-Elasticsearch logs are heavily compressed to prevent LLM context window exhaustion and save tokens, using a production-grade map-reduce and clustering architecture (`src/log_pipeline/`):
+### 3.6 Log Reduction Pipeline
+Fetched logs are heavily compressed to prevent LLM context window exhaustion and save tokens, using a map-reduce and clustering architecture (`src/log_pipeline/`). The stages are numbered as the design named them, which is why there is a 2.5: it was inserted between two existing stages and the numbers of the others are load-bearing in the code and the tests. `pipeline.reduce_logs` runs them in this order:
 - **Stage 0 (Offline Catalog)**: `build_catalog.py` samples historical logs to identify structural templates, classifying them as `boilerplate`, `informative`, or `decision-marker` based on cross-flow frequency.
 - **Stage 1 (Fetch)**: Source-filters Elastic logs to minimal fields, uses `search_after` with `_seq_no` for stable pagination, and uses catalog-driven `must_not` filters to drop pure boilerplate.
-- **Stage 2 (ERROR Branching)**: Instantly detects `level=ERROR` logs. If found, it trims the trace to the exact error plus a 200-line preceding context window, bypassing clustering entirely to preserve raw crash forensics.
+- **Redaction**: PII is scrubbed at this one seam -- after the fetch, before *any* persistence -- so Elasticsearch is covered as well as Kubernetes (section 3.10).
+- **Stage 2.5 (Noise Floor)**: Applied **after** `raw_logs.txt` is written, never before, so the audit copy stays the complete record and only the model's copy is thinned. Two filters: a severity floor (`LOG_MIN_LEVEL`, default `INFO`) drops framework `DEBUG` chatter -- shard hints, JPA transaction bookkeeping, SQL echo, roughly half the lines and two-thirds of the bytes in a real trace -- and `LOG_COLLAPSE_SQL` (default on) reduces an echoed `SELECT`'s column list to a count, since the diagnostic content of `select a,b,...,z from t where x=?` is entirely in the table and the predicate. `WARN` and `ERROR` sit above the default floor and can never be dropped by it, the count of what was removed is announced in the banner rather than dropped silently, and if the floor would empty the trace the original is kept -- handing the agent nothing reads as "no logs existed", the one conclusion this pipeline must never invite.
+- **Small-trace bypass**: Under 50 records the trace is emitted verbatim; there is nothing to reduce.
+- **Stage 2 (ERROR Branching)**: Detects `level=ERROR` logs. If found, it trims the trace to the errors plus `LOG_ERROR_CONTEXT_LINES` (default 200) *preceding* and `LOG_ERROR_TRAILING_LINES` (default 200) *trailing* lines, bypassing clustering entirely to preserve raw crash forensics. Without the trailing cap a cascading failure keeps everything from the first error to the end of the trace, which is the whole log. Within that window a template repeating `LOG_ERROR_REPEAT_THRESHOLD` times (default 3) is folded to its first occurrence plus a count -- a lower bar than the clustered path uses, because the window is a few hundred lines rather than a whole flow; `WARN` and `ERROR` lines are never folded.
 - **Stage 3 (Drain3 Clustering)**: For non-crashing (logic/rule rejection) flows, it uses Drain3 to strip dynamic noise (UUIDs, IPs) and cluster identical logs into structural templates. Clustering state is file-persisted to keep template IDs stable.
-- **Stage 4 (Evidence Guardrails)**: Regardless of clustering, it forces full-text retention for matches against a decision-vocabulary regex (e.g., `Validation Failed`), rare templates (count < 5), and flow boundaries.
-- **Stage 5 & 6 (LLM & Eval)**: The heavily compressed, structured output is injected into the LLM context (and simultaneously persisted to `reduced_logs.txt` for human audits). `eval_harness.py` provides an offline safety check to measure evidence-citation accuracy against ground truth before trusting the pipeline in production.
+- **Stage 4 (Evidence Guardrails)**: Regardless of clustering, it forces full-text retention for matches against a decision-vocabulary regex (`LOG_DECISION_VOCAB_REGEX`, e.g. `Validation Failed`), rare templates (`LOG_RARE_TEMPLATE_THRESHOLD`, count < 5), and flow boundaries. Two bounds keep those exemptions from inverting the pipeline: a template repeating `LOG_BOILERPLATE_COUNT` times (default 5) collapses to count-only **even with no catalog** -- frequency within the flow is evidence of boilerplate on its own, and without this a deployment that never ran `build_catalog` collapsed nothing at all and emitted "reduced" output ~1.8x larger than its input -- and decision-vocabulary matches are capped at `LOG_MAX_DECISION_LINES` (default 300), keeping the first and last half rather than the first N, since a decision sequence carries information at both ends and repeats in the middle.
+- **Final ceiling**: `LOG_MAX_REDUCED_CHARS` (default 120,000) bounds the whole formatted string, trimming the middle and saying so. The per-section bounds cap the parts; this caps the total, and exists chiefly for the ERROR branch, which is bounded in *lines* and not in characters -- a stack-trace-heavy trace can exhaust a context window in a few hundred of them. The gap/noise banner is prepended **after** this trim, so a size ceiling can never be what removes the warning that the evidence is incomplete.
+- **Stage 5 & 6 (LLM & Eval)**: The compressed, structured output is injected into the LLM context (and simultaneously persisted to `reduced_logs.txt` for human audits). `eval_harness.py` provides an offline safety check to measure evidence-citation accuracy against ground truth before trusting the pipeline in production.
 
 ### 3.7 The Self-Learning Loop (human-gated)
 If the `ReviewerAgent` spots a mistake (e.g., the Investigator recommended a solution that contradicts the business rule), the Reviewer invokes the `add_learning_rule` tool, defined inline in `agent_orchestrator.reviewer_node`.
@@ -1000,10 +1081,25 @@ loop auditable and prevents an LLM from silently rewriting its own instructions.
 ### 3.8 Storage & Casesheets
 Outputs are stored in `local_casesheets/casebook_<event_id>/`. This directory contains:
 - `casebook.json`: The final structured JSON block (terminal state only).
-- `status.json`: The in-flight lifecycle marker (`IN_PROGRESS`, then the terminal status).
-- `raw_logs.txt`: The complete uncompressed Elasticsearch log trace.
+- `status.json`: The in-flight lifecycle marker (`LOGS_FETCHED`, `IN_PROGRESS`, then the terminal status).
+- `raw_logs.txt`: The complete uncompressed log trace, before the Stage 2.5 noise floor -- the audit copy.
 - `reduced_logs.txt`: The heavily compressed logs that were injected into the LLM.
+- `fetched_logs.txt`: What `POST /fetch-logs` persisted. Its *presence* is the cache key `fetch_logs_node` checks (section 3.11), so the "disabled"/"no logs found" sentinels are cached too.
+- `supported_logs.txt`: The trace the terminal casebook cites in `rejection_data.rejection_logs.path`.
+- `raw_logs_k8s.jsonl` / `log_snapshot_meta.json`: The Kubernetes evidence snapshot (section 3.10).
+- Harness working files when `USE_OPENCODE_HARNESS=true`: `context.json`, `investigation.json`, `investigation_text.txt`, `review.json` in the rejection lane; `dlt_evidence.txt`, `dlt_failure.json`, `dlt_investigation.json`, `dlt_investigation_text.txt`, `dlt_review.json` in the DLT lane.
 - `*.lock` / `*.tmp`: `filelock` and atomic-write scratch files.
+
+> **The harness writes to local disk directly, not through `CasebookStorage`.**
+> This is the one deliberate bypass of the storage abstraction in the system,
+> and it is forced: the opencode agent reads files with `Read`/`Glob`/`Grep`,
+> which see a filesystem and not an S3 bucket, so under
+> `CASEBOOK_STORAGE_BACKEND=s3` a context file written through the storage
+> layer would be somewhere the agent cannot reach. The DLT lane writes its
+> harness files to `casebook_<refId>/` for the same reason, even though its
+> durable artifacts live under `dlt_cases/`. Everything that must *survive*
+> still goes through `CasebookStorage`; these files are scratch, which is why
+> the cleanup below can delete them unconditionally.
 
 **Local working directories are ephemeral.** Once a case reaches a terminal
 status and `save_terminal()` persists the casebook to the storage backend, the
@@ -1030,6 +1126,15 @@ implementation:
 | `dlt_parked_replays/` | `dlt/parked.py` | packets waiting for their fix to deploy (section 4.4.1) |
 | `pending_replays/` | `queue_for_replay` | replays awaiting human approval |
 
+A sixth directory sits under `local_casesheets/` but is **not** a storage
+root: `_prompts/`, written by `opencode_runner.run_task` when a rendered
+harness prompt exceeds 30,000 characters. Windows caps a command line well
+below that, so the prompt is spilled to a file and the agent is told to read
+it. These files are keyed on the output filename, so they are overwritten
+rather than accumulated per case -- but nothing deletes them: the reaper only
+matches `casebook_*` (below), and it must, because the four storage roots in
+the table above are durable state that a TTL sweep would destroy.
+
 Keeping DLT cases out of `casebook_<eventId>/` matters: `accuracy_report`,
 `prune_casesheets` and everything else that walks `list_events()` expects
 rejection casebooks, and a DLT case has a different schema, lifecycle and
@@ -1053,13 +1158,23 @@ for an event that doesn't exist (or was skipped) doesn't leave an empty
 directory behind.
 
 To ensure zero hallucinations, `routes.py` deterministically extracts static metadata directly from the Kafka payload. All keys are `snake_case`. The output is a hierarchical JSON block formatted for downstream systems:
-- **packet_metadata** (`srn`, `eid`, `ref_id`, `source`, `packet_type`, `created_at`, ...)
-- **packet_status** (`status`, `service`, `sub_service`, `rejection_data`)
-- **resolution** (`source`, `synthesis`, `action`, `resident_action` -- `source` is `"agent"` for LLM-generated or `"runbook:<id>@v<version>"` for runbook-served results)
-- **schema_version** (injected by the storage layer, currently `"1.1"`)
 
-`packet_metadata.is_mbu`, `update_type`, and `is_child` are currently emitted as `null`
-because the mapping is not derivable from the payload alone.
+- **casebook_metadata** (`created_at`, `last_updated` -- UTC, written on every save)
+- **packet_metadata** (`srn`, `sid`, `ref_id`, `source`, `packet_type`, `is_mbu`, `update_type`, `is_child`, `created_at`, `uploaded_at`)
+- **packet_status** (`status`, `service`, `sub_service`, `last_updated`, `is_in_process`, `rejection_data`)
+- **resolution** (`source`, `synthesis`, `action`, `resident_action`, `confidence`, `abstained` -- `source` is `"agent"` for LLM-generated or `"runbook:<id>@v<version>"` for runbook-served results)
+  - `resolution.provenance.prompt_fingerprint`: the SHA256 over every agent system prompt, **every harness template in `src/prompts/harness/`**, and `agent_policy_context.md` (`compute_prompt_fingerprint`). This is what lets an accuracy movement be attributed to a prompt change rather than merely correlated with one.
+  - `resolution.shadow`: present only in `RUNBOOK_MODE=shadow`, carrying what the runbook would have decided.
+  - On a contract breach the status is `FAILED_SYNTHESIS_PARSE` and `resolution` additionally carries `parse_error` and a 2000-char `raw_output`, with `action` set explicitly to `MANUAL_REVIEW` rather than left null.
+- **resolution_outcome** (optional; written by `POST /outcome/{event_id}`, not by the pipeline) -- the operator's ground-truth verdict (`CORRECT`/`INCORRECT`/`PARTIAL`), which is what `accuracy_report` scores against.
+- **schema_version** (injected by the storage layer, currently `"1.2"`; `CASEBOOK_SCHEMA_VERSION` in `src/storage/base.py`). `1.1` -> `1.2` added the optional `resolution_outcome` block and is purely additive: a 1.1 casebook is a valid 1.2 casebook with no outcome recorded yet. The DLT casebook versions independently, at `"1.1"` (section 4.4 point 9).
+
+`packet_metadata.is_mbu` and `is_child` are emitted as `null` because the
+mapping is not derivable from the payload alone. `update_type` carries the raw
+`enrolmentType` (`N`/`U`/`E`), not the B/D update classification the field name
+suggests. `sid` replaced the earlier `eid` key: the event id is already the
+directory name and the `status.json` stub's `packet_metadata.eid`, while `sid`
+is the payload identifier downstream systems actually join on.
 
 ### 3.9 Runbook Pipeline
 For repeated rejections, the system implements a Runbook pattern to short-circuit the multi-minute LLM loop.
@@ -1260,10 +1375,36 @@ versa. Section 4.4 covers what actually runs in each.
    python3 src/slow_consumer.py   # Slow consumer only
    ```
 
-### 4.2 API Documentation (Swagger UI)
-Because the application is built on FastAPI with populated metadata, interactive API documentation is automatically generated.
-- Navigate to `http://localhost:8000/docs` to view the Swagger UI.
-- Here you can see the fully expanded `MessagePayload` schema (including optional fields like `flowMetaData`, `resubmissionSummary`, etc.) and test the `/process-rejection` endpoint directly from your browser.
+### 4.2 HTTP Surface
+
+Every route is served by one FastAPI app on port 8000 (`main_api.py` mounts
+`api/routes.py` and `api/dlt_routes.py` as two routers). Both consumers and
+both DLT consumers reach the API over HTTP rather than in-process, which is
+what lets each scale independently.
+
+| Route | Auth | Caller | Does |
+|---|---|---|---|
+| `POST /fetch-logs` | API key + rate limit | fast consumer | Fetch and persist logs, publish to the analysis queue. Sync (`def`) -- bounded I/O, no LLM (section 3.11). |
+| `POST /analyze-rejection` | API key + rate limit | slow consumer | Run the LangGraph investigation and write the terminal casebook. `async`. |
+| `POST /process-rejection` | API key + rate limit | `local_run.py`, tests | The pre-split single-call path: byte-for-byte the same `_investigate_packet`, with `fetch_logs_node` taking its live-fetch fallback because nothing cached the logs first. |
+| `POST /fetch-dlt-logs` | API key + rate limit | DLT consumer | DLT lane's fetch half (section 4.4). |
+| `POST /analyze-dlt` | API key + rate limit | DLT analysis consumer | DLT lane's analysis half. Own bounded executor (`MAX_CONCURRENT_DLT_ANALYSES`). |
+| `POST /outcome/{event_id}` | API key + rate limit | operator | Attach a ground-truth verdict (`CORRECT`/`INCORRECT`/`PARTIAL`, `verified_by`, optional `notes`/`corrected_action`) to a completed casebook, as `resolution_outcome`. 404 on an unknown event, 422 on a bad verdict or an `event_id` failing `EVENT_ID_PATTERN`. This is the only source of truth `accuracy_report` has, and therefore the gate on promoting any runbook to `serve`. `src/tools/record_outcome.py` is the CLI equivalent. |
+| `GET /health` | none | liveness probe | This process's `status`/`draining`/`in_flight`/`capacity` plus a heartbeat block per consumer role (section 3.4). Always 200; a draining pod reports `status: draining` here and fails `/ready`. |
+| `GET /ready` | none | readiness probe | 503 while draining, while the checkpoint store or Kafka producer is unreachable, or -- with the harness on -- while the corpus is downloading or opencode is booting. |
+| `GET /metrics` | **none, deliberately** | Prometheus | Exposition of counters, latencies and breaker gauges. Unauthenticated because a scrape target that needs a secret is one operators route around; it exposes no packet content or resident data. Returns 501 if `prometheus_client` is not installed. Breaker state is sampled at scrape time rather than on transition, so a breaker that reset on its own timeout leaves no stale "open" reading. |
+
+Authentication is a constant-time `hmac.compare_digest` against
+`AGENTIC_RESIDENT_CRM_API_KEY` in the `X-API-Key` header; the in-memory rate
+limiter is per client IP (`RATE_LIMIT_PER_MINUTE`, with `RATE_LIMIT_EXEMPT_CIDRS`
+for the cluster's own ranges and `TRUSTED_PROXY_CIDRS` deciding when
+`X-Forwarded-For` may be believed).
+
+**Swagger UI.** Because the application is built on FastAPI with populated
+metadata, interactive documentation is generated automatically at
+`http://localhost:8000/docs` -- including the fully expanded `MessagePayload`
+schema (`flowMetaData`, `resubmissionSummary`, and the rest) and a form for
+testing `/process-rejection` from the browser.
 
 4. **Testing Pipeline (No Kafka Required):**
    ```bash
@@ -1278,6 +1419,11 @@ python3 -m src.tools.promote_rules          # review + git-commit staged learnin
 python3 -m src.tools.approve_replays        # approve queued packet replays
 python3 -m src.tools.check_drift            # detect rules.csv schema drift
 
+# Ground truth & accuracy (the loop that gates runbook promotion)
+python3 -m src.tools.record_outcome         # attach a verdict to a completed investigation
+python3 -m src.tools.accuracy_report        # accuracy by reason code
+python3 -m src.tools.accuracy_report --shadow  # would the shadowed runbook have been right?
+
 # Runbooks
 python3 -m src.tools.build_runbooks --dry-run          # draft generic runbooks from casebooks
 python3 -m src.tools.promote_runbooks                  # review + approve runbook drafts
@@ -1288,6 +1434,7 @@ python3 -m src.tools.prune_checkpoints --dry-run        # SQLite checkpoint prun
 python3 -m src.tools.prune_casesheets --dry-run         # old casesheet cleanup
 python3 -m src.tools.es_diagnostic                     # Elasticsearch connectivity diagnostics
 python3 -m src.tools.fetch_pod_logs                    # direct Kubernetes pod log retrieval
+python3 -m src.tools.build_log_fixture                 # turn a prod log dump into a K8s fixture tree
 
 # Log pipeline
 python3 -m src.tools.build_catalog --refids-file refids.txt   # Stage 0 catalog builder
@@ -1566,6 +1713,68 @@ the log lane being useful at all.
 
 This section records where the running code diverges from the design intent above.
 It is maintained deliberately so the document stays a truthful source of truth.
+
+**Update 2026-09-18:** Document audited against the code at `192ca2f`. No
+code changed; the corrections below are all places this document had drifted.
+
+| Section | Was | Is |
+|---|---|---|
+| 3.8 | `schema_version` `"1.1"` | `"1.2"` -- `1.1` -> `1.2` added the optional `resolution_outcome` block, additively |
+| 3.8 | `packet_metadata.eid`; `update_type` null | `sid` replaced `eid`; `update_type` carries the raw `enrolmentType` |
+| 3.8 | `resolution` had four keys | plus `confidence`, `abstained`, `provenance`, optional `shadow`; and `casebook_metadata` is a top-level block |
+| 1.3.1, 3.3 | logs over 5000 chars went to `upload_logs_to_s3()`, else truncated | no threshold: the trace is always persisted whole via `CasebookStorage.save_artifact` as `supported_logs.txt`. `s3_uploader.py` is no longer called from `src/` at all |
+| 1.3.1 | `PACKET_TIMEOUT_SECONDS=500` | the default is `300` |
+| 3.4 | six terminal statuses | eight -- `FAILED_SYNTHESIS_PARSE` and `FAILED_SHUTDOWN` were missing |
+| 3.4 | `/health` reported two consumers | four, plus `status`/`draining`/`in_flight`/`capacity` |
+| 3.4 | the reaper removes "any directory" past its TTL | only `casebook_*`, which is what keeps `dlt_parked_replays/` and the other three roots from being swept |
+| 3.6 | Stage 2 kept 200 preceding lines | 200 preceding *and* 200 trailing; Stage 2.5 (the noise floor) and the `LOG_MAX_REDUCED_CHARS` ceiling were undocumented |
+| 3.2.1 | corpus download ran "concurrently with the opencode server boot" | strictly before it -- which is why `/ready` has two distinct 503 reasons |
+| 4.2 | Swagger UI only | full route table: `/metrics` and `/outcome/{event_id}` were undocumented |
+
+The audit also turned up three code defects, all in or beside the opencode
+harness and all now **fixed**. Every one of them failed silently -- the
+harness catches any exception from a task and falls back to the direct LLM,
+so a broken configuration and a merely slow one look identical in the logs.
+That is why each fix ships with a test in `tests/test_opencode_harness.py`
+rather than a note here:
+
+1. **`OPENCODE_MODEL` had disagreeing defaults** -- `uidai/...` in
+   `opencode_runner.py`, `opencode/...` in `entrypoint.sh`. Left unset in a
+   container, the provider the generated config declared was not the one any
+   task asked for, so every harness call failed into the direct-LLM fallback
+   (section 3.2.1). Both now default to `uidai/glm-5.2-fp8`, a test asserts
+   they stay equal, and `entrypoint.sh` refuses to boot on a model id with no
+   `provider/` segment.
+2. **`OPENCODE_TASK_TIMEOUT_SECONDS` was read at all four call sites**, with a
+   120s fallback at the rejection Investigator and 300s at the other three --
+   the shortest budget on the heaviest task. The call sites now pass no
+   timeout at all; `opencode_runner._task_timeout()` is the single reader, and
+   a test parses both orchestrators to keep it that way.
+3. **`agent_orchestrator.py` called `time.sleep(1)` without importing `time`.**
+   The corpus-wait loop (section 3.2.1) therefore raised `NameError` on
+   exactly the path it exists to handle -- harness on, corpus still
+   downloading, packet already arriving -- and the error propagated out of
+   `investigator_node` to DLQ the packet. The DLT lane imported `time` locally
+   and was unaffected, which is why only one of the two lanes ever failed.
+   `ruff` had been reporting this as `F821` and the lint job was red.
+
+Three dead imports (`opencode_runner.tempfile`, `prompt_loader.Dict`,
+`start.socket`) were removed alongside it, so `ruff check .` is clean
+repo-wide again -- the point being that a lint gate with four standing
+findings cannot tell anyone about a fifth.
+
+**Not addressed, and pre-existing:** 58 tests fail on `main` (identical set
+before and after the changes above). They cluster in the DLT lane --
+`test_dlt_parked.py` alone accounts for 14, all `TypeError: park() takes from
+2 to 3 positional arguments but 4 were given`, i.e. tests left behind by a
+signature change. `test_phase1_fixes.py::test_routes_falls_back_to_truncated_logs_when_s3_unset`
+is the same story from the other direction: it still asserts the 5000-char S3
+truncation behaviour that section 3.3 records as removed. Fixing these is its
+own piece of work and is not attempted here.
+
+Also: `README.md` is a copy of this document that lags it by one revision (it
+predates the opencode harness and the local-cleanup work). Regenerate it from
+this file rather than editing it separately.
 
 **Update 2026-09-17:** Three changes:
 

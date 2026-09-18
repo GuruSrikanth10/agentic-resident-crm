@@ -71,7 +71,6 @@ def main():
     # proxy env vars — on Windows, urllib's ProxyHandler({"http": None})
     # does not reliably bypass the corporate proxy for localhost.
     import http.client
-    import socket
 
     def _http_get(path):
         """GET /path on 127.0.0.1:8000. Returns (status_code, body) or (None, error)."""

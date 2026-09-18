@@ -18,7 +18,6 @@ Design notes
 """
 import os
 import re
-from typing import Dict
 
 _PLACEHOLDER = re.compile(r"\{\{(\w+)\}\}")
 
