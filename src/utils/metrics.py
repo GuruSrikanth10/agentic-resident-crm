@@ -206,6 +206,60 @@ DLT_DEPLOYED_VERSION_READS = _counter(
 )
 
 
+DLT_GROUP_WRITES = _counter(
+    "agentic_resident_crm_dlt_group_writes_total",
+    "Writes to a DLT group record, by operation (occurrence, code_check, "
+    "recommendation) and outcome (ok, failed). A sustained `failed` rate "
+    "means group state is not accumulating -- occurrence counts freeze and "
+    "reuse never fires, so every packet pays for the LLM.",
+    ("operation", "outcome"),
+)
+
+DLT_CLAIMS = _counter(
+    "agentic_resident_crm_dlt_claims_total",
+    "Case claims at fast-lane entry: won, duplicate (another delivery of the "
+    "same DLT record already holds it), reclaimed (the holder died), or "
+    "error (the claim store was unreachable and the case proceeded).",
+    ("outcome",),
+)
+
+DLT_SINGLEFLIGHT = _counter(
+    "agentic_resident_crm_dlt_singleflight_total",
+    "Single-flight outcomes per fingerprint: leader (ran the analysis), "
+    "reused (found a finding another request cached, so no LLM call), "
+    "waited_then_ran (waited but none appeared), timeout (gave up waiting).",
+    ("outcome",),
+)
+
+DLT_PER_CODE_VIOLATIONS = _counter(
+    "agentic_resident_crm_dlt_per_code_violations_total",
+    "Agent findings containing packet-specific text that would be cached "
+    "against the fingerprint and re-served to every later packet.",
+    ("pattern",),
+)
+
+
+def record_dlt_group_write(operation: str, ok: bool) -> None:
+    if DLT_GROUP_WRITES is not None:
+        DLT_GROUP_WRITES.labels(operation=operation,
+                                outcome="ok" if ok else "failed").inc()
+
+
+def record_dlt_claim(outcome: str) -> None:
+    if DLT_CLAIMS is not None:
+        DLT_CLAIMS.labels(outcome=outcome).inc()
+
+
+def record_dlt_singleflight(outcome: str) -> None:
+    if DLT_SINGLEFLIGHT is not None:
+        DLT_SINGLEFLIGHT.labels(outcome=outcome).inc()
+
+
+def record_dlt_per_code_violation(pattern: str) -> None:
+    if DLT_PER_CODE_VIOLATIONS is not None:
+        DLT_PER_CODE_VIOLATIONS.labels(pattern=pattern).inc()
+
+
 def record_dlt_case(failure_class: str) -> None:
     if DLT_CASES is not None:
         DLT_CASES.labels(failure_class=failure_class).inc()

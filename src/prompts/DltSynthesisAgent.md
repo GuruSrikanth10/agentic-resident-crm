@@ -26,6 +26,19 @@ error code and what it means, where it fired, and what the logs did or did not
 confirm. State plainly what the evidence cannot establish. Do not paste the
 stack trace; it is attached to the case already.
 
+The narrative and the recommendation are both **stored against this failure's
+fingerprint and re-served verbatim to every later record with the same stack
+trace.** Write them so they are true of all of those records:
+- No identifiers, counts, scores, field values or timestamps from one record.
+  If the findings contain any, drop them -- describe the shape instead ("at
+  least one matched candidate's record was absent").
+- No source line numbers (`Foo.java:185`, "line 190"); they go stale on the
+  next release. Name the class and method.
+- Never "this packet", "this request" or "this record". Write "records with
+  this failure", or describe the code path.
+- Configuration values that are the same for every record (a configured
+  threshold, a retry policy, a topic) describe the code and may stay.
+
 **discrepancy** -- `null` unless the corroboration verdict was CONTRADICTED or
 PARTIAL. When it is populated, this is the most important field in the output:
 say that the declared exception is not supported by the logs, and name what the
@@ -47,9 +60,13 @@ useful. "The row was deleted" is a claim you cannot make.
 - `NO_ACTION` -- the failure is expected and benign. Use sparingly.
 
 **confidence** -- Between 0.0 and 1.0, reflecting how well the evidence
-supported the conclusion. Be honest and be conservative:
+supported the conclusion. The stack trace and the service documentation are
+the primary evidence for *why* this code path fails; logs corroborate it.
+Be honest and be conservative:
 - The logs corroborated the trace and the code is in the registry: up to 0.9.
-- Corroboration was UNVERIFIABLE: no higher than 0.5.
+- The logs could not be checked at all (too old, not fetched, fetch failed)
+  and the documentation fully explains the failure: up to 0.75.
+- The logs were checked and said nothing about this failure: up to 0.6.
 - The logs contradicted the trace: no higher than 0.6 -- you know the declared
   cause is wrong, not what the right one is.
 - The failure is an application defect and you have no source access: no

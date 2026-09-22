@@ -36,8 +36,16 @@ def get_group_storage() -> CasebookStorage:
 
 
 def reset_cache() -> None:
-    """Drop cached storage handles. For tests, which swap backends per case."""
+    """Drop cached storage handles. For tests, which swap backends per case.
+
+    Also drops the group store's in-memory compositions. They are keyed on the
+    storage root and so cannot leak between roots, but a test that reuses one
+    root and expects a clean slate should get one.
+    """
     reset_scoped_cache()
+    # Imported here: group_store imports this module.
+    from src.dlt import group_store
+    group_store.reset_cache()
 
 
 def terminal_status(ref_id: str) -> Optional[str]:

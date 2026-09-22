@@ -62,4 +62,6 @@ Do NOT write to any other filename.
 Write a JSON object with this schema:
 {"verdict": "APPROVED" or "REJECTED", "feedback": "<if rejected, explain what is wrong; if approved, empty string>"}
 
-Follow the rules in AGENTS.md.
+Follow the rules in AGENTS.md, and these rules for this flow:
+
+{{> rules/dlt}}

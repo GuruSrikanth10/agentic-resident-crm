@@ -81,7 +81,11 @@ Four hard limits:
    Instead of "Query the database for items abc-123, def-456 and check which
    is missing", write "Query the database for each item referenced in the
    response and confirm which record is absent". The recommendation must be
-   actionable for ANY packet with this fingerprint, not just this one.
+   actionable for ANY packet with this fingerprint, not just this one. Do not
+   cite source line numbers (`Foo.java:185`, "line 190") -- they go stale on
+   the next release; name the class and method. Do not write "this packet";
+   the reader is looking at a different one. Configuration values that are
+   the same for every packet describe the code and may be cited.
 2. **Use only the identifiers the summary labels, in the role it labels them.**
    The summary ends with an "Identifiers in this payload" section that assigns
    every id it shows to one of three roles: this record's log-correlation id,

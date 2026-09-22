@@ -128,6 +128,33 @@ class CasebookStorage(Protocol):
         """
         ...
 
+    def create_json(self, event_id: str, filename: str, document: dict) -> bool:
+        """Write `document` only if `filename` does not already exist.
+
+        Returns True when this caller created it, False when it was already
+        there. Never overwrites, and never raises on a losing race.
+
+        The weaker sibling of `update_json`, and deliberately so: it needs
+        only create-only semantics (`If-None-Match: *` on S3, an exclusive
+        open locally), which every S3-compatible store implements even when
+        conditional *overwrite* is missing. Everything that can be expressed
+        as "claim this name once" -- a DLT case claim, one occurrence of a
+        fingerprint -- belongs here rather than in a read-modify-write, and is
+        then idempotent by construction rather than by a counter that can lose
+        an increment.
+
+        `filename` may contain "/" to address a sub-path.
+        """
+        ...
+
+    def list_json(self, event_id: str, subdir: str) -> list:
+        """Filenames directly under `subdir` for this event, without the path.
+
+        Returns [] when the subdir is absent. Used to count things that are
+        stored one-object-per-item precisely so they never need a counter.
+        """
+        ...
+
     def list_events(self) -> list:
         """Every event id this store holds a casebook directory for.
 

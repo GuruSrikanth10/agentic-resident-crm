@@ -63,7 +63,7 @@ from typing import Optional
 
 from src.dlt import code_check as code_check_module
 from src.dlt.classify import FailureClass  # noqa: F401  (kept for the module's readers -- see decide())
-from src.models.dlt_synthesis import DLT_ACTIONS
+from src.models.dlt_synthesis import DLT_ACTIONS, UNVERIFIABLE_LABEL
 from src.utils.env import get_bool_env
 from src.utils.logging_config import get_logger
 
@@ -148,6 +148,23 @@ def code_check_gates_replay() -> bool:
     return get_bool_env("DLT_CODE_CHECK_GATES_REPLAY", False)
 
 
+def allow_unverified() -> bool:
+    """Whether a finding no runtime evidence corroborates may auto-replay.
+
+    Off by default, and it should stay off. Documentation is authoritative on
+    *why* a code path fails, which is why an uncorroborated diagnosis may now
+    score as high as DLT_LOGS_UNAVAILABLE_CEILING. But the question a replay
+    turns on -- was *this* failure transient, so that retrying succeeds? -- is
+    a fact about one runtime moment, and only the logs speak to it.
+
+    This used to hold by accident: UNVERIFIABLE was capped at 0.5, below the
+    0.55 default threshold, so no uncorroborated finding could ever clear it.
+    Raising that cap would have silently removed the guarantee. It is now a
+    rule rather than a coincidence of two numbers.
+    """
+    return get_bool_env("DLT_REPLAY_ALLOW_UNVERIFIED", False)
+
+
 @dataclass(frozen=True)
 class ReplayDecision:
     should_replay: bool
@@ -189,6 +206,19 @@ def decide(finding, ref_id: Optional[str], code_check=None) -> ReplayDecision:
         return ReplayDecision(
             False, f"confidence {finding.confidence:.2f} is below "
                    f"DLT_REPLAY_CONFIDENCE_THRESHOLD ({threshold:.2f})")
+
+    # After the threshold, so every finding the threshold already declined
+    # reports exactly the reason it always did; this only ever speaks for one
+    # that would otherwise have cleared it. Read off the finding rather than
+    # passed in, so parking -- which calls this too, and whose entries are
+    # later released without coming back here -- cannot bypass it.
+    if (UNVERIFIABLE_LABEL in (getattr(finding, "ceilings_applied", None) or [])
+            and not allow_unverified()):
+        return ReplayDecision(
+            False, "no runtime evidence corroborates this finding; the "
+                   "documentation explains the failure but cannot establish "
+                   "that this occurrence was transient "
+                   "(DLT_REPLAY_ALLOW_UNVERIFIED is off)")
 
     if not ref_id:
         return ReplayDecision(

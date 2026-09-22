@@ -18,6 +18,7 @@ Two ordering rules matter here:
 """
 import asyncio
 import concurrent.futures
+import contextlib
 import functools
 import json
 import os
@@ -30,13 +31,16 @@ from src.api.routes import _off_loop, get_api_key, rate_limiter, register_execut
 from src.dlt import (
     auto_replay,
     canned,
+    claims,
     code_check,
     deployed,
     groups,
     orchestrator,
     parked,
+    per_code,
     registry,
     reuse,
+    single_flight,
 )
 from src.dlt.case_storage import get_dlt_storage
 from src.dlt.corroborate import corroborate
@@ -137,7 +141,11 @@ DEPLOYED_ARTIFACT = "deployed.json"
 #: Bumped when the DLT casebook shape changes. Independent of the rejection
 #: casebook's CASEBOOK_SCHEMA_VERSION -- different schema, different lifecycle.
 # 1.1 adds the `code_check` block (DLT_PLAN.md 14, phase C5).
-DLT_CASEBOOK_SCHEMA_VERSION = "1.1"
+# 1.2 adds provenance.group_state and provenance.single_flight, and
+#     finding.per_code_violations; recommendation_state now reports what
+#     happened ("unpersisted", "withheld", "none") instead of always "draft".
+#     Additive: every 1.1 field is unchanged.
+DLT_CASEBOOK_SCHEMA_VERSION = "1.2"
 
 
 def build_failure(headers, exception_message: Optional[str]) -> dict:
@@ -249,6 +257,17 @@ def fetch_dlt_logs(message: DltMessage):
         log.info("Skipping fetch; a terminal DLT case already exists",
                  recorded_status=recorded_status)
         return {"status": "already_processed", "case_id": case_id}
+
+    # The terminal check above is keyed on the refId, which is the storage
+    # key. One DLT record arriving under two record keys has two refIds and
+    # would pass it twice -- two casebooks, two investigations. The claim is
+    # keyed on case_id, which is the record's own idempotent identity.
+    claim = claims.claim_case(case_id, ref_id)
+    if not claim.won:
+        log.info("Skipping; another delivery of this DLT record holds the claim",
+                 claimed_by_ref_id=claim.holder_ref_id, outcome=claim.outcome)
+        return {"status": "already_processed", "case_id": case_id,
+                "claimed_by": claim.holder_ref_id}
 
     headers = parse_headers(message.headers)
     failure = build_failure(headers, headers.exception_message)
@@ -381,7 +400,11 @@ def _casebook(message: DltMessage, headers, failure: dict, corroboration,
               finding, decision, group: Optional[dict], gaps: list,
               window_description: Optional[str], provenance_source: str,
               replay: Optional[dict] = None,
-              code_check_result=None, park: Optional[dict] = None) -> dict:
+              code_check_result=None, park: Optional[dict] = None,
+              recommendation_state: str = groups.STATE_NONE,
+              group_state: str = "ok",
+              single_flight_outcome: Optional[str] = None,
+              per_code_check=None) -> dict:
     """Assemble the terminal casebook. See DLT_PLAN.md 7.1."""
     return {
         "schema_version": DLT_CASEBOOK_SCHEMA_VERSION,
@@ -435,6 +458,10 @@ def _casebook(message: DltMessage, headers, failure: dict, corroboration,
             "discrepancy": finding.discrepancy,
             "recommendation": finding.recommendation,
             "action": finding.action,
+            # Packet-specific text found in a finding that is cached against
+            # the fingerprint. Empty when clean; absent when not checked.
+            **({"per_code_violations": per_code_check.as_dict()}
+               if per_code_check is not None else {}),
         },
         "confidence": {
             "score": finding.confidence,
@@ -447,7 +474,16 @@ def _casebook(message: DltMessage, headers, failure: dict, corroboration,
             "reuse_reason": decision.reason,
             "group_fingerprint": failure["fingerprint"],
             "group_occurrences": (group or {}).get("occurrence_count"),
-            "recommendation_state": groups.STATE_DRAFT,
+            # "ok", "occurrence_not_recorded" (counted without this case), or
+            # "unavailable" -- so a null count is never mistaken for a first
+            # occurrence.
+            "group_state": group_state,
+            # What happened to this finding in the cache, not what was meant
+            # to: "draft", "none", "unpersisted" or "withheld".
+            "recommendation_state": recommendation_state,
+            # "leader", "reused", "waited_then_ran", "timeout", or null when
+            # the gate was not needed.
+            "single_flight": single_flight_outcome,
         },
         # The replay precheck's verdict (DLT_PLAN.md 14). Always present, and
         # always UNKNOWN when the feature is off -- "we did not look" and "we
@@ -507,6 +543,16 @@ async def analyze_dlt(message: DltMessage):
                  recorded_status=recorded_status)
         return {"status": "already_processed", "case_id": case_id}
 
+    # A duplicate queued before the fetch lane took claims, or whose claim was
+    # taken over while it sat in the queue, must not be analysed as well. No
+    # claim at all (claims disabled, or the claim store was down) proceeds.
+    holder = await _off_loop(claims.holder_of, case_id)
+    if holder and holder != ref_id:
+        log.info("Skipping analysis; another delivery of this DLT record "
+                 "holds the claim", claimed_by_ref_id=holder)
+        return {"status": "already_processed", "case_id": case_id,
+                "claimed_by": holder}
+
     headers = parse_headers(message.headers)
     failure = build_failure(headers, headers.exception_message)
     fingerprint = failure["fingerprint"]
@@ -530,27 +576,39 @@ async def analyze_dlt(message: DltMessage):
     # touches counts and history, never `recommendation`, so the reuse
     # decision below sees exactly the same cache state either way.
     #
-    # If the group update fails (S3 conditional-write contention under a
-    # burst of identical fingerprints), proceed with group=None. The reuse
-    # decision will treat it as a novel fingerprint and run the LLM -- the
-    # safe default. A counter update must not DLQ a packet.
+    # Keyed on case_id, not ref_id: occurrence idempotency must follow the DLT
+    # record, and one record redelivered under a different key has a new
+    # ref_id but the same case_id. ref_id is recorded alongside it.
+    #
+    # A failed write must not DLQ a packet. The group is read back instead,
+    # so a transient error still serves an existing recommendation rather
+    # than paying for the LLM, and `group_state` says which happened.
+    group_state = "ok"
     try:
         group = await _off_loop(
             groups.record_occurrence,
-            fingerprint, ref_id,
+            fingerprint, case_id,
             signature=failure["signature"],
             failure_class=failure["failure_class"],
             business_code=failure["business_code"],
             corroboration=corroboration.verdict.value,
+            ref_id=ref_id,
         )
+        metrics.record_dlt_group_write("occurrence", True)
     except Exception as e:
-        log.warning("Could not record group occurrence; proceeding without it",
+        metrics.record_dlt_group_write("occurrence", False)
+        log.warning("Could not record group occurrence; reading the group back instead",
                     fingerprint=fingerprint,
                     error=f"{type(e).__name__}: {e}")
         group = None
+        group_state = "occurrence_not_recorded"
+    if not group:
+        group = await _off_loop(groups.load_group, fingerprint)
+        if not group:
+            group_state = "unavailable"
+
     decision = reuse.decide(failure["failure_class"],
                             corroboration.verdict.value, group)
-    metrics.record_dlt_reuse(decision.decision.value)
 
     # The replay precheck. Bounded I/O with no LLM, so it belongs beside
     # corroboration rather than in the fast lane -- this is where the replay
@@ -570,76 +628,152 @@ async def analyze_dlt(message: DltMessage):
         log.info("Replay precheck", verdict=code_check_result.verdict,
                  reason=code_check_result.reason)
         try:
-            group = await _off_loop(groups.attach_code_check, fingerprint,
-                                    code_check_result.as_dict())
+            updated = await _off_loop(groups.attach_code_check, fingerprint,
+                                      code_check_result.as_dict(),
+                                      by_case_id=case_id)
+            metrics.record_dlt_group_write("code_check", True)
+            if updated:
+                group = updated
         except Exception as e:
+            metrics.record_dlt_group_write("code_check", False)
             log.warning("Could not attach code-check to group; proceeding without it",
                         fingerprint=fingerprint,
                         error=f"{type(e).__name__}: {e}")
 
-    parse_error = None
-    if decision.decision is reuse.Decision.CANNED:
-        finding = canned.build(failure["failure_class"], failure, corroboration, group)
-        provenance = "canned"
-    elif decision.decision is reuse.Decision.REUSE_GROUP:
-        finding = DltFinding(**(group or {})["recommendation"])
-        provenance = "group_reuse"
-    else:
-        log.info("Running the DLT analysis lane", reason=decision.reason)
-        budget = _dlt_analyze_timeout_seconds()
-        invoke = functools.partial(
-            orchestrator.investigate, ref_id, failure, corroboration, logs,
-            payload_summary=payload_summary)
-        try:
-            finding, parse_error = await asyncio.wait_for(
-                asyncio.get_running_loop().run_in_executor(
-                    _dlt_invoke_executor, invoke),
-                timeout=budget,
-            )
-        except asyncio.TimeoutError:
-            # The consumer's own client-side budget is about to fire (or has
-            # already), and it will write FAILED_TIMEOUT and DLQ the message.
-            # Recording the same verdict here keeps the two in agreement
-            # instead of leaving this side to finish later and overwrite it.
-            log.error("DLT analysis exceeded the server-side budget",
-                      timeout_seconds=budget, state="FAILED_TIMEOUT")
-            await _off_loop(storage.save_terminal, ref_id,
-                            _timeout_casebook(ref_id, message.ref_id, budget))
-            from src.utils.case_cleanup import cleanup_casebook_dir
-            cleanup_casebook_dir(ref_id)
-            return {"status": "failed_timeout", "case_id": case_id}
-        provenance = "agent"
-        if finding is None:
-            finding = DltFinding(
-                narrative="The analysis produced output that does not satisfy "
-                          "the finding contract, even after a repair attempt. "
-                          "The verbatim stack trace and logs are attached.",
-                recommendation="A human should read the attached evidence.",
-                action="NEEDS_MANUAL_REVIEW",
-                confidence=0.0,
-            )
-            provenance = "failed_synthesis"
+    # Single-flight (src/dlt/single_flight.py). Only when the LLM is needed
+    # *because nothing is cached yet*: then a concurrent investigation of the
+    # same fingerprint would answer this message too, so wait for it. The
+    # gate is held through `attach_recommendation`, which is what the waiters
+    # are waiting to see.
+    budget = _dlt_analyze_timeout_seconds()
+    single_flight_outcome = None
+    gate = (single_flight.flight(fingerprint, single_flight.wait_seconds(budget))
+            if decision.awaits_cache and single_flight.enabled()
+            else contextlib.nullcontext())
 
-    finding = apply_dlt_confidence_policy(
-        finding,
-        failure_class=failure["failure_class"],
-        corroboration=corroboration.verdict.value,
-        registry_hit=bool(failure["registry_description"]),
-        reused=decision.decision is reuse.Decision.REUSE_GROUP,
-        logs=logs,
-    )
+    async with gate as flight:
+        llm_budget = budget
+        if flight is not None:
+            # Re-read whether or not we waited. The decision above was taken
+            # before the gate, so a leader may have cached an answer since --
+            # including one that finished and released just before this
+            # request arrived, which then never has to wait at all.
+            fresh = await _off_loop(groups.load_group, fingerprint)
+            if fresh:
+                group = fresh
+            decision = reuse.decide(failure["failure_class"],
+                                    corroboration.verdict.value, group)
+            if decision.decision is reuse.Decision.REUSE_GROUP:
+                single_flight_outcome = "reused"
+            elif not flight.acquired:
+                single_flight_outcome = "timeout"
+            elif flight.waited:
+                single_flight_outcome = "waited_then_ran"
+            else:
+                single_flight_outcome = "leader"
+            metrics.record_dlt_singleflight(single_flight_outcome)
+            if flight.waited:
+                # Time spent waiting comes out of this request's budget -- the
+                # consumer's own timeout is end to end. Never below the smaller
+                # of the budget and 30s, so a waiter that does end up
+                # investigating is not handed an impossible deadline.
+                llm_budget = max(budget - flight.waited_seconds, min(budget, 30.0))
 
-    # Only an agent run produces a recommendation worth caching. A canned
-    # treatment is recomputed identically every time, and re-storing a reused
-    # one would just rewrite what is already there.
-    if provenance == "agent":
-        try:
-            group = await _off_loop(groups.attach_recommendation, fingerprint,
-                                    finding.model_dump(), state=groups.STATE_DRAFT)
-        except Exception as e:
-            log.warning("Could not attach recommendation to group; proceeding without it",
-                        fingerprint=fingerprint,
-                        error=f"{type(e).__name__}: {e}")
+        # Recorded after the gate, so a waiter served from the cache counts
+        # as the REUSE_GROUP it became rather than the LLM_REQUIRED it began.
+        metrics.record_dlt_reuse(decision.decision.value)
+
+        parse_error = None
+        if decision.decision is reuse.Decision.CANNED:
+            finding = canned.build(failure["failure_class"], failure, corroboration, group)
+            provenance = "canned"
+        elif decision.decision is reuse.Decision.REUSE_GROUP:
+            finding = DltFinding(**(group or {})["recommendation"])
+            provenance = "group_reuse"
+        else:
+            log.info("Running the DLT analysis lane", reason=decision.reason)
+            invoke = functools.partial(
+                orchestrator.investigate, ref_id, failure, corroboration, logs,
+                payload_summary=payload_summary)
+            try:
+                finding, parse_error = await asyncio.wait_for(
+                    asyncio.get_running_loop().run_in_executor(
+                        _dlt_invoke_executor, invoke),
+                    timeout=llm_budget,
+                )
+            except asyncio.TimeoutError:
+                # The consumer's own client-side budget is about to fire (or has
+                # already), and it will write FAILED_TIMEOUT and DLQ the message.
+                # Recording the same verdict here keeps the two in agreement
+                # instead of leaving this side to finish later and overwrite it.
+                log.error("DLT analysis exceeded the server-side budget",
+                          timeout_seconds=llm_budget, state="FAILED_TIMEOUT")
+                await _off_loop(storage.save_terminal, ref_id,
+                                _timeout_casebook(ref_id, message.ref_id, llm_budget))
+                from src.utils.case_cleanup import cleanup_casebook_dir
+                cleanup_casebook_dir(ref_id)
+                return {"status": "failed_timeout", "case_id": case_id}
+            provenance = "agent"
+            if finding is None:
+                finding = DltFinding(
+                    narrative="The analysis produced output that does not satisfy "
+                              "the finding contract, even after a repair attempt. "
+                              "The verbatim stack trace and logs are attached.",
+                    recommendation="A human should read the attached evidence.",
+                    action="NEEDS_MANUAL_REVIEW",
+                    confidence=0.0,
+                )
+                provenance = "failed_synthesis"
+
+        finding = apply_dlt_confidence_policy(
+            finding,
+            failure_class=failure["failure_class"],
+            corroboration=corroboration.verdict.value,
+            registry_hit=bool(failure["registry_description"]),
+            reused=decision.decision is reuse.Decision.REUSE_GROUP,
+            logs=logs,
+            could_not_look=corroboration.could_not_look,
+        )
+
+        # What actually happened to this finding's cache entry -- reported as
+        # it is, never assumed. See groups.STATE_UNPERSISTED / STATE_WITHHELD.
+        recommendation_state = groups.STATE_NONE
+        per_code_check = None
+
+        # Only an agent run produces a recommendation worth caching. A canned
+        # treatment is recomputed identically every time, and re-storing a
+        # reused one would just rewrite what is already there.
+        if provenance == "agent":
+            per_code_check = per_code.check(finding)
+            for violation in per_code_check.violations:
+                metrics.record_dlt_per_code_violation(violation.pattern)
+            if per_code_check.violations:
+                log.warning("Finding contains packet-specific text",
+                            violations=sorted({v.pattern for v in per_code_check.violations}),
+                            withheld=per_code_check.withhold)
+
+            if per_code_check.withhold:
+                recommendation_state = groups.STATE_WITHHELD
+            else:
+                try:
+                    updated = await _off_loop(groups.attach_recommendation, fingerprint,
+                                              finding.model_dump(),
+                                              state=groups.STATE_DRAFT,
+                                              by_case_id=case_id)
+                    metrics.record_dlt_group_write("recommendation", True)
+                    recommendation_state = groups.STATE_DRAFT
+                    if updated:
+                        group = updated
+                except Exception as e:
+                    metrics.record_dlt_group_write("recommendation", False)
+                    recommendation_state = groups.STATE_UNPERSISTED
+                    log.error("Could not cache the recommendation for this "
+                              "fingerprint; its next occurrence will re-run the LLM",
+                              fingerprint=fingerprint,
+                              error=f"{type(e).__name__}: {e}")
+        elif provenance == "group_reuse":
+            recommendation_state = ((group or {}).get("recommendation_state")
+                                    or groups.STATE_DRAFT)
 
     # Evaluated on the FINAL finding -- after ceilings, after reuse decay --
     # so a confidence the ceilings already capped is what gets checked, never
@@ -669,7 +803,10 @@ async def analyze_dlt(message: DltMessage):
                          decision, group, message.model_dump().get("evidence_gaps") or [],
                          message.model_dump().get("log_window"), provenance,
                          replay=replay, code_check_result=code_check_result,
-                         park=park)
+                         park=park, recommendation_state=recommendation_state,
+                         group_state=group_state,
+                         single_flight_outcome=single_flight_outcome,
+                         per_code_check=per_code_check)
     if parse_error:
         casebook["finding"]["parse_error"] = parse_error
 

@@ -1484,9 +1484,11 @@ in `src/prompts/harness/` (`DltInvestigator.md`, `DltReviewer.md`), same
 dlt_consumer.py  -> POST /fetch-dlt-logs  -> dlt-analysis-queue
                  -> dlt_analysis_consumer.py -> POST /analyze-dlt -> casebook
 
-  fetch-dlt-logs:  parse headers -> classify -> fingerprint -> persist evidence
-                   -> fetch pod logs -> capture running version -> queue
-  analyze-dlt:     corroborate -> group/reuse -> finding -> CODE CHECK
+  fetch-dlt-logs:  CLAIM case_id -> parse headers -> classify -> fingerprint
+                   -> persist evidence -> fetch pod logs
+                   -> capture running version -> queue
+  analyze-dlt:     claim check -> corroborate -> group/reuse -> CODE CHECK
+                   -> SINGLE-FLIGHT gate -> finding -> per-code check
                    -> replay gate -> park -> casebook
 ```
 
@@ -1550,11 +1552,20 @@ Ten things are worth knowing without reading the whole plan:
    make the feature permanently inert. `queue_for_replay`'s own
    `ENABLE_AUTO_REPLAY` switch still governs what happens once called:
    straight to OIS, or queued for human approval via `approve_replays.py`.
+   **A finding no runtime log corroborates never auto-replays**, whatever its
+   confidence (`DLT_REPLAY_ALLOW_UNVERIFIED`, off). This used to hold only
+   because the UNVERIFIABLE ceiling (0.5) sat below the 0.55 threshold; once
+   documentation-reasoned findings could score higher (4.4.2), it had to
+   become a rule. It is read off `ceilings_applied`, so parking -- whose
+   entries are released later without re-entering the gate -- is covered too.
 
-9. **The DLT casebook has its own schema version**, currently `"1.1"`
+9. **The DLT casebook has its own schema version**, currently `"1.2"`
    (`DLT_CASEBOOK_SCHEMA_VERSION`), independent of the rejection casebook's --
    different schema, different lifecycle. `1.0` -> `1.1` added the
-   `code_check` and `parked` blocks.
+   `code_check` and `parked` blocks; `1.1` -> `1.2` added
+   `provenance.group_state`, `provenance.single_flight` and
+   `finding.per_code_violations`, and made `recommendation_state` report what
+   actually happened (4.4.2).
 
 10. **The replay precheck answers deployment, never relevance.** Before a
    packet is replayed, `code_check.py` asks whether the code at the failure
@@ -1708,6 +1719,123 @@ measurements -- has never been run against a real broker or cluster. Whether
 the log lane being useful at all.
 
 ---
+
+### 4.4.2 Group state, dedupe and cost control
+
+What makes the DLT lane affordable is **reuse**: investigate a fingerprint
+once, then serve the cached finding to every later record with the same
+stack trace. Findings are reasoned from the stack trace and the service
+documentation (logs corroborate), so they are per-code rather than
+per-packet, which is what makes serving them again safe. A run on 2026-09-22
+showed that reuse had never once fired. These are the mechanisms that make it
+work, and the reasons for each.
+
+**Group records need no conditional overwrite (`src/dlt/group_store.py`).**
+The original store kept one `group.json` per fingerprint and updated it by
+compare-and-swap (`update_json`: `If-Match` on S3). A self-hosted
+S3-compatible endpoint that accepts `If-None-Match: *` creates but refuses
+`If-Match` overwrites created every group record and then refused every
+update, forever, with no competing writer anywhere. The result was
+`occurrence_count` stuck at 1 and `recommendation` and `code_check` always
+null, so every case was treated as novel. The log showed eight retries per
+write, blamed on "another writer". The replacement uses only create-only
+writes and plain writes to names no other writer uses:
+
+```
+dlt_groups/casebook_<fp>/
+  meta.json                    plain write   signature, class, code, first_seen
+  occurrences/<case_id>.json   create-only   one object per case, ever
+  recommendation.json          plain write   the cached finding (last wins)
+  code_check.json              plain write   latest verdict
+  code_checks/<key>.json       create-only   one per check, for the histogram
+  group.json                   read only     the v1 record, folded in on read
+```
+
+`occurrence_count` is a count of objects rather than a counter, so it cannot
+lose an increment, and a redelivered case is the same object. Objects under
+`occurrences/` and `code_checks/` never change once written, so each is
+fetched at most once per process. Last-writer-wins on the recommendation is
+correct because any two concurrent per-code findings for one fingerprint are
+equally valid. The old `group.json` is never written again and is folded in
+on every read (count, members, histories, recommendation), so switching
+stores loses nothing, and rolling back to `DLT_GROUP_STORE=v1` and forward
+again stays consistent. `update_json` itself now detects an endpoint that
+refuses `If-Match` (two refusals against an unchanged ETag) and reports that
+instead of retrying to exhaustion. It negotiates quoted versus bare ETags
+(`S3_ETAG_STYLE`) and no longer treats an unreadable object as an absent one.
+The API probes the endpoint once at startup and logs an ERROR if overwrites
+are refused. Run `python -m src.tools.probe_s3_cas` to check an endpoint
+directly.
+
+**One analysis per DLT record (`src/dlt/claims.py`).** Storage is keyed on
+the refId, deliberately, so an operator can find a casebook by the id they
+have. But the refId comes from the record key, and one DLT record delivered
+under two keys got two refIds, two casebooks and two LLM runs. The fetch lane
+now claims `case_id` (topic-partition-offset, the record's own identity)
+create-only. A later delivery under a different refId is skipped. The same
+refId arriving again is let through, and the terminal-status check stops a
+finished case being redone. A claim whose holder never finished is taken over
+after `DLT_CLAIM_TTL_SECONDS`. The analysis lane re-checks the holder, and the
+claim fails open if its store is down. Every refId a record arrived under is
+recorded, so a skipped duplicate is still findable. Group occurrences are
+recorded under the `case_id` too; the old call site passed the refId.
+
+**One investigation per fingerprint per burst (`src/dlt/single_flight.py`).**
+Reuse can only serve an answer that already exists. A burst arrives before
+anyone has produced one, so every member of it used to decide "novel" and pay
+for the LLM. When the LLM is needed only because nothing is cached
+(`ReuseDecision.awaits_cache`), requests for the same fingerprint pass through
+an `asyncio.Lock`. The first one investigates; the rest wait, re-read the
+group and are served the result. The re-read happens whether or not a request
+waited, because its decision was taken before the gate. It is asyncio rather
+than threading because the gate is held across an `await`, and a thread lock
+there would block the event loop. The wait is bounded by the analysis budget,
+after which a waiter investigates anyway. The gate is per process only; a
+burst split across N replicas can still cost up to N investigations.
+
+**Casebooks report what happened, not what was intended.**
+`recommendation_state` is `draft` only when the recommendation was actually
+cached. It is `unpersisted` when that write failed, `withheld` when the
+per-code check kept the finding out of the cache, and `none` for canned
+findings. It used to say `draft` unconditionally. `group_state` separates
+"counted" from "this case's occurrence was not recorded" from "the group
+could not be read", so a null `group_occurrences` is never mistaken for a
+first occurrence. `single_flight` records leader / reused / waited_then_ran /
+timeout.
+
+**A per-code check guards the cache (`src/dlt/per_code.py`).** A cached finding
+is served verbatim to every later packet, so an agent finding is scanned
+before it is cached. Another packet's identifiers (a UUID, or 12 or more
+digits) cause it to be **withheld**: this packet still gets it, and the next
+one re-investigates. "This packet" wording and source line numbers are
+counted and recorded but still cached, because they go stale but do not leak
+another packet's data. The synthesis prompt, which writes the cached text,
+now carries the same rules.
+
+**Confidence for documentation-reasoned findings.** A single UNVERIFIABLE
+ceiling of 0.5 capped a fully documented root cause at 0.5 just because the
+logs had nothing to add. It is now split on `corroboration.could_not_look`:
+0.75 when the logs could not be checked at all
+(`DLT_LOGS_UNAVAILABLE_CEILING`), and 0.6 when they were checked and were
+silent (`DLT_LOGS_SILENT_CEILING`). `CONTRADICTED` is unchanged. The label
+`unverifiable` stays in `ceilings_applied` either way, which is what the
+replay gate reads (point 8). A legacy `DLT_UNVERIFIED_CONFIDENCE_CEILING` set
+to anything other than its old default 0.5 still overrides both. The
+synthesis prompt's confidence guidance was changed to match, because it had
+told the model to cap itself at 0.5 before the code ceiling ever applied.
+
+**Each agent flow gets its own rules.** opencode loads the root `AGENTS.md`
+into every session, whatever the task, so it now holds only rules shared by
+both flows. The flow-specific rules live in
+`src/prompts/harness/rules/{rejection,dlt}.md` and are inlined by the prompt
+loader's `{{> rules/<flow>}}` directive. The DLT agent had been told it was
+"the Rejection Investigator Agent" and not to read `reason_codes.csv`, which
+is its own flow's registry.
+
+New counters: `dlt_group_writes_total{operation,outcome}`,
+`dlt_claims_total{outcome}`, `dlt_singleflight_total{outcome}`,
+`dlt_per_code_violations_total{pattern}`. A sustained `failed` rate on the
+first means group state is not accumulating.
 
 ## 5. Known Gaps & Deviations
 

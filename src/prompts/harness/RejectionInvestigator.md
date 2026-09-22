@@ -97,4 +97,6 @@ The file MUST be named investigation.json at the path above.
 Write a JSON object with this schema:
 {"investigation": "<your detailed analysis text>", "citations": [<list of cited evidence>]}
 
-Follow the rules in AGENTS.md.
+Follow the rules in AGENTS.md, and these rules for this flow:
+
+{{> rules/rejection}}

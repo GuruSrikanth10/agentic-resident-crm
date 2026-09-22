@@ -22,18 +22,28 @@ written for, every increment was a lost-update race and two pods analysing one
 novel fingerprint could each write a different `recommendation`,
 last-writer-wins. `update_json` puts the atomicity in the backend that can
 actually provide it: a held lock locally, a conditional write on S3.
+
+**That conditional write turned out not to be portable.** An S3-compatible
+store that accepts `If-None-Match: *` but refuses `If-Match` creates every
+group record and then refuses every update to it -- `occurrence_count` stuck
+at 1, `recommendation` and `code_check` permanently null, reuse never firing,
+with no contending writer anywhere. `group_store.py` is the replacement: the
+same records, built only from create-only and blind writes, which every store
+supports. It is the default (`DLT_GROUP_STORE=v2`). The single-document store
+below is kept, selectable with `DLT_GROUP_STORE=v1`, as a rollback path only.
 """
 import json
 import os
 import time
 from typing import Optional
 
+from src.dlt import group_store
 from src.dlt.case_storage import get_group_storage
 from src.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
 
-DEFAULT_MEMBER_CAP = 200
+DEFAULT_MEMBER_CAP = group_store.DEFAULT_MEMBER_CAP
 
 #: Recommendation lifecycle. Nothing writes `final` in v1 -- there is no
 #: review mechanism yet, so every reused recommendation stays explicitly
@@ -42,14 +52,34 @@ STATE_NONE = "none"
 STATE_DRAFT = "draft"
 STATE_FINAL = "final"
 
+#: Casebook-only states, never stored on a group -- they describe what
+#: happened to *this* finding, so a reader of the casebook is never told a
+#: recommendation was filed when it was not. The casebook used to assert
+#: "draft" unconditionally, including on every case whose write had failed.
+#:   unpersisted  the finding should have been cached and the write failed
+#:   withheld     the finding carried packet-specific identifiers and was
+#:                deliberately kept out of the cache (src/dlt/per_code.py)
+STATE_UNPERSISTED = "unpersisted"
+STATE_WITHHELD = "withheld"
+
 
 
 def member_cap() -> int:
-    try:
-        return max(1, int(os.environ.get("DLT_GROUP_MEMBER_CAP",
-                                         str(DEFAULT_MEMBER_CAP))))
-    except (ValueError, TypeError):
-        return DEFAULT_MEMBER_CAP
+    return group_store.member_cap()
+
+
+def store_version() -> str:
+    """Which group store is live: "v2" (default) or "v1".
+
+    Read on every call rather than at import, so a test -- or an operator
+    rolling back -- can switch it without a restart.
+    """
+    raw = os.environ.get("DLT_GROUP_STORE", "v2").strip().lower()
+    return "v1" if raw == "v1" else "v2"
+
+
+def _v2() -> bool:
+    return store_version() == "v2"
 
 
 def _blank(fingerprint: str) -> dict:
@@ -76,10 +106,16 @@ def _blank(fingerprint: str) -> dict:
 
 
 def load_group(fingerprint: str) -> Optional[dict]:
-    """Read a group record, or None when the fingerprint is novel."""
+    """Read a group record, or None when the fingerprint is novel.
+
+    An unreadable store also yields None: the reuse decision then runs the
+    LLM, which is the safe default. It must never raise into the caller.
+    """
     if not fingerprint:
         return None
     try:
+        if _v2():
+            return group_store.load_group(fingerprint)
         return get_group_storage().load(fingerprint, filename="group.json")
     except Exception as e:
         logger.warning("Could not load DLT group; treating as novel",
@@ -100,13 +136,25 @@ def record_occurrence(fingerprint: str,
                       signature: str = "",
                       failure_class: str = "U",
                       business_code: Optional[str] = None,
-                      corroboration: Optional[str] = None) -> dict:
+                      corroboration: Optional[str] = None,
+                      ref_id: Optional[str] = None) -> dict:
     """Register one case against its fingerprint and return the group.
 
     Idempotent per case: a redelivered case that is already a member does not
     double-count. Without that, a redrive would inflate every occurrence count
     and make the cost model look better than it is.
+
+    `case_id` must be the DLT case id -- `dlt-{topic}-{partition}-{offset}` --
+    not the refId. Idempotency is keyed on it, and the same record redelivered
+    under a different record key has a different refId but the same case id.
+    `ref_id` is recorded beside it so an operator can still look the packet up.
     """
+    if _v2():
+        return group_store.record_occurrence(
+            fingerprint, case_id, ref_id=ref_id, signature=signature,
+            failure_class=failure_class, business_code=business_code,
+            corroboration=corroboration)
+
     now = time.time()
 
     def mutate(current: Optional[dict]) -> dict:
@@ -139,8 +187,13 @@ def record_occurrence(fingerprint: str,
 
 
 def attach_recommendation(fingerprint: str, recommendation: dict,
-                          state: str = STATE_DRAFT) -> dict:
+                          state: str = STATE_DRAFT,
+                          by_case_id: Optional[str] = None) -> dict:
     """Record the recommendation an investigation produced for this group."""
+    if _v2():
+        return group_store.attach_recommendation(
+            fingerprint, recommendation, state, by_case_id=by_case_id)
+
     def mutate(current: Optional[dict]) -> dict:
         group = dict(current or _blank(fingerprint))
         group["recommendation"] = recommendation
@@ -150,7 +203,8 @@ def attach_recommendation(fingerprint: str, recommendation: dict,
     return get_group_storage().update_json(fingerprint, "group.json", mutate)
 
 
-def attach_code_check(fingerprint: str, record: dict) -> dict:
+def attach_code_check(fingerprint: str, record: dict,
+                      by_case_id: Optional[str] = None) -> dict:
     """Record this group's latest code-check verdict, and count the verdicts
     it has seen. Phase C5.
 
@@ -158,6 +212,10 @@ def attach_code_check(fingerprint: str, record: dict) -> dict:
     load-then-save would lose increments exactly as `record_occurrence` used
     to, and the DLT analysis role is meant to scale out.
     """
+    if _v2():
+        return group_store.attach_code_check(fingerprint, record,
+                                             by_case_id=by_case_id)
+
     def mutate(current: Optional[dict]) -> dict:
         group = dict(current or _blank(fingerprint))
         group["code_check"] = record
@@ -179,6 +237,9 @@ def has_usable_recommendation(group: Optional[dict]) -> bool:
 
 def list_groups() -> list:
     """Every group record, newest activity first. For the operator CLI."""
+    if _v2():
+        return group_store.list_groups()
+
     storage = get_group_storage()
     groups = []
     try:

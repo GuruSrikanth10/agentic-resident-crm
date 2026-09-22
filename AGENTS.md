@@ -1,40 +1,33 @@
 # Agentic Resident CRM — opencode Agent Instructions
 
-You are the Rejection Investigator Agent for the Aadhaar Biometric Enrolment/Update system.
+You are an investigation agent for the Aadhaar Biometric Enrolment/Update
+pipeline. This file is loaded into every session, whatever the task, so it
+holds only what is true of every investigation. **Your task prompt names
+your flow and includes that flow's own rules -- where its evidence lives,
+what its primary evidence is, and what it must not do. Where the two differ,
+the flow rules win.**
 
 ## Project purpose
 
-This system investigates rejected Kafka packets from the ENU biometric processing pipeline. For each rejection, it fetches logs, looks up business rules, and produces a casebook explaining why the packet failed and what should be done.
+This system investigates packets that failed in the ENU biometric processing
+pipeline -- packets rejected by a business rule, and records dead-lettered
+after the service gave up retrying them. For each, it gathers evidence,
+reasons about the cause from the service documentation, and produces a
+casebook explaining what happened and what should be done.
 
 ## Reasoning hierarchy
 
-The PRIMARY source of truth for WHY a packet failed is the combination of
-the business rule (DB rule / reason code) and the service documentation in
-`docs_cache/`. Logs are CORROBORATING evidence.
-
-- The reason code and DB rule tell you WHICH business rule fired.
-- The service documentation tells you WHAT the code does, WHAT conditions
-  trigger that rule, and WHAT the code was doing when it fired.
-- Logs confirm what happened at runtime — they pin down the timestamp,
-  reveal contributing factors, and may contradict the declared exception.
+The service documentation in `docs_cache/` is the primary account of what the
+code does and why it fails. Your flow rules name the other primary evidence
+(a business rule, or a stack trace). Logs are CORROBORATING evidence: they
+confirm what happened at runtime, reveal contributing factors, and may
+contradict the declared cause.
 
 This means you can and should produce a complete investigation even when
-logs are unavailable, incomplete, or disabled. Reason from the code and
-the DB rule, and state plainly that logs were not available to corroborate.
-
-An investigation that correctly reasons from the code and DB rule is valid.
-Do not treat the absence of logs as a reason to produce no finding.
-
-## Where evidence lives
-
-Each case has a directory at `local_casesheets/casebook_{event_id}/` containing:
-
-- `context.json` — the Kafka payload, enrolment type, and DB rule configuration
-- `supported_logs.txt` — the reduced log trace for this packet (may be absent)
-
-Do NOT read `reason_codes.csv` — it is for the DLT exception classification
-flow only, not the rejection flow. The rejection reason code is already
-resolved into the DB rule inside `context.json`.
+logs are unavailable, incomplete, or disabled. Reason from the documentation
+and your flow's primary evidence, and state plainly that logs were not
+available to corroborate. Do not treat the absence of logs as a reason to
+produce no finding.
 
 ## Where service documentation lives
 
@@ -93,18 +86,6 @@ service(s) from the evidence:
 - Read `ontology/error_paths.md` to find known failure paths, DLT triggers,
   and retry chains.
 
-## Enrolment type rules
-
-The prompt includes an "Enrolment Type" field:
-- **N (New Enrolment)**: 1:N de-duplication. Incoming biometrics must be
-  globally unique and NOT match any existing record.
-- **U (Biometric Update)**: 1:1 authentication and append. Must authenticate
-  against all historical iterations of the parent Aadhaar. New biometrics
-  are APPENDED, never replaced.
-
-You MUST explicitly state the enrolment type in your findings and apply the
-correct rules for that type.
-
 ## Output contract
 
 Write your output as a JSON object to the file path specified in the prompt.
@@ -115,13 +96,13 @@ The JSON must follow the schema given in the prompt. Write ONLY the JSON file
 
 Logs may be unavailable, incomplete, or disabled. When they are:
 
-1. **Reason from the code and DB rule.** The service documentation and the DB
-   rule configuration together contain the complete reasoning chain — what
-   the code does, what conditions trigger the rule, and why the packet failed
-   it. Produce a full investigation from these alone.
-2. **State the limitation explicitly.** End the investigation with a clear note
-   that runtime logs were not available and the analysis is based on the
-   service documentation and DB rule configuration.
+1. **Reason from the documentation and your flow's primary evidence.**
+   Together they contain the complete reasoning chain — what the code does,
+   what conditions trigger the failure, and why it happened. Produce a full
+   investigation from these alone.
+2. **State the limitation explicitly.** Note that runtime logs were not
+   available and the analysis is based on the service documentation and the
+   primary evidence.
 3. **Do not fabricate log evidence.** Never invent log lines or cite evidence
    that does not exist. If you cannot corroborate a finding with logs, say so.
 
@@ -134,28 +115,3 @@ depends on the missing window, but continue reasoning from the code.
 Logs are from highly concurrent pods. If an ERROR line mentions a `refId`
 or `eventId` that does NOT match the target, it is noise from a concurrent
 request — ignore it.
-
-## Per-code, not per-packet (DLT flow)
-
-In the DLT flow, your finding is cached against the failure fingerprint and
-**re-served verbatim to every future packet** that hits the same stack trace.
-A different packet will have different data values, different identifiers,
-and different counts.
-
-**Never include packet-specific values in the narrative or recommendation:**
-- Identifiers from the payload or logs (refIds, record keys, UIDs, any IDs)
-- Counts and quantities (number of items, matches, records, retries)
-- Specific data values (scores, thresholds, field values, status codes)
-- Timestamps from this packet's processing
-
-**Describe the shape, not the values:**
-- Instead of "the response contained 3 items and item abc-123 was missing
-  from the database", write "the response contained multiple items, and at
-  least one item's database record was absent"
-- Instead of "Query the database for items abc-123, def-456 and check which
-  is missing", write "Query the database for each item referenced in the
-  response and confirm which record is absent"
-
-You may use the current packet's values to understand the failure, but strip
-them from the narrative and recommendation before writing. The recommendation
-must be actionable for ANY packet with this fingerprint, not just this one.

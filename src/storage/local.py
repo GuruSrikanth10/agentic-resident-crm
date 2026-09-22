@@ -50,6 +50,8 @@ class LocalFilesystemCasebookStorage(CasebookStorage):
     def save(self, event_id: str, casebook: dict, filename: str = "casebook.json") -> None:
         target_dir = self._get_dir(event_id)
         final_path = target_dir / filename
+        # `filename` may address a sub-path, as create_json's does.
+        final_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = target_dir / f"{filename}.tmp"
         lock_path = target_dir / f"{filename}.lock"
 
@@ -188,6 +190,46 @@ class LocalFilesystemCasebookStorage(CasebookStorage):
             replace_with_retry(tmp_path, final_path)
 
         return updated
+
+    def create_json(self, event_id: str, filename: str, document: dict) -> bool:
+        """Create-only write. See `CasebookStorage.create_json`.
+
+        `os.open(..., O_CREAT | O_EXCL)` is the local equivalent of
+        `If-None-Match: *`: the check and the create are one syscall, so two
+        processes racing for the same name cannot both win. The FileLock the
+        other writers take is not enough on its own -- it serialises them, but
+        both would still go on to write.
+        """
+        target_dir = self._get_dir(event_id)
+        final_path = target_dir / filename
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if "schema_version" not in document:
+            document["schema_version"] = CASEBOOK_SCHEMA_VERSION
+
+        try:
+            fd = os.open(str(final_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            return False
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(document, f, indent=4, ensure_ascii=False)
+        except Exception:
+            # A half-written file under a name we claimed is worse than no
+            # file: every later reader would see it and skip the create.
+            try:
+                final_path.unlink()
+            except Exception:
+                pass
+            raise
+        return True
+
+    def list_json(self, event_id: str, subdir: str) -> list:
+        target_dir = self._resolve_dir(event_id) / subdir
+        if not target_dir.is_dir():
+            return []
+        return sorted(path.name for path in target_dir.iterdir()
+                      if path.is_file() and path.name.endswith(".json"))
 
     def list_events(self) -> list:
         if not self.base_dir.exists():

@@ -96,8 +96,18 @@ after this one.
 Rules:
 - **Never include packet-specific values**: identifiers from the payload
   (refIds, record keys, UIDs), counts and quantities (number of items,
-  matches, retries), specific data values (scores, thresholds, field
-  values), or timestamps from this packet's processing.
+  matches, retries), specific data values (scores, field values), or
+  timestamps from this packet's processing.
+- **Configuration is per-code, and may be cited.** A value that is the same
+  for every packet -- a property's configured threshold, a retry count or
+  backoff from config, a topic name -- describes the code, not this packet.
+- **Never cite source line numbers** -- not `Foo.java:185`, not "line 190",
+  not "lines 185-200". They change on every release, and this text outlives
+  the release it was written against. Name the class and method instead:
+  `BioDataBaseHelperServiceImpl.getIndexMasterData`.
+- **Never write "this packet", "this request" or "this record".** The reader
+  is looking at a different one. Write "packets with this failure" or
+  describe the code path.
 - **Describe the shape, not the values.** Instead of "the response contained
   3 items and item abc-123 was missing from the database", write "the
   response contained multiple items, and at least one item's database
@@ -117,10 +127,12 @@ If logs WERE available: cite both the documentation references and the specific
 log lines that corroborate them.
 
 If logs were NOT available: state your reasoning from the stack trace and
-service documentation, and end with a clear statement such as:
-"Note: Runtime logs were not available for this packet. This analysis is based
-on the stack trace and the service documentation. The failure cause is derived
-from the code's documented behaviour."
+service documentation, and end with a statement in exactly this per-code
+form -- it is cached with the rest of the finding, so it must not refer to
+one packet:
+"Runtime logs did not corroborate this failure mode in the window checked.
+This analysis is based on the stack trace and the service documentation,
+which are authoritative for why this code path fails."
 
 CRITICAL: You MUST write your output to EXACTLY this file path:
   {{output_path}}
@@ -128,4 +140,6 @@ Do NOT write to any other filename.
 Write a JSON object with this schema:
 {"investigation": "<your detailed analysis text>", "citations": [<list of cited evidence>]}
 
-Follow the rules in AGENTS.md.
+Follow the rules in AGENTS.md, and these rules for this flow:
+
+{{> rules/dlt}}

@@ -38,6 +38,12 @@ class Decision(str, Enum):
 class ReuseDecision:
     decision: Decision
     reason: str
+    #: True only when the LLM is required *because nothing is cached yet* --
+    #: i.e. a recommendation arriving from a concurrent investigation of the
+    #: same fingerprint would have satisfied this message instead. That is the
+    #: one case worth waiting on (src/dlt/single_flight.py). A discrepancy, or
+    #: reuse being switched off, needs the LLM regardless of the cache.
+    awaits_cache: bool = False
 
     @property
     def calls_llm(self) -> bool:
@@ -78,7 +84,8 @@ def decide(failure_class: str,
     if not has_usable_recommendation(group):
         return ReuseDecision(
             Decision.LLM_REQUIRED,
-            "novel fingerprint; no recommendation on file for this group")
+            "novel fingerprint; no recommendation on file for this group",
+            awaits_cache=True)
 
     if verdict == Verdict.CORROBORATED.value:
         return ReuseDecision(

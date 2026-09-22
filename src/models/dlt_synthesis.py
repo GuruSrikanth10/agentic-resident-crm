@@ -26,6 +26,32 @@ DLT_ACTIONS = (
 
 DEFAULT_CLASS_B_CEILING = 0.3
 DEFAULT_UNVERIFIED_CEILING = 0.5
+
+#: Doc-primary ceilings for UNVERIFIABLE corroboration.
+#:
+#: The service documentation is the authoritative account of why a code path
+#: fails; runtime logs corroborate it. A single 0.5 ceiling for every
+#: UNVERIFIABLE case capped a correctly reasoned, fully documented finding at
+#: 0.5 merely because the logs had nothing to add. Corroboration already
+#: separates two very different situations, and they deserve different caps:
+#:
+#:   logs unavailable  we never looked -- the window was too old, the fetch was
+#:                     skipped or failed. The documentation stands alone and is
+#:                     not contradicted by anything. `could_not_look = True`.
+#:   logs silent       we looked and the identifier was not there. Under short
+#:                     log retention this is usually just retention, but the
+#:                     logs *could* have spoken and did not, so it is capped
+#:                     lower. `could_not_look = False`.
+#:
+#: CONTRADICTED is untouched: logs disagreeing with the trace is a real signal.
+DEFAULT_LOGS_UNAVAILABLE_CEILING = 0.75
+DEFAULT_LOGS_SILENT_CEILING = 0.6
+
+#: The `ceilings_applied` label for UNVERIFIABLE corroboration, whichever of
+#: the ceilings above bound. `auto_replay.decide` reads it: raising what an
+#: uncorroborated diagnosis may score must never also loosen what an
+#: uncorroborated finding may *do*.
+UNVERIFIABLE_LABEL = "unverifiable"
 DEFAULT_CONTRADICTED_CEILING = 0.6
 DEFAULT_REGISTRY_MISS_CEILING = 0.5
 DEFAULT_REUSE_DECAY = 0.95
@@ -44,6 +70,37 @@ def class_b_ceiling() -> float:
 
 def unverified_ceiling() -> float:
     return _float_env("DLT_UNVERIFIED_CONFIDENCE_CEILING", DEFAULT_UNVERIFIED_CEILING)
+
+
+def _doc_primary_default(default: float) -> float:
+    """An operator who deliberately changed the old single ceiling keeps it.
+
+    Silently raising a cap someone deliberately lowered would be a surprise
+    in the worst direction, so a changed pre-split setting remains the
+    default for both new ceilings -- each of which can still be set on its
+    own.
+
+    "Changed" means different from the old default. `.env.example` has always
+    shipped `DLT_UNVERIFIED_CONFIDENCE_CEILING=0.5`, so nearly every deployed
+    `.env` carries that line verbatim; treating its mere presence as a choice
+    would make the split a no-op everywhere. A value of exactly the old
+    default is indistinguishable from one copied out of the example.
+    """
+    if os.environ.get("DLT_UNVERIFIED_CONFIDENCE_CEILING"):
+        legacy = unverified_ceiling()
+        if legacy != DEFAULT_UNVERIFIED_CEILING:
+            return legacy
+    return default
+
+
+def logs_unavailable_ceiling() -> float:
+    return _float_env("DLT_LOGS_UNAVAILABLE_CEILING",
+                      _doc_primary_default(DEFAULT_LOGS_UNAVAILABLE_CEILING))
+
+
+def logs_silent_ceiling() -> float:
+    return _float_env("DLT_LOGS_SILENT_CEILING",
+                      _doc_primary_default(DEFAULT_LOGS_SILENT_CEILING))
 
 
 def contradicted_ceiling() -> float:
@@ -90,7 +147,8 @@ def apply_dlt_confidence_policy(finding: DltFinding,
                                 corroboration: str,
                                 registry_hit: bool,
                                 reused: bool = False,
-                                logs: str = "") -> DltFinding:
+                                logs: str = "",
+                                could_not_look: Optional[bool] = None) -> DltFinding:
     """Cap a finding's confidence at what its evidence supports.
 
     Ceilings compose by taking the minimum. `ceilings_applied` names every
@@ -126,7 +184,18 @@ def apply_dlt_confidence_policy(finding: DltFinding,
         cap(class_b_ceiling(), f"class_{failure_class.lower()}")
 
     if corroboration == "UNVERIFIABLE":
-        cap(unverified_ceiling(), "unverifiable")
+        # "unverifiable" stays in `ceilings_applied` whichever cap binds, so
+        # anything counting it keeps working; the qualifier beside it says
+        # which of the two situations this was. A caller that does not know
+        # (`could_not_look=None`) gets the original single ceiling.
+        if could_not_look is True:
+            cap(logs_unavailable_ceiling(), UNVERIFIABLE_LABEL)
+            applied.append("logs_unavailable")
+        elif could_not_look is False:
+            cap(logs_silent_ceiling(), UNVERIFIABLE_LABEL)
+            applied.append("logs_silent")
+        else:
+            cap(unverified_ceiling(), UNVERIFIABLE_LABEL)
     elif corroboration == "CONTRADICTED":
         # We know the trace is wrong. We do not know what is right.
         cap(contradicted_ceiling(), "contradicted")

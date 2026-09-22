@@ -66,6 +66,17 @@ async def lifespan(app: FastAPI):
     from src.utils.case_cleanup import start_reaper
     start_reaper()
 
+    # Ask the S3 endpoint, once, whether it honours the conditional writes
+    # `update_json` relies on. An endpoint that accepts creates but refuses
+    # If-Match overwrites is otherwise silent: every record is created and
+    # never updated again. Off the startup path, like the harness below, so
+    # a slow or unreachable store cannot delay the API binding its port.
+    if os.environ.get("CASEBOOK_STORAGE_BACKEND", "local").strip().lower() == "s3":
+        import threading
+        from src.storage import s3 as s3_storage
+        threading.Thread(target=s3_storage.probe_configured_endpoint,
+                         name="s3-cas-probe", daemon=True).start()
+
     # Start the opencode harness in a background thread so the API binds
     # its port immediately. The corpus download and `opencode serve` cold
     # boot take 15-30s; doing them in the lifespan blocked the API from

@@ -15,11 +15,23 @@ Design notes
   build time; harness prompts are per-case and benefit from live reload).
 * The backend is intentionally pluggable: a future Langfuse integration
   replaces only the ``_load_text`` function -- callers stay unchanged.
+* ``{{> rules/dlt}}`` inlines ``harness/rules/dlt.md``. This is how a template
+  gets flow-specific agent rules. The root ``AGENTS.md`` cannot carry them:
+  opencode loads it into *every* session whatever the task, so a
+  rejection-only rule there is read by the DLT agent too -- which is how the
+  DLT agent came to be told it was "the Rejection Investigator Agent" and not
+  to read ``reason_codes.csv``, the registry its own flow is built on.
 """
 import os
 import re
 
 _PLACEHOLDER = re.compile(r"\{\{(\w+)\}\}")
+#: Matches every `{{> ...}}` directive, valid or not, so that a malformed one
+#: fails loudly in `_include` instead of being left in the prompt as literal
+#: text -- where a typo such as `{{> rules/dlt.md}}` would silently drop a
+#: flow's rules.
+_INCLUDE = re.compile(r"\{\{>\s*([^}]*?)\s*\}\}")
+_INCLUDE_NAME = re.compile(r"^[\w-]+(?:/[\w-]+)*$")
 
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _HARNESS_DIR = os.path.join(_BASE_DIR, "prompts", "harness")
@@ -30,6 +42,24 @@ def _load_text(name: str) -> str:
     path = os.path.join(_HARNESS_DIR, f"{name}.md")
     with open(path, "r", encoding="utf-8") as fh:
         return fh.read()
+
+
+def _include(name: str) -> str:
+    """Contents of ``harness/<name>.md`` for a ``{{> name}}`` directive.
+
+    Confined to the harness directory: the name admits no ``.`` and no
+    leading ``/``, and the resolved path is checked as well, so a template
+    cannot include anything outside it.
+    """
+    if not _INCLUDE_NAME.match(name):
+        raise ValueError(f"Invalid include {name!r}: use a path relative to the "
+                         f"harness directory, without an extension, e.g. rules/dlt")
+    path = os.path.realpath(os.path.join(_HARNESS_DIR, f"{name}.md"))
+    root = os.path.realpath(_HARNESS_DIR)
+    if os.path.commonpath([path, root]) != root:
+        raise ValueError(f"Include '{name}' resolves outside the harness directory")
+    with open(path, "r", encoding="utf-8") as fh:
+        return fh.read().rstrip("\n")
 
 
 def render(name: str, **variables: str) -> str:
@@ -47,7 +77,8 @@ def render(name: str, **variables: str) -> str:
     KeyError:
         If the template contains a placeholder not present in *variables*.
     """
-    template = _load_text(name)
+    # Includes first, so an included file may use placeholders too.
+    template = _INCLUDE.sub(lambda m: _include(m.group(1)), _load_text(name))
 
     def _replace(match: re.Match) -> str:
         key = match.group(1)
