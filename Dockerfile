@@ -33,7 +33,13 @@ ENV PATH=/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH} \
 WORKDIR /app
 
 # ---- System dependencies ----
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# apt-get upgrade applies all security patches from the base image's
+# distro (libc6, libssl3, perl, tar, openssl, systemd, etc.) before
+# installing our own packages. This closes Qualys findings that are
+# OS-level package CVEs, not application code issues.
+RUN apt-get update && \
+    apt-get upgrade -y && \
+    apt-get install -y --no-install-recommends \
     git \
     curl \
     ca-certificates \

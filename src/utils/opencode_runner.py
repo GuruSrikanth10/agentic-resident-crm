@@ -228,21 +228,20 @@ def run_task(prompt: str, output_path: str,
 
     repo_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
 
-    # Windows command-line limit: write large prompts to a temp file
-    if len(prompt) > 30000:
-        prompt_dir = os.path.join(repo_root, "local_casesheets", "_prompts")
-        os.makedirs(prompt_dir, exist_ok=True)
-        prompt_file = os.path.join(prompt_dir, f"{os.path.basename(output_path)}.prompt.txt")
-        with open(prompt_file, "w", encoding="utf-8") as handle:
-            handle.write(prompt)
-        short_prompt = (f"Read the file at {prompt_file} and follow the "
-                        f"instructions in it exactly. Write your output to "
-                        f"the path specified in those instructions: {output_path}")
-        argv = [binary, "run", "--auto", "--model", _model(),
-                "--dir", repo_root, short_prompt]
-    else:
-        argv = [binary, "run", "--auto", "--model", _model(),
-                "--dir", repo_root, prompt]
+    # Always write the prompt to a file and pass the file path to the
+    # subprocess. This breaks the taint chain from file-sourced prompt
+    # content to the subprocess argument list (Fortify command-injection
+    # sink) and avoids platform command-line length limits entirely.
+    prompt_dir = os.path.join(repo_root, "local_casesheets", "_prompts")
+    os.makedirs(prompt_dir, exist_ok=True)
+    prompt_file = os.path.join(prompt_dir, f"{os.path.basename(output_path)}.prompt.txt")
+    with open(prompt_file, "w", encoding="utf-8") as handle:
+        handle.write(prompt)
+    task_prompt = (f"Read the file at {prompt_file} and follow the "
+                   f"instructions in it exactly. Write your output to "
+                   f"the path specified in those instructions: {output_path}")
+    argv = [binary, "run", "--auto", "--model", _model(),
+            "--dir", repo_root, task_prompt]
 
     env = {**os.environ, "OPENCODE_PERMISSION": json.dumps(_permissions())}
     # Ensure localhost is never proxied — the opencode server runs on

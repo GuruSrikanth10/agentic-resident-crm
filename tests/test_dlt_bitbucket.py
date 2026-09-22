@@ -22,6 +22,8 @@ REPO_MAP = json.dumps({
     },
 })
 
+_FAKE_TEST_TOKEN = "read-only-token"  # test fixture, not a real credential
+
 
 @pytest.fixture(autouse=True)
 def _isolate(monkeypatch):
@@ -31,7 +33,7 @@ def _isolate(monkeypatch):
                 "DLT_CODE_CHECK_MAX_COMMITS"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("BITBUCKET_BASE_URL", "https://bitbucket.example")
-    monkeypatch.setenv("BITBUCKET_TOKEN", "read-only-token")
+    monkeypatch.setenv("BITBUCKET_TOKEN", _FAKE_TEST_TOKEN)
     monkeypatch.setenv("DLT_REPO_MAP", REPO_MAP)
     monkeypatch.setenv("DLT_CODE_CHECK_TTL_SECONDS", "0")
     B.reset_cache()
@@ -439,7 +441,7 @@ def test_a_bare_token_is_sent_as_a_bearer_header(monkeypatch):
     B.commits_touching(_repo(), "Foo.java")
 
     _, _, headers, auth = calls[0]
-    assert headers["Authorization"] == "Bearer read-only-token"
+    assert headers["Authorization"] == f"Bearer {_FAKE_TEST_TOKEN}"
     assert auth is None
 
 
@@ -450,7 +452,7 @@ def test_a_username_switches_to_basic_auth_for_cloud_app_passwords(monkeypatch):
 
     _, _, headers, auth = calls[0]
     assert "Authorization" not in headers
-    assert auth == ("svc-account", "read-only-token")
+    assert auth == ("svc-account", _FAKE_TEST_TOKEN)
 
 
 def test_repeated_reads_are_served_from_the_cache(monkeypatch):

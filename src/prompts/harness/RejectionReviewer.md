@@ -3,22 +3,52 @@ Review the investigation for event {{event_id}}.
 Read the investigation:
 - local_casesheets/casebook_{{event_id}}/investigation_text.txt
 
-Verify the investigation's claims against the case evidence:
-- local_casesheets/casebook_{{event_id}}/supported_logs.txt (the log trace)
+Read the case evidence:
 - local_casesheets/casebook_{{event_id}}/context.json (payload, enrolment type, DB rule)
+- local_casesheets/casebook_{{event_id}}/supported_logs.txt (the log trace — may be absent or incomplete)
 
-Verify the investigation's claims against the service documentation in docs_cache/:
-- Use Glob to find module docs: Glob docs_cache/enu-biometric/docs/modules/*<ClassName>*
-- Use Grep to search for error codes or method names across the corpus
-- Read architecture docs: docs_cache/enu-biometric/docs/architecture/components.md
-- Read dataflow: docs_cache/enu-biometric/docs/architecture/dataflow.md
+## Reasoning hierarchy
 
-Check for these common errors:
-1. Glossary violations: 'demo' = face modality, 'nonDemo' = fingerprints and iris. 'TD' = all nonDemo matched.
-2. Reason code mismatches: verify the reason code in the investigation matches the one in context.json.
-3. Enrolment type misapplication: N = 1:N dedup, U = 1:1 auth and append, MBU = treated as 1:N.
-4. Claims not grounded in logs: verify cited log lines actually exist in supported_logs.txt.
-5. Claims not grounded in docs: verify service behaviour claims against the documentation.
+The PRIMARY source of truth for WHY a packet was rejected is the combination
+of the DB rule and the service documentation. Logs are corroborating evidence.
+An investigation that correctly reasons from the code and DB rule is valid
+even when logs are unavailable — the Reviewer must not reject it merely for
+lacking log citations when no logs were available.
+
+## STEP 1 — Confirm which service(s) the investigation references
+
+- List the available services: Glob docs_cache/*/docs/architecture/components.md
+- Read docs_cache/MANIFEST.json for the full service list
+- Check that the investigation identified the correct service(s) from the
+  evidence (payload flowMetaData.stage, Kafka topics, reason code)
+
+## STEP 2 — Verify claims against the documentation
+
+- Read architecture: docs_cache/<service>/docs/architecture/components.md
+- Read dataflow: docs_cache/<service>/docs/architecture/dataflow.md
+- Read packet flows: docs_cache/<service>/docs/ontology/flows.md
+- Read error paths: docs_cache/<service>/docs/ontology/error_paths.md
+- Use Glob to find module docs by class name:
+  Glob docs_cache/<service>/docs/modules/*<ClassName>*
+- Use Grep to search for the reason code, error codes, or method names
+  across the entire corpus
+
+## STEP 3 — Check for these common errors
+
+1. Reason code misapplication: verify the investigation's explanation of the
+   reason code matches what the DB rule and service documentation say.
+2. Glossary violations: 'demo' = face modality, 'nonDemo' = fingerprints and
+   iris. 'TD' = all nonDemo matched.
+3. Enrolment type misapplication: N = 1:N dedup, U = 1:1 auth and append,
+   MBU = treated as 1:N.
+4. Claims not grounded in docs: verify service behaviour claims against the
+   documentation. Every claim about what the code does must cite the doc.
+5. Claims not grounded in logs (when logs ARE available): if logs were
+   available, verify cited log lines actually exist in supported_logs.txt.
+   If logs were NOT available, do NOT reject the investigation for lacking
+   log citations — verify instead that it stated this plainly.
+6. Wrong service identified: verify the investigation attributed the failure
+   to the correct service.
 
 CRITICAL: You MUST write your output to EXACTLY this file path:
   {{output_path}}

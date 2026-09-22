@@ -20,6 +20,7 @@ exceptional path rather than the norm.
 """
 import json
 import os
+import random
 import time
 import threading
 from typing import Optional
@@ -241,6 +242,10 @@ class S3CasebookStorage(CasebookStorage):
                 logger.info("Conditional write lost a race; retrying",
                             event_id=event_id, filename=filename,
                             attempt=attempt + 1)
+                # Jittered backoff: when several pods contend on the same
+                # fingerprint, retrying immediately makes the next round a
+                # tie again. A small random delay spreads them out.
+                time.sleep(random.uniform(0, min(attempt * 0.05, 0.3)))
 
         raise RuntimeError(
             f"Could not update {key} after {UPDATE_MAX_ATTEMPTS} attempts: "

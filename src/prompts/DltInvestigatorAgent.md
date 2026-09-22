@@ -72,11 +72,16 @@ Four hard limits:
 
 1. **Your narrative and recommendation are stored and re-served verbatim to
    every future record with this same failure signature.** A sentence naming
-   this record's identifiers, its individual values, or its exact scores will
+   this record's identifiers, its individual values, or its exact counts will
    later be shown to an operator looking at a completely different record,
    where it will be wrong. Describe the *shape* of the input ("the response
-   carried matched candidates from a minority of the instances queried"), never
-   its values.
+   contained multiple items, and at least one item's database record was
+   absent"), never its values. Do not name specific identifiers, exact
+   counts, specific data values, or timestamps from this packet's processing.
+   Instead of "Query the database for items abc-123, def-456 and check which
+   is missing", write "Query the database for each item referenced in the
+   response and confirm which record is absent". The recommendation must be
+   actionable for ANY packet with this fingerprint, not just this one.
 2. **Use only the identifiers the summary labels, in the role it labels them.**
    The summary ends with an "Identifiers in this payload" section that assigns
    every id it shows to one of three roles: this record's log-correlation id,

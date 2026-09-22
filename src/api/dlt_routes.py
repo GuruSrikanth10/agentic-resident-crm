@@ -529,14 +529,25 @@ async def analyze_dlt(message: DltMessage):
     # occurrences" count includes the case it is describing. Recording only
     # touches counts and history, never `recommendation`, so the reuse
     # decision below sees exactly the same cache state either way.
-    group = await _off_loop(
-        groups.record_occurrence,
-        fingerprint, ref_id,
-        signature=failure["signature"],
-        failure_class=failure["failure_class"],
-        business_code=failure["business_code"],
-        corroboration=corroboration.verdict.value,
-    )
+    #
+    # If the group update fails (S3 conditional-write contention under a
+    # burst of identical fingerprints), proceed with group=None. The reuse
+    # decision will treat it as a novel fingerprint and run the LLM -- the
+    # safe default. A counter update must not DLQ a packet.
+    try:
+        group = await _off_loop(
+            groups.record_occurrence,
+            fingerprint, ref_id,
+            signature=failure["signature"],
+            failure_class=failure["failure_class"],
+            business_code=failure["business_code"],
+            corroboration=corroboration.verdict.value,
+        )
+    except Exception as e:
+        log.warning("Could not record group occurrence; proceeding without it",
+                    fingerprint=fingerprint,
+                    error=f"{type(e).__name__}: {e}")
+        group = None
     decision = reuse.decide(failure["failure_class"],
                             corroboration.verdict.value, group)
     metrics.record_dlt_reuse(decision.decision.value)
@@ -558,8 +569,13 @@ async def analyze_dlt(message: DltMessage):
     if code_check_result.verdict != code_check.UNKNOWN:
         log.info("Replay precheck", verdict=code_check_result.verdict,
                  reason=code_check_result.reason)
-        group = await _off_loop(groups.attach_code_check, fingerprint,
-                                code_check_result.as_dict())
+        try:
+            group = await _off_loop(groups.attach_code_check, fingerprint,
+                                    code_check_result.as_dict())
+        except Exception as e:
+            log.warning("Could not attach code-check to group; proceeding without it",
+                        fingerprint=fingerprint,
+                        error=f"{type(e).__name__}: {e}")
 
     parse_error = None
     if decision.decision is reuse.Decision.CANNED:
@@ -617,8 +633,13 @@ async def analyze_dlt(message: DltMessage):
     # treatment is recomputed identically every time, and re-storing a reused
     # one would just rewrite what is already there.
     if provenance == "agent":
-        group = await _off_loop(groups.attach_recommendation, fingerprint,
-                                finding.model_dump(), state=groups.STATE_DRAFT)
+        try:
+            group = await _off_loop(groups.attach_recommendation, fingerprint,
+                                    finding.model_dump(), state=groups.STATE_DRAFT)
+        except Exception as e:
+            log.warning("Could not attach recommendation to group; proceeding without it",
+                        fingerprint=fingerprint,
+                        error=f"{type(e).__name__}: {e}")
 
     # Evaluated on the FINAL finding -- after ceilings, after reuse decay --
     # so a confidence the ceilings already capped is what gets checked, never
