@@ -189,7 +189,6 @@ def reduce_logs(event_id: str, extra_identifiers: tuple = (),
                          f"[{record['level']}]{_context_tag(record)} {record['message']}")
         lines.append(f"--- End of Trace ({total_fetched} logs total) ---")
         formatted = _with_banner(gap_banner, "\n".join(lines))
-        _save_reduced_logs(artifact_key, formatted, storage=storage)
         return formatted
 
     # ------------------------------------------------------------------
@@ -206,7 +205,6 @@ def reduce_logs(event_id: str, extra_identifiers: tuple = (),
             gap_banner,
             _format_error_path(event_id, window, total_fetched, log_file_path),
         )
-        _save_reduced_logs(artifact_key, formatted, storage=storage)
         return formatted
 
     # ------------------------------------------------------------------
@@ -226,7 +224,6 @@ def reduce_logs(event_id: str, extra_identifiers: tuple = (),
         gap_banner,
         _format_normal_path(event_id, assembled, total_fetched, log_file_path),
     )
-    _save_reduced_logs(artifact_key, formatted, storage=storage)
     return formatted
 
 
@@ -491,6 +488,20 @@ def _save_raw_logs(event_id: str, logs: list[dict], storage=None) -> str:
     return _write_artifact(event_id, "raw_logs.txt", body, storage=storage)
 
 
-def _save_reduced_logs(event_id: str, reduced_text: str, storage=None) -> str:
-    """Persist reduced logs and return the artifact locator."""
-    return _write_artifact(event_id, "reduced_logs.txt", reduced_text, storage=storage)
+# `_save_reduced_logs` used to live here, called from every return path in
+# `reduce_logs` above. It was removed because the object it wrote was a
+# byte-for-byte duplicate that nothing ever read back.
+#
+# Each branch of `reduce_logs` saved `formatted` and then returned it, and
+# both production callers persist that same returned string themselves --
+# `tool_registry.fetch_and_persist_logs` as `fetched_logs.txt` in the
+# rejection lane, `dlt_routes` as the same name in the DLT lane. So every
+# case carried two objects with identical bytes, of which only
+# `fetched_logs.txt` was ever loaded (the graph's `fetch_logs_node` cache
+# check, and the `/fetch-logs` dedupe guard). The third caller,
+# `tools/eval_harness.py`, uses the return value directly and never wanted
+# the artifact.
+#
+# `reduced_logs.txt` is deliberately still listed in
+# `prune_casesheets.LOG_ARTEFACTS` so cases written before this change are
+# still cleaned up.

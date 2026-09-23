@@ -356,3 +356,107 @@ def test_analyze_rejection_declines_to_double_invoke_with_an_active_checkpoint(s
 
     assert response["status"] == "already_processing_resumed"
     mock_agent.invoke.assert_not_called()
+
+
+# ======================================================================
+# The casebook references log evidence; it never re-writes it.
+# ======================================================================
+#
+# `rejection_logs` has always been a locator (`{"path": ..., "gaps": ...}`),
+# but the path used to name `supported_logs.txt` -- an object written at
+# terminal time from the final graph state. That state is only ever the
+# content of `fetched_logs.txt`, or of `filtered_logs.txt` when the LogFilter
+# replaced it, so the write produced a byte-for-byte duplicate of an object
+# already in the store, and nothing ever read it back.
+
+
+def _synthesis_stub():
+    return json.dumps({
+        "rejection_description": "manual dedup rejected the packet",
+        "synthesis": "ask the resident to resubmit",
+        "action": "RESIDENT_PACKET_RESUBMIT",
+        "resident_action": "NEW_PACKET",
+        "confidence": 0.9,
+    })
+
+
+def _analyze_with_stub_llm(event_id, monkeypatch):
+    with patch.object(orch, "create_react_agent",
+                      side_effect=lambda *a, **k: _stub_llm(_synthesis_stub())), \
+         patch.object(orch, "get_llm", side_effect=lambda tier: MagicMock()):
+        monkeypatch.setattr(orch, "is_reviewer_approved", lambda _f: True)
+        return _run_analyze(event_id)
+
+
+def _logs_locator(storage, event_id):
+    casebook = storage.load(event_id)
+    return casebook["packet_status"]["rejection_data"]["rejection_logs"]
+
+
+def test_the_casebook_points_at_the_artifact_that_already_holds_the_logs(
+        storage, monkeypatch):
+    storage.save_artifact("lg-point", "fetched_logs.txt", "--- pre-fetched trace ---")
+
+    assert _analyze_with_stub_llm("lg-point", monkeypatch)["status"] == "processed"
+
+    assert _logs_locator(storage, "lg-point")["path"] == "fetched_logs.txt"
+
+
+def test_no_duplicate_log_object_is_written_at_terminal_time(storage, monkeypatch):
+    """The whole point: one object holding this text, not two."""
+    storage.save_artifact("lg-nodup", "fetched_logs.txt", "--- pre-fetched trace ---")
+
+    _analyze_with_stub_llm("lg-nodup", monkeypatch)
+
+    assert not storage.artifact_exists("lg-nodup", "supported_logs.txt")
+
+
+def test_the_locator_resolves_to_the_text_the_agents_actually_saw(
+        storage, monkeypatch):
+    """A locator is only worth storing if it still loads."""
+    storage.save_artifact("lg-load", "fetched_logs.txt", "--- the real trace ---")
+
+    _analyze_with_stub_llm("lg-load", monkeypatch)
+
+    path = _logs_locator(storage, "lg-load")["path"]
+    assert storage.load_artifact("lg-load", path) == "--- the real trace ---"
+
+
+def test_the_locator_follows_the_filter_when_the_filter_ran(storage, monkeypatch):
+    """With ENABLE_LOG_FILTER_AGENT on, state["logs"] is the filtered text,
+    so the casebook must point at `filtered_logs.txt`, not the unfiltered
+    artifact it replaced."""
+    monkeypatch.setenv("ENABLE_LOG_FILTER_AGENT", "true")
+    storage.save_artifact("lg-filt", "fetched_logs.txt", "--- unfiltered trace ---")
+
+    _analyze_with_stub_llm("lg-filt", monkeypatch)
+
+    locator = _logs_locator(storage, "lg-filt")
+    assert locator["path"] == "filtered_logs.txt"
+    assert storage.artifact_exists("lg-filt", "filtered_logs.txt")
+
+
+def test_a_checkpoint_written_before_logs_artifact_existed_still_resolves(
+        storage, monkeypatch):
+    """A resume carries state serialised by the previous build, which has
+    `logs` but no `logs_artifact`. The locator must fall back to the artifact
+    that path always wrote rather than landing `None` in the casebook."""
+    import src.api.routes as routes
+
+    storage.save_artifact("lg-old", "fetched_logs.txt", "--- trace from before ---")
+
+    mock_agent = MagicMock()
+    mock_state = MagicMock()
+    mock_state.next = None  # no active checkpoint, so invoke() runs
+    mock_agent.get_state.return_value = mock_state
+    mock_agent.invoke.return_value = {
+        "logs": "--- trace from before ---",
+        "synthesis": _synthesis_stub(),
+        "resolution_source": "agent",
+        # no "logs_artifact" -- this is the point of the test
+    }
+
+    with patch.object(routes, "get_agent", return_value=mock_agent):
+        assert _run_analyze("lg-old")["status"] == "processed"
+
+    assert _logs_locator(storage, "lg-old")["path"] == "fetched_logs.txt"

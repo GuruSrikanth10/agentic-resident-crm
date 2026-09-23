@@ -379,7 +379,11 @@ def test_elasticsearch_path_records_are_redacted_before_persistence(tmp_path, mo
         }
     ]
 
-    monkeypatch.setattr(pipeline, "_save_reduced_logs", lambda *_a, **_kw: "reduced")
+    # `_save_reduced_logs` used to be stubbed here to stop it writing. It no
+    # longer exists: `reduce_logs` returns the reduced text and its callers
+    # persist it as `fetched_logs.txt`, so there is no second write to
+    # suppress. `_save_raw_logs` below is still captured -- that artifact is
+    # the one this test is about.
     monkeypatch.setattr(
         pipeline.source_chain, "fetch_with_fallback",
         lambda *_a, **_kw: FetchResult(
@@ -427,7 +431,6 @@ def test_extra_identifiers_are_allowlisted_from_redaction(monkeypatch):
         "app_name": "svc",
     }]
 
-    monkeypatch.setattr(pipeline, "_save_reduced_logs", lambda *_a, **_kw: "reduced")
     monkeypatch.setattr(pipeline, "_save_raw_logs", lambda *_a, **_kw: "raw")
     monkeypatch.setattr(
         pipeline.source_chain, "fetch_with_fallback",

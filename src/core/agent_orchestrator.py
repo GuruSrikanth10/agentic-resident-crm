@@ -133,6 +133,12 @@ def _write_harness_case_files(case_dir, payload: dict, logs: str, db_rule: str) 
 class GraphState(TypedDict):
     payload: dict
     logs: str
+    #: Which stored artifact holds the text in `logs`, as a name relative to
+    #: the casebook root. The casebook records this rather than the text, so
+    #: the evidence is referenced where it already sits instead of being
+    #: written a second time under a third name (`supported_logs.txt`, which
+    #: was a byte-for-byte duplicate nothing read back).
+    logs_artifact: str
     db_rule: str
     investigation: str
     reviewer_feedback: str
@@ -308,12 +314,15 @@ def _build_agent():
         cached = get_casebook_storage().load_artifact(event_id, "fetched_logs.txt")
         if cached is not None:
             log.info("Using logs persisted by the fast consumer", state="LOG_FETCHER")
-            return {"logs": cached}
+            return {"logs": cached, "logs_artifact": "fetched_logs.txt"}
 
         log.info("No persisted logs found; fetching live", state="LOG_FETCHER")
         logs = fetch_and_persist_logs(event_id, payload)
         log.info("Logs retrieved")
-        return {"logs": logs}
+        # Both branches name the same artifact: `fetch_and_persist_logs` writes
+        # `fetched_logs.txt` on the live path, which is the object the cache
+        # branch above just read.
+        return {"logs": logs, "logs_artifact": "fetched_logs.txt"}
 
     def runbook_lookup_node(state: GraphState):
         mode = os.environ.get("RUNBOOK_MODE", "off").lower()
@@ -500,15 +509,21 @@ def _build_agent():
             
         res = _counted("log_filter", invoke_filter)
         filtered_logs = res["messages"][-1].content
-        
+
+        # On a failed save the pointer stays on `fetched_logs.txt`: that object
+        # exists and holds a superset of this text, which is a worse but
+        # readable answer. Naming `filtered_logs.txt` here regardless would
+        # leave the casebook pointing at a key that was never written.
+        artifact = "fetched_logs.txt"
         try:
             get_casebook_storage().save_artifact(event_id, "filtered_logs.txt", filtered_logs)
+            artifact = "filtered_logs.txt"
             log.info("Persisted filtered logs to local artifact for testing", artifact="filtered_logs.txt")
         except Exception as e:
             log.warning("Failed to persist filtered logs artifact", error=str(e))
-            
+
         log.info("Log Filter node finished")
-        return {"logs": filtered_logs}
+        return {"logs": filtered_logs, "logs_artifact": artifact}
 
     def investigator_node(state: GraphState):
         payload = state.get("payload", {})

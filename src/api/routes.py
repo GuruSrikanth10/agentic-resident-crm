@@ -866,13 +866,22 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
     if not raw_logs or raw_logs == "Log fetching disabled.":
         processed_logs = {"path": "No logs found", "gaps": None}
     else:
-        # Persist the logs as an artifact inside the casebook directory, so
-        # the evidence travels with the casebook regardless of backend.
-        # The path stored is relative to the casebook root, so it works
-        # identically on local disk and on S3.
-        await _off_loop(get_casebook_storage().save_artifact,
-                        event_id, "supported_logs.txt", raw_logs)
-        processed_logs = {"path": "supported_logs.txt", "gaps": extracted_gaps}
+        # Point at the artifact that already holds these bytes rather than
+        # writing them again.
+        #
+        # This used to PUT `supported_logs.txt` from the final graph state.
+        # That state is only ever the content of `fetched_logs.txt`, or of
+        # `filtered_logs.txt` when the LogFilter replaced it -- so the object
+        # was a byte-for-byte duplicate of one already in the store, and
+        # nothing ever read it back. The casebook has always recorded a path
+        # rather than the text (this field is a locator, not a payload), so a
+        # reader is unaffected: it resolves the same content under a name that
+        # is not a copy. The graph names that artifact in `logs_artifact`.
+        #
+        # The default covers a resumed checkpoint written before this field
+        # existed, whose state carries `logs` but no `logs_artifact`.
+        processed_logs = {"path": result.get("logs_artifact") or "fetched_logs.txt",
+                          "gaps": extracted_gaps}
         
     # Resolve the fields the casebook needs from the validated model. On a
     # parse failure the evidence is still persisted -- metadata, rejection

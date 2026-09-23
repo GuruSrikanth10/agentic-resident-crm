@@ -466,6 +466,44 @@ def test_log_artifacts_go_through_storage(monkeypatch):
     assert "boom" in storage.artifacts[("evt-art", "raw_logs.txt")]
 
 
+def test_the_reduced_trace_is_stored_once_not_twice(monkeypatch, tmp_path):
+    """`reduce_logs` used to write `reduced_logs.txt` and then return the very
+    same string, which both production callers persist themselves as
+    `fetched_logs.txt` -- two objects, identical bytes, only one of them ever
+    read back. The audit copy (`raw_logs.txt`) is a different rendering and
+    stays."""
+    from src.log_pipeline import pipeline
+
+    storage = _InMemoryStorage()
+    monkeypatch.setattr(pipeline, "get_casebook_storage", lambda: storage)
+
+    csv_path = tmp_path / "logs.csv"
+    doc = ('{""@timestamp"":""2026-01-01T00:00:01Z"",""level"":""ERROR"",'
+           '""message"":""dedup rejected evt-once"",'
+           '""application_name"":""enu-biometric""}')
+    csv_path.write_text('"time","_source"\n'
+                        f'"2026-01-01T00:00:01Z","{doc}"\n', encoding="utf-8")
+    monkeypatch.setenv("ES_MOCK_FILE", str(csv_path))
+    monkeypatch.setenv("LOG_SOURCE", "elastic")
+
+    reduced = pipeline.reduce_logs("evt-once")
+
+    assert "dedup rejected evt-once" in reduced
+    assert ("evt-once", "raw_logs.txt") in storage.artifacts
+    assert ("evt-once", "reduced_logs.txt") not in storage.artifacts, (
+        "reduce_logs must not persist the text it already returns to a caller "
+        "that stores it as fetched_logs.txt"
+    )
+
+
+def test_old_cases_reduced_logs_are_still_pruned():
+    """Nothing writes `reduced_logs.txt` any more, but cases written before
+    that change still have one, so the pruner must keep cleaning it up."""
+    from src.tools.prune_casesheets import LOG_ARTEFACTS
+
+    assert "reduced_logs.txt" in LOG_ARTEFACTS
+
+
 def test_pruning_preserves_recorded_outcomes(tmp_path, monkeypatch):
     """Ground truth must survive routine disk hygiene."""
     from src.tools import prune_casesheets
