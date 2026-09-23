@@ -8,6 +8,7 @@ Phase E regression tests (ENHANCEMENT_PLAN.md section 5).
 """
 import json
 
+import pytest
 
 from src.models.synthesis import (
     SynthesisResult,
@@ -137,6 +138,62 @@ def test_confidence_is_capped_when_the_trace_has_gaps(monkeypatch):
     assert updated.confidence == 0.6
     assert not abstained
     assert "evidence gaps" in reason
+
+
+@pytest.mark.parametrize("logs", [None, "", "   ", "Log fetching disabled."])
+def test_confidence_is_capped_when_no_logs_could_be_fetched(monkeypatch, logs):
+    """Only a trace WITH gaps was capped, so a packet with no logs at all
+    could score higher than one with partial logs."""
+    monkeypatch.delenv("SYNTHESIS_LOGS_UNAVAILABLE_CEILING", raising=False)
+    updated, abstained, reason = apply_confidence_policy(_result(0.95), logs=logs)
+    assert updated.confidence == 0.75
+    assert not abstained
+    assert "no logs were fetched" in reason
+
+
+def test_confidence_is_capped_lower_when_the_logs_had_nothing(monkeypatch):
+    """We looked and the source had nothing for this packet: the logs could
+    have spoken and did not, so the cap is lower than never having looked."""
+    monkeypatch.delenv("SYNTHESIS_LOGS_SILENT_CEILING", raising=False)
+    updated, _, reason = apply_confidence_policy(
+        _result(0.95), logs="No logs found for ID: evt-1")
+    assert updated.confidence == 0.6
+    assert "no lines for this packet" in reason
+
+
+def test_the_lowest_applicable_ceiling_binds(monkeypatch):
+    """A fetch can report gaps AND find nothing; both apply, the lower wins."""
+    monkeypatch.setenv("SYNTHESIS_GAP_CONFIDENCE_CEILING", "0.4")
+    monkeypatch.setenv("SYNTHESIS_LOGS_SILENT_CEILING", "0.6")
+    updated, _, reason = apply_confidence_policy(
+        _result(0.95), logs=f"{_BANNER}\nNo logs found for ID: evt-1")
+    assert updated.confidence == 0.4
+    assert "evidence gaps" in reason
+
+
+def test_the_no_logs_ceilings_are_configurable(monkeypatch):
+    monkeypatch.setenv("SYNTHESIS_LOGS_UNAVAILABLE_CEILING", "0.5")
+    monkeypatch.setenv("SYNTHESIS_LOGS_SILENT_CEILING", "0.3")
+    assert apply_confidence_policy(_result(0.95), logs="")[0].confidence == 0.5
+    assert apply_confidence_policy(
+        _result(0.95), logs="No logs found for ID: evt-1")[0].confidence == 0.3
+
+
+def test_a_confidence_under_the_no_logs_ceiling_is_untouched(monkeypatch):
+    monkeypatch.delenv("SYNTHESIS_LOGS_UNAVAILABLE_CEILING", raising=False)
+    updated, _, reason = apply_confidence_policy(_result(0.5), logs="")
+    assert updated.confidence == 0.5
+    assert reason is None
+
+
+def test_the_no_logs_defaults_match_the_dlt_lane():
+    """Both lanes cap an uncorroborated finding the same way by default."""
+    from src.models import dlt_synthesis, synthesis
+
+    assert (synthesis.DEFAULT_LOGS_UNAVAILABLE_CEILING
+            == dlt_synthesis.DEFAULT_LOGS_UNAVAILABLE_CEILING)
+    assert (synthesis.DEFAULT_LOGS_SILENT_CEILING
+            == dlt_synthesis.DEFAULT_LOGS_SILENT_CEILING)
 
 
 def test_confidence_is_untouched_on_a_complete_trace(monkeypatch):

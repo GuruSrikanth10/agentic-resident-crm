@@ -9,6 +9,7 @@ That is what these tests are for -- the divergence has to be caught here,
 because production will not announce it.
 """
 import ast
+import json
 import re
 from pathlib import Path
 
@@ -174,3 +175,481 @@ def test_run_task_refuses_when_the_harness_is_disabled(monkeypatch, tmp_path):
     monkeypatch.setenv(opencode_runner.ENV_DISABLE, "false")
     with pytest.raises(opencode_runner.OpencodeUnavailable):
         opencode_runner.run_task("prompt", str(tmp_path / "out.json"))
+
+
+# ---------------------------------------------------------------------------
+# .env.example is what operators copy; it must not undo the defaults above.
+# ---------------------------------------------------------------------------
+
+def _env_example_value(key: str) -> str:
+    text = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+    match = re.search(rf"^{key}=(.*)$", text, flags=re.MULTILINE)
+    assert match, f".env.example no longer sets {key}"
+    return match.group(1).strip()
+
+
+def test_env_example_matches_the_runner_defaults():
+    """.env.example carried `opencode/...` and 120s, the exact provider
+    mismatch and short budget the code defaults were changed to remove."""
+    assert _env_example_value("OPENCODE_MODEL") == opencode_runner.DEFAULT_MODEL
+    assert (int(_env_example_value("OPENCODE_TASK_TIMEOUT_SECONDS"))
+            == opencode_runner.DEFAULT_TIMEOUT_SECONDS)
+
+
+# ---------------------------------------------------------------------------
+# Concurrent tasks must never share a prompt file.
+# ---------------------------------------------------------------------------
+
+_FAKE_OPENCODE = """#!{python}
+import json, re, sys
+task = sys.argv[-1]
+prompt_file = re.search(r"Read the file at (.+?) and follow", task).group(1)
+output_path = task.rsplit(": ", 1)[1]
+with open(prompt_file, encoding="utf-8") as handle:
+    prompt = handle.read()
+with open(output_path, "w", encoding="utf-8") as handle:
+    json.dump({{"prompt": prompt, "prompt_file": prompt_file}}, handle)
+"""
+
+
+def test_each_case_gets_its_own_prompt_file(monkeypatch, tmp_path):
+    """The prompt file was named after the output's basename alone, which is
+    the same for every case ("investigation.json"), in one shared directory.
+    With MAX_CONCURRENT_INVESTIGATIONS tasks in flight, one task could read
+    another case's instructions."""
+    import sys
+
+    fake = tmp_path / "opencode"
+    fake.write_text(_FAKE_OPENCODE.format(python=sys.executable), encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.setenv(opencode_runner.ENV_DISABLE, "true")
+    monkeypatch.setenv(opencode_runner.ENV_BINARY, str(fake))
+
+    results = {}
+    for case in ("casebook_a", "casebook_b"):
+        output = tmp_path / case / "investigation.json"
+        output.parent.mkdir()
+        results[case] = opencode_runner.run_task_json(
+            f"instructions for {case}", str(output))["result"]
+
+    for case, result in results.items():
+        assert result["prompt"] == f"instructions for {case}"
+        assert Path(result["prompt_file"]).parent == tmp_path / case
+    assert results["casebook_a"]["prompt_file"] != results["casebook_b"]["prompt_file"]
+
+
+# ---------------------------------------------------------------------------
+# Both Investigator paths describe the enrolment type the same way.
+# ---------------------------------------------------------------------------
+
+def test_every_payload_enrolment_code_has_one_description():
+    """The harness and direct paths each carried their own map, and they
+    disagreed: no "E" on the direct path, no "Z" on the harness path, and
+    two different descriptions of "U"."""
+    import src.core.agent_orchestrator as orch
+    from src.tools.tool_registry import _ENROLMENT_TYPE_ALIASES
+
+    payload_codes = {code for code in _ENROLMENT_TYPE_ALIASES if len(code) == 1}
+    assert payload_codes <= set(orch.ENROLMENT_TYPE_DISPLAY)
+
+    def display(code):
+        return orch.enrolment_type_display({"packetMetaData": {"enrolmentType": code}})
+
+    assert display("E") == display("N") == display(" n ")
+    assert "1:N" in display("U") and "1:1" in display("U")
+    assert display("X") == "X"
+    assert orch.enrolment_type_display({"packetMetaData": None}) == "Unknown"
+
+
+# ---------------------------------------------------------------------------
+# The harness Reviewers: their own evidence, a real fallback, and the
+# learning-rule loop.
+# ---------------------------------------------------------------------------
+
+class _StubAgent:
+    def __init__(self, reply="APPROVED"):
+        self.reply = reply
+        self.calls = 0
+
+    def invoke(self, _messages):
+        from langchain_core.messages import AIMessage
+        self.calls += 1
+        return {"messages": [AIMessage(content=self.reply)]}
+
+
+def _rejection_reviewer(monkeypatch, agent):
+    from unittest.mock import MagicMock
+    import src.core.agent_orchestrator as orch
+
+    monkeypatch.setattr(orch, "_agent", None)
+    monkeypatch.setattr(orch, "_prompt_fingerprint", orch._prompt_fingerprint)
+    monkeypatch.setattr(orch, "get_llm", lambda _tier: MagicMock())
+    monkeypatch.setattr(orch, "create_react_agent", lambda *a, **k: agent)
+    monkeypatch.setattr(orch, "get_checkpointer", lambda: None)
+    graph = orch._build_agent()
+    return graph.builder.nodes["review"].runnable.func
+
+
+def _dlt_reviewer(monkeypatch, agent):
+    from unittest.mock import MagicMock
+    import src.dlt.orchestrator as dlt
+
+    monkeypatch.setattr(dlt, "_agent", None)
+    monkeypatch.setattr(dlt, "get_llm", lambda _tier: MagicMock())
+    monkeypatch.setattr(dlt, "create_react_agent", lambda *a, **k: agent)
+    graph = dlt._build_dlt_agent()
+    return graph.builder.nodes["review"].runnable.func
+
+
+_REJECTION_STATE = {
+    "payload": {"eventId": "evt-1",
+                "packetMetaData": {"enrolmentType": "E"}},
+    "logs": "a log line",
+    "db_rule": "the rule",
+    "investigation": "the findings",
+    "retry_count": 0,
+}
+
+
+def _harness_on(monkeypatch, tmp_path, verdict):
+    import src.utils.paths as paths
+
+    monkeypatch.setenv(opencode_runner.ENV_DISABLE, "true")
+    monkeypatch.setattr(paths, "LOCAL_CASESHEETS_DIR", tmp_path)
+    monkeypatch.setattr(opencode_runner, "run_task_json",
+                        lambda prompt, output_path, node=None: {
+                            "result": verdict, "seconds": 0,
+                            "trace": {"llm_calls": 1, "tools": {},
+                                      "tokens": {}, "cost": 0.0,
+                                      "session_id": "ses_test"}})
+
+
+def test_rejection_reviewer_writes_its_own_evidence(monkeypatch, tmp_path):
+    """The Reviewer wrote investigation_text.txt into a case directory it
+    assumed existed, outside its try block: a missing directory raised out
+    of the node instead of falling back."""
+    review = _rejection_reviewer(monkeypatch, _StubAgent())
+    _harness_on(monkeypatch, tmp_path, {"verdict": "APPROVED", "feedback": ""})
+
+    result = review(dict(_REJECTION_STATE))
+
+    case_dir = tmp_path / "casebook_evt-1"
+    assert result["reviewer_feedback"] == "APPROVED"
+    assert (case_dir / "investigation_text.txt").read_text(encoding="utf-8") == "the findings"
+    context = json.loads((case_dir / "context.json").read_text(encoding="utf-8"))
+    assert context["db_rule"] == "the rule"
+    assert context["enrolment_type"].startswith("New Enrolment")
+
+
+def test_rejection_reviewer_falls_back_when_the_case_dir_is_unwritable(monkeypatch, tmp_path):
+    stub = _StubAgent("APPROVED")
+    review = _rejection_reviewer(monkeypatch, stub)
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("", encoding="utf-8")
+    _harness_on(monkeypatch, blocker, {"verdict": "APPROVED", "feedback": ""})
+
+    result = review(dict(_REJECTION_STATE))
+
+    assert result["reviewer_feedback"] == "APPROVED"
+    assert stub.calls == 1, "the direct LLM should have taken over"
+
+
+def test_harness_reviewer_rule_reaches_the_validated_queue(monkeypatch, tmp_path):
+    """The harness Reviewer has no add_learning_rule tool, so while the
+    harness was on the self-learning loop received nothing."""
+    import src.core.agent_orchestrator as orch
+
+    proposed = []
+
+    def refuse(rule_text):
+        # Refused, so nothing is appended to the real pending_rules.jsonl.
+        proposed.append(rule_text)
+        return ["refused by the test"]
+
+    monkeypatch.setattr(orch, "validate_learning_rule", refuse)
+    review = _rejection_reviewer(monkeypatch, _StubAgent())
+    _harness_on(monkeypatch, tmp_path, {
+        "verdict": "REJECTED",
+        "feedback": "wrong enrolment type",
+        "learning_rule": {"rule_text": "Always state the enrolment type.",
+                          "reasoning": "it was missing"},
+    })
+
+    result = review(dict(_REJECTION_STATE))
+
+    assert result["reviewer_feedback"] == "wrong enrolment type"
+    assert proposed == ["Always state the enrolment type."]
+
+
+def test_an_approval_proposes_no_rule(monkeypatch, tmp_path):
+    import src.core.agent_orchestrator as orch
+
+    proposed = []
+    monkeypatch.setattr(orch, "validate_learning_rule",
+                        lambda text: proposed.append(text) or ["refused"])
+    review = _rejection_reviewer(monkeypatch, _StubAgent())
+    _harness_on(monkeypatch, tmp_path, {
+        "verdict": "APPROVED", "feedback": "",
+        "learning_rule": {"rule_text": "ignored", "reasoning": ""},
+    })
+
+    review(dict(_REJECTION_STATE))
+
+    assert proposed == []
+
+
+def test_dlt_reviewer_writes_its_own_evidence(monkeypatch, tmp_path):
+    review = _dlt_reviewer(monkeypatch, _StubAgent())
+    _harness_on(monkeypatch, tmp_path, {"verdict": "APPROVED", "feedback": ""})
+
+    result = review({"case_id": "ref-1", "failure": {"root_fqcn": "x.Y"},
+                     "investigation": "the findings", "retry_count": 0})
+
+    case_dir = tmp_path / "casebook_ref-1"
+    assert result["reviewer_feedback"] == "APPROVED"
+    assert (case_dir / "dlt_investigation_text.txt").exists()
+    assert json.loads((case_dir / "dlt_failure.json").read_text(encoding="utf-8")) == {"root_fqcn": "x.Y"}
+    assert (case_dir / "dlt_evidence.txt").exists()
+
+
+# ---------------------------------------------------------------------------
+# The task trace: how many LLM calls, which tools, how many tokens.
+# ---------------------------------------------------------------------------
+#
+# A harness task is an agentic loop -- several LLM round-trips, a tool call
+# between each -- and none of that was visible. Piped to a subprocess with no
+# TTY, `opencode run` prints the final assistant text and nothing else, so a
+# task that burned twenty calls and a task that burned two logged the same
+# single line, and the four nodes metered nothing at all while the harness
+# was on.
+
+#: One real `opencode run --format json` stdout stream, captured from a task
+#: that made two LLM calls around a single `write`. Trimmed to the fields the
+#: parser reads.
+_EVENT_STREAM = [
+    {"type": "step_start", "sessionID": "ses_abc",
+     "part": {"type": "step-start"}},
+    {"type": "text", "sessionID": "ses_abc",
+     "part": {"type": "text", "text": "Writing the output file now."}},
+    {"type": "tool_use", "sessionID": "ses_abc",
+     "part": {"type": "tool", "tool": "grep",
+              "state": {"status": "completed", "input": {"pattern": "RC-501"}}}},
+    {"type": "tool_use", "sessionID": "ses_abc",
+     "part": {"type": "tool", "tool": "write",
+              "state": {"status": "completed",
+                        "input": {"filePath": "investigation.json"}}}},
+    {"type": "step_finish", "sessionID": "ses_abc",
+     "part": {"type": "step-finish", "reason": "tool-calls", "cost": 0.5,
+              "tokens": {"input": 4211, "output": 37, "reasoning": 5,
+                         "cache": {"read": 64, "write": 8}}}},
+    {"type": "step_start", "sessionID": "ses_abc",
+     "part": {"type": "step-start"}},
+    {"type": "text", "sessionID": "ses_abc",
+     "part": {"type": "text", "text": "Done."}},
+    {"type": "step_finish", "sessionID": "ses_abc",
+     "part": {"type": "step-finish", "reason": "stop", "cost": 0.25,
+              "tokens": {"input": 4390, "output": 9, "reasoning": 0,
+                         "cache": {"read": 0, "write": 0}}}},
+]
+
+
+def _trace_of(events):
+    trace = opencode_runner._Trace()
+    for event in events:
+        trace.add(event)
+    return trace
+
+
+def test_trace_counts_one_llm_call_per_step():
+    """`step_start` brackets a round-trip; the task is the loop around them."""
+    assert _trace_of(_EVENT_STREAM).summary()["llm_calls"] == 2
+
+
+def test_trace_sums_tokens_and_cost_across_steps():
+    summary = _trace_of(_EVENT_STREAM).summary()
+    assert summary["tokens"] == {"input": 8601, "output": 46, "reasoning": 5,
+                                 "cache_read": 64, "cache_write": 8}
+    assert summary["cost"] == 0.75
+    assert summary["session_id"] == "ses_abc"
+
+
+def test_trace_counts_tool_calls_by_name():
+    assert _trace_of(_EVENT_STREAM).summary()["tools"] == {"grep": 1, "write": 1}
+
+
+def test_trace_keeps_the_agents_last_words_for_the_failure_message():
+    """With `--format json` the last stdout line is a `step_finish` envelope,
+    which says nothing about why a task wrote no output."""
+    assert _trace_of(_EVENT_STREAM).last_text == "Done."
+
+
+def test_trace_notices_a_failed_tool_call():
+    trace = _trace_of([
+        {"type": "tool_use", "sessionID": "ses_abc",
+         "part": {"type": "tool", "tool": "read",
+                  "state": {"status": "error", "input": {"filePath": "gone.md"}}}},
+    ])
+    assert trace.tool_errors == ["read: error"]
+
+
+def test_trace_survives_a_malformed_stream():
+    """A truncated line or a missing field must not take the task down with
+    it -- the harness already falls back to the direct LLM on any exception,
+    and losing an investigation to a log-parsing bug would be absurd."""
+    trace = _trace_of([
+        {"type": "step_finish", "part": {"tokens": {"input": "nonsense"}}},
+        {"type": "step_finish", "part": {"cost": None, "tokens": None}},
+        {"type": "tool_use", "part": {}},
+        {"type": "unheard_of", "part": {"type": "something-new"}},
+        {"type": "text", "part": {}},
+    ])
+    assert trace.summary()["tokens"]["input"] == 0
+    assert trace.summary()["tools"] == {"unknown": 1}
+
+
+def test_only_json_event_lines_are_parsed_as_events():
+    """Everything else is opencode's own diagnostics: a provider error, a
+    stack trace, a startup warning. Those are the only channel a failure the
+    event stream never reaches arrives on, so they must stay loggable."""
+    assert opencode_runner._parse_event("Error: provider unreachable") is None
+    assert opencode_runner._parse_event("{not json") is None
+    assert opencode_runner._parse_event('{"no":"type field"}') is None
+    assert opencode_runner._parse_event('{"type":"text"}') == {"type": "text"}
+
+
+def test_tool_detail_names_what_the_call_asked_for():
+    detail = opencode_runner._tool_detail(
+        {"state": {"input": {"pattern": "RESIDENT_BIOMETRIC_UPDATE"}}})
+    assert detail == "pattern=RESIDENT_BIOMETRIC_UPDATE"
+
+
+# ---------------------------------------------------------------------------
+# The trace reaches the process boundary: argv, metrics, result.
+# ---------------------------------------------------------------------------
+
+#: The runner merges the child's stderr into the stdout pipe it parses, so
+#: the fake records its argv to a file beside the output instead.
+_FAKE_STREAMING_OPENCODE = """#!{python}
+import json, re, sys
+task = sys.argv[-1]
+prompt_file = re.search(r"Read the file at (.+?) and follow", task).group(1)
+output_path = task.rsplit(": ", 1)[1]
+with open(output_path + ".argv.json", "w", encoding="utf-8") as handle:
+    json.dump(sys.argv, handle)
+for event in {events}:
+    print(json.dumps(event), flush=True)
+with open(output_path, "w", encoding="utf-8") as handle:
+    json.dump({{"investigation": "done"}}, handle)
+"""
+
+
+def _streaming_binary(tmp_path, monkeypatch):
+    import sys
+
+    fake = tmp_path / "opencode"
+    fake.write_text(
+        _FAKE_STREAMING_OPENCODE.format(python=sys.executable,
+                                        events=repr(_EVENT_STREAM)),
+        encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.setenv(opencode_runner.ENV_DISABLE, "true")
+    monkeypatch.setenv(opencode_runner.ENV_BINARY, str(fake))
+    return fake
+
+
+def test_run_task_returns_the_trace_it_parsed(monkeypatch, tmp_path):
+    _streaming_binary(tmp_path, monkeypatch)
+    output = tmp_path / "casebook_x" / "investigation.json"
+    output.parent.mkdir()
+
+    result = opencode_runner.run_task_json("instructions", str(output))
+
+    assert result["trace"]["llm_calls"] == 2
+    assert result["trace"]["tools"] == {"grep": 1, "write": 1}
+    assert result["trace"]["tokens"]["input"] == 8601
+    assert result["result"] == {"investigation": "done"}
+
+
+def test_a_harness_task_meters_itself_under_its_node(monkeypatch, tmp_path):
+    """Nothing metered the harness path: `record_llm_usage` reads
+    `usage_metadata` off a LangChain response, and a harness task returns a
+    file. Both nodes reported zero while doing all the work."""
+    from src.utils import metrics
+
+    recorded = []
+    monkeypatch.setattr(metrics, "record_harness_usage",
+                        lambda node, trace: recorded.append((node, trace)))
+    _streaming_binary(tmp_path, monkeypatch)
+    output = tmp_path / "casebook_x" / "investigation.json"
+    output.parent.mkdir()
+
+    opencode_runner.run_task_json("instructions", str(output),
+                                  node="investigator")
+
+    assert [node for node, _ in recorded] == ["investigator"]
+    assert recorded[0][1]["llm_calls"] == 2
+
+
+def test_a_task_that_meters_nothing_is_not_an_error(monkeypatch, tmp_path):
+    """No `node`, no metrics -- and no crash. The runner is also called from
+    tests and tools that have no graph node to label."""
+    _streaming_binary(tmp_path, monkeypatch)
+    output = tmp_path / "casebook_x" / "investigation.json"
+    output.parent.mkdir()
+
+    assert opencode_runner.run_task_json("instructions", str(output))["trace"]
+
+
+def _argv_of_one_run(monkeypatch, tmp_path):
+    _streaming_binary(tmp_path, monkeypatch)
+    output = tmp_path / "casebook_x" / "investigation.json"
+    output.parent.mkdir()
+    opencode_runner.run_task_json("instructions", str(output))
+    return json.loads(Path(str(output) + ".argv.json").read_text(encoding="utf-8"))
+
+
+def test_the_task_asks_for_the_json_event_stream(monkeypatch, tmp_path):
+    """Without `--format json` stdout carries the final assistant text alone:
+    no steps, no tools, no tokens."""
+    argv = _argv_of_one_run(monkeypatch, tmp_path)
+    assert argv[argv.index("--format") + 1] == "json"
+
+
+def test_the_json_format_flag_precedes_the_attach_splice(monkeypatch, tmp_path):
+    """`--attach` is spliced in at argv[2:2], immediately after `run`. A flag
+    added ahead of that index would be silently displaced."""
+    argv = _argv_of_one_run(monkeypatch, tmp_path)
+    assert argv[1] == "run"
+    assert argv.index("--format") > 1
+
+
+def test_the_task_never_passes_title(monkeypatch, tmp_path):
+    """`--title` would stamp the event id on the session and skip opencode's
+    per-task title-generation LLM call, but on opencode 1.18.20 it hangs
+    `run` at startup before it reaches the model -- reproducibly, with the
+    same invocation succeeding once the flag is removed. The session id in
+    the trace is the correlation handle instead."""
+    assert "--title" not in _argv_of_one_run(monkeypatch, tmp_path)
+
+
+def test_every_harness_call_site_labels_its_node():
+    """An unlabelled call site is a node that silently meters nothing, which
+    is the state all four were in."""
+    expected = {"investigator", "reviewer", "dlt_investigator", "dlt_reviewer"}
+    found = set()
+    for path in HARNESS_CALL_SITES:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for call in ast.walk(tree):
+            if not isinstance(call, ast.Call):
+                continue
+            func = call.func
+            if not (isinstance(func, ast.Attribute)
+                    and func.attr in ("run_task", "run_task_json")):
+                continue
+            node = next((kw.value for kw in call.keywords if kw.arg == "node"), None)
+            assert isinstance(node, ast.Constant), (
+                f"{path.name}:{call.lineno} calls {func.attr}() without a "
+                "literal node= label; its LLM calls and tokens go unrecorded."
+            )
+            found.add(node.value)
+    assert found == expected

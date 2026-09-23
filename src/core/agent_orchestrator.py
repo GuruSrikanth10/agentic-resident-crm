@@ -73,6 +73,63 @@ def is_reviewer_approved(feedback: str) -> bool:
     normalized = (feedback or "").strip().strip("*_`\"' \t\n\r").upper()
     return normalized.startswith("APPROVED")
 
+
+#: How each payload `enrolmentType` is described to the Investigator. One map
+#: for both Investigator paths: the harness and direct paths each carried
+#: their own, and they disagreed -- the harness path had no "Z", the direct
+#: path had no "E" (the code the runbooks are keyed on), and they described
+#: "U" differently. The descriptions follow InvestigatorAgent.md and
+#: agent_policy_context.md: an update is checked 1:N against other residents
+#: as well as 1:1 against its own parent.
+ENROLMENT_TYPE_DISPLAY = {
+    "N": "New Enrolment (1:N deduplication)",
+    "E": "New Enrolment (1:N deduplication)",
+    "U": "Biometric Update (1:N deduplication and 1:1 authentication and append)",
+    "Z": "Reactivation (1:N deduplication and 1:1 authentication and append)",
+}
+
+
+def enrolment_type_display(payload: dict) -> str:
+    raw = (payload.get("packetMetaData") or {}).get("enrolmentType", "")
+    return ENROLMENT_TYPE_DISPLAY.get(str(raw).strip().upper(), raw or "Unknown")
+
+
+def _project_payload(payload: dict) -> dict:
+    """Only the payload fields the Investigator uses.
+
+    The full nested Kafka message carries many fields (sourceTopic,
+    callbackTopic, taskMetaData, rejectBits, resubmissionSummary,
+    uidV2DataArray, ...) the Investigator never reads (2.3).
+    """
+    flow_meta = payload.get("flowMetaData") or {}
+    return {
+        "eventId": payload.get("eventId"),
+        "packetMetaData": payload.get("packetMetaData"),
+        "packetExecutionSummary": payload.get("packetExecutionSummary"),
+        "flowMetaData": {"stage": flow_meta.get("stage")},
+    }
+
+
+def _write_harness_case_files(case_dir, payload: dict, logs: str, db_rule: str) -> None:
+    """Write the evidence the harness Investigator and Reviewer read from disk.
+
+    Written to the LOCAL filesystem directly -- not through the storage
+    abstraction -- because the opencode agent can only read local files, and
+    under CASEBOOK_STORAGE_BACKEND=s3 the storage layer writes to S3, not to
+    disk. Both harness nodes call this, so the Reviewer never depends on the
+    Investigator's pass having left the directory in place.
+    """
+    case_dir.mkdir(parents=True, exist_ok=True)
+    if logs and logs != "Log fetching disabled.":
+        (case_dir / "supported_logs.txt").write_text(logs, encoding="utf-8")
+    with open(case_dir / "context.json", "w", encoding="utf-8") as f:
+        json.dump({
+            "payload": _project_payload(payload),
+            "enrolment_type": enrolment_type_display(payload),
+            "db_rule": db_rule,
+        }, f, indent=2, ensure_ascii=False)
+
+
 class GraphState(TypedDict):
     payload: dict
     logs: str
@@ -122,11 +179,16 @@ PROMPT_FILES = (
     "harness/RejectionReviewer.md",
     "harness/DltInvestigator.md",
     "harness/DltReviewer.md",
+    # Inlined into the harness templates by `{{> rules/...}}`, so an edit to
+    # either is a prompt change and has to move the fingerprint too.
+    "harness/rules/rejection.md",
+    "harness/rules/dlt.md",
 )
 
 
 def compute_prompt_fingerprint(base_dir: str) -> str:
-    """SHA256 over the agent system prompts, harness templates, and policy.
+    """SHA256 over the agent system prompts, harness templates and rules,
+    the policy, and AGENTS.md.
 
     Sorted and length-prefixed so the digest cannot be changed by reordering
     or by content shifting across a boundary.
@@ -136,6 +198,8 @@ def compute_prompt_fingerprint(base_dir: str) -> str:
     digest = hashlib.sha256()
     paths = [os.path.join(base_dir, "prompts", name) for name in PROMPT_FILES]
     paths.append(os.path.join(os.path.dirname(base_dir), "agent_policy_context.md"))
+    # opencode loads the root AGENTS.md into every harness session.
+    paths.append(os.path.join(os.path.dirname(base_dir), "AGENTS.md"))
 
     for path in sorted(paths):
         try:
@@ -348,9 +412,13 @@ def _build_agent():
     from datetime import datetime
     from filelock import FileLock
 
-    @tool
-    def add_learning_rule(rule_text: str, reasoning: str) -> str:
-        """Propose a new permanent rule to fix Investigator mistakes."""
+    def queue_learning_rule(rule_text: str, reasoning: str) -> str:
+        """Validate a proposed rule and queue it for human review.
+
+        Shared by the direct Reviewer (through the `add_learning_rule` tool)
+        and the harness Reviewer (through its JSON output), so a rule reaches
+        pending_rules.jsonl by one validated path whichever one proposed it.
+        """
         target_file = os.path.join(base_dir, "prompts", "pending_rules.jsonl")
         lock_file = target_file + ".lock"
 
@@ -389,6 +457,11 @@ def _build_agent():
             return f"Successfully queued rule for human review: {rule_text}"
         except Exception as e:
             return f"Failed to queue rule: {e}"
+
+    @tool
+    def add_learning_rule(rule_text: str, reasoning: str) -> str:
+        """Propose a new permanent rule to fix Investigator mistakes."""
+        return queue_learning_rule(rule_text, reasoning)
 
     # 2.1: built once here (not per-review) now that the tool reads its
     # per-packet context from contextvars instead of a closure over
@@ -487,11 +560,8 @@ def _build_agent():
 
         if use_harness and not is_retry:
             # opencode harness path: the agent reads files from disk and
-            # writes its output to a file. Context (logs, payload, db_rule)
-            # is written to the LOCAL filesystem directly — not through the
-            # storage abstraction — because the opencode agent can only read
-            # local files, and under CASEBOOK_STORAGE_BACKEND=s3 the storage
-            # layer writes to S3, not to disk.
+            # writes its output to a file. See _write_harness_case_files for
+            # why the context goes to local disk, not CasebookStorage.
             from src.utils import opencode_runner, docs_loader
 
             # Wait for the corpus download to finish if it's still running.
@@ -512,35 +582,8 @@ def _build_agent():
             # storage backend — always on disk).
             from src.utils.paths import LOCAL_CASESHEETS_DIR
             case_dir = LOCAL_CASESHEETS_DIR / f"casebook_{event_id}"
-            case_dir.mkdir(parents=True, exist_ok=True)
-
-            # Write context files for the agent to read
-            flow_meta = payload.get("flowMetaData") or {}
-            projected_payload = {
-                "eventId": payload.get("eventId"),
-                "packetMetaData": payload.get("packetMetaData"),
-                "packetExecutionSummary": payload.get("packetExecutionSummary"),
-                "flowMetaData": {"stage": flow_meta.get("stage")},
-            }
-            raw_etype = payload.get("packetMetaData", {}).get("enrolmentType", "")
-            etype_display = {
-                "N": "New Enrolment (1:N deduplication)",
-                "U": "Biometric Update (1:1 authentication and append)",
-                "E": "New Enrolment (1:N deduplication)",
-            }.get(str(raw_etype).strip().upper(), raw_etype or "Unknown")
-
-            # Write the logs to the local casebook directory
-            if logs and logs != "Log fetching disabled.":
-                (case_dir / "supported_logs.txt").write_text(logs, encoding="utf-8")
-
-            # Write payload + db_rule to a context file
-            context_file = case_dir / "context.json"
-            with open(context_file, "w", encoding="utf-8") as f:
-                json.dump({
-                    "payload": projected_payload,
-                    "enrolment_type": etype_display,
-                    "db_rule": db_rule,
-                }, f, indent=2, ensure_ascii=False)
+            _write_harness_case_files(case_dir, payload, logs, db_rule)
+            etype_display = enrolment_type_display(payload)
 
             output_path = str(case_dir / "investigation.json")
 
@@ -562,10 +605,12 @@ def _build_agent():
                 result = opencode_runner.run_task_json(
                     prompt=harness_prompt,
                     output_path=output_path,
+                    node="investigator",
                 )
                 investigation = result["result"].get("investigation", "")
                 log.info("Investigator finished (opencode harness)",
-                         elapsed=result.get("seconds"))
+                         elapsed=result.get("seconds"),
+                         **(result.get("trace") or {}))
                 return {"investigation": investigation, "db_rule": db_rule}
             except Exception as e:
                 log.warning("opencode harness failed; falling back to direct LLM",
@@ -593,31 +638,13 @@ def _build_agent():
             if logs and logs != "Log fetching disabled.":
                 prompt += f"Elasticsearch Logs (cite these):\n{logs}\n\n"
         else:
-            # Project the payload down to only the fields the prompt
-            # actually needs -- the full nested Kafka message carries many
-            # fields (sourceTopic, callbackTopic, taskMetaData, rejectBits,
-            # resubmissionSummary, uidV2DataArray, ...) the Investigator
-            # never uses (2.3).
-            flow_meta = payload.get("flowMetaData") or {}
-            projected_payload = {
-                "eventId": payload.get("eventId"),
-                "packetMetaData": payload.get("packetMetaData"),
-                "packetExecutionSummary": payload.get("packetExecutionSummary"),
-                "flowMetaData": {"stage": flow_meta.get("stage")},
-            }
-            prompt = f"Kafka Payload: {json.dumps(projected_payload)}\n\n"
+            prompt = f"Kafka Payload: {json.dumps(_project_payload(payload))}\n\n"
 
             # Enrolment type is the single most important framing fact for a
             # rejection: New Enrolment (N) follows 1:N dedup rules, Biometric
             # Update (U) follows 1:1 auth-and-append rules. Stating it
             # explicitly prevents the LLM from missing it inside the JSON.
-            raw_etype = payload.get("packetMetaData", {}).get("enrolmentType", "")
-            etype_display = {
-                "N": "New Enrolment (1:N deduplication)",
-                "U": "Biometric Update (1:N deduplication and 1:1 authentication and append)",
-                "Z": "Reactivation (1:N deduplication and 1:1 authentication and append)",
-            }.get(str(raw_etype).strip().upper(), raw_etype or "Unknown")
-            prompt += f"Enrolment Type: {etype_display}\n\n"
+            prompt += f"Enrolment Type: {enrolment_type_display(payload)}\n\n"
 
             if logs and logs != "Log fetching disabled.":
                 prompt += f"Elasticsearch Logs: {logs}\n\n"
@@ -658,11 +685,6 @@ def _build_agent():
             from src.utils.paths import LOCAL_CASESHEETS_DIR
 
             case_dir = LOCAL_CASESHEETS_DIR / f"casebook_{event_id}"
-
-            # Write the investigation to a file for the agent to read
-            investigation_file = case_dir / "investigation_text.txt"
-            investigation_file.write_text(investigation, encoding="utf-8")
-
             output_path = str(case_dir / "review.json")
 
             from src.utils.prompt_loader import render as render_prompt
@@ -673,16 +695,40 @@ def _build_agent():
             )
 
             try:
+                # Inside the try, and the evidence rewritten rather than
+                # assumed: a case directory that is missing or unwritable is a
+                # harness failure like any other and falls back to the direct
+                # LLM, instead of raising out of the node and failing the
+                # packet.
+                _write_harness_case_files(case_dir, state.get("payload", {}),
+                                          state.get("logs", ""),
+                                          state.get("db_rule", ""))
+                (case_dir / "investigation_text.txt").write_text(
+                    investigation, encoding="utf-8")
+
                 result = opencode_runner.run_task_json(
                     prompt=harness_prompt,
                     output_path=output_path,
+                    node="reviewer",
                 )
                 verdict = result["result"].get("verdict", "REJECTED").upper()
                 feedback = result["result"].get("feedback", "")
                 if verdict == "APPROVED":
                     feedback = "APPROVED"
+                else:
+                    # The harness Reviewer has no tool to call, so it returns
+                    # its proposed rule in the JSON instead of calling
+                    # add_learning_rule; without this the self-learning loop
+                    # received nothing while the harness was on.
+                    rule = result["result"].get("learning_rule")
+                    if isinstance(rule, dict) and rule.get("rule_text"):
+                        outcome = queue_learning_rule(str(rule["rule_text"]),
+                                                      str(rule.get("reasoning") or ""))
+                        log.info("Harness Reviewer proposed a learning rule",
+                                 queued=outcome.startswith("Successfully"))
                 log.info("Reviewer finished (opencode harness)",
-                         elapsed=result.get("seconds"), verdict=verdict)
+                         elapsed=result.get("seconds"), verdict=verdict,
+                         **(result.get("trace") or {}))
                 return {"reviewer_feedback": feedback,
                         "retry_count": state.get("retry_count", 0) + 1}
             except Exception as e:

@@ -204,13 +204,130 @@ def server_ready() -> bool:
     return _ACTIVE is not None and _ACTIVE._process is not None and _ACTIVE._process.poll() is None
 
 
+# ======================================================================
+# Task trace
+# ======================================================================
+#
+# `opencode run --format json` writes one JSON object per line to stdout.
+# `step_start`/`step_finish` bracket a single LLM round-trip: one task is an
+# agentic loop, so it makes several, and until this existed the pipeline had
+# no idea how many. The default format shows none of it -- piped to a
+# subprocess with no TTY it prints the final assistant text and nothing more,
+# so a task that burned twenty calls and a task that burned two logged the
+# same one line.
+#
+# The runner never parsed stdout for results (it reads `output_path` off
+# disk), so the format is free to change; only the log lines and this trace
+# depend on it.
+
+
+class _Trace:
+    """Running tally of one task, built from the `--format json` stream."""
+
+    def __init__(self) -> None:
+        self.session_id: Optional[str] = None
+        self.llm_calls = 0
+        self.tools: Dict[str, int] = {}
+        self.tokens = {"input": 0, "output": 0, "reasoning": 0,
+                       "cache_read": 0, "cache_write": 0}
+        self.cost = 0.0
+        self.last_text = ""
+        self.tool_errors: list = []
+
+    def add(self, event: Dict[str, Any]) -> None:
+        if self.session_id is None:
+            self.session_id = event.get("sessionID")
+        kind = event.get("type")
+        part = event.get("part") or {}
+
+        if kind == "step_start":
+            self.llm_calls += 1
+        elif kind == "step_finish":
+            tokens = part.get("tokens") or {}
+            cache = tokens.get("cache") or {}
+            self.tokens["input"] += _int(tokens.get("input"))
+            self.tokens["output"] += _int(tokens.get("output"))
+            self.tokens["reasoning"] += _int(tokens.get("reasoning"))
+            self.tokens["cache_read"] += _int(cache.get("read"))
+            self.tokens["cache_write"] += _int(cache.get("write"))
+            try:
+                self.cost += float(part.get("cost") or 0.0)
+            except (TypeError, ValueError):
+                pass
+        elif kind == "tool_use":
+            name = str(part.get("tool") or "unknown")
+            self.tools[name] = self.tools.get(name, 0) + 1
+            # Defensive: a failed tool call is the most useful thing in the
+            # stream and the cheapest to miss. Any status that is not a
+            # completion is worth keeping, whatever opencode calls it.
+            state = part.get("state") or {}
+            status = str(state.get("status") or "")
+            if status and status not in ("completed", "running", "pending"):
+                self.tool_errors.append(f"{name}: {status}")
+        elif kind == "text":
+            text = str(part.get("text") or "").strip()
+            if text:
+                self.last_text = text
+
+    def summary(self) -> Dict[str, Any]:
+        return {
+            "session_id": self.session_id,
+            "llm_calls": self.llm_calls,
+            "tools": dict(sorted(self.tools.items())),
+            "tokens": dict(self.tokens),
+            "cost": round(self.cost, 6),
+        }
+
+
+def _int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _parse_event(line: str) -> Optional[Dict[str, Any]]:
+    """One stdout line as an event, or None when it is not one.
+
+    Anything that is not a JSON object with a `type` is opencode's own
+    diagnostics -- a provider error, a stack trace, a startup warning. Those
+    still matter (they are the only channel that carries a failure the event
+    stream never reaches), so the caller logs them verbatim.
+    """
+    if not line.startswith("{"):
+        return None
+    try:
+        event = json.loads(line)
+    except ValueError:
+        return None
+    return event if isinstance(event, dict) and "type" in event else None
+
+
+def _tool_detail(part: Dict[str, Any]) -> str:
+    """A one-line description of what a tool call actually asked for."""
+    state = part.get("state") or {}
+    inputs = state.get("input") or {}
+    if isinstance(inputs, dict):
+        for key in ("pattern", "filePath", "path", "query", "command", "description"):
+            value = inputs.get(key)
+            if value:
+                return f"{key}={str(value)[:200]}"
+    return str(state.get("title") or "")[:200]
+
+
 def run_task(prompt: str, output_path: str,
              session: Optional[Session] = None,
-             timeout: Optional[int] = None) -> Dict[str, Any]:
+             timeout: Optional[int] = None,
+             node: Optional[str] = None) -> Dict[str, Any]:
     """Run one task via opencode and return what the agent wrote.
 
     The agent writes its output to `output_path` as a file on disk.
     The runner reads it back and returns the parsed result.
+
+    `node` is the metrics label for the calling graph node (`investigator`,
+    `reviewer`, `dlt_investigator`, `dlt_reviewer`). Given one, the task's
+    LLM calls and tokens are metered under it, the same labels the direct
+    LLM path uses, so the two paths are comparable on one graph.
 
     Raises OpencodeUnavailable on failure.
     """
@@ -232,15 +349,29 @@ def run_task(prompt: str, output_path: str,
     # subprocess. This breaks the taint chain from file-sourced prompt
     # content to the subprocess argument list (Fortify command-injection
     # sink) and avoids platform command-line length limits entirely.
-    prompt_dir = os.path.join(repo_root, "local_casesheets", "_prompts")
-    os.makedirs(prompt_dir, exist_ok=True)
-    prompt_file = os.path.join(prompt_dir, f"{os.path.basename(output_path)}.prompt.txt")
+    #
+    # The file sits beside the output, so it is exactly as unique as the
+    # output path and is removed with the case directory. It used to live in
+    # a shared `_prompts/` directory named after the output's basename alone,
+    # which is the same for every case ("investigation.json"): with several
+    # tasks in flight, one task could read another case's instructions.
+    prompt_file = f"{os.path.abspath(output_path)}.prompt.txt"
     with open(prompt_file, "w", encoding="utf-8") as handle:
         handle.write(prompt)
     task_prompt = (f"Read the file at {prompt_file} and follow the "
                    f"instructions in it exactly. Write your output to "
                    f"the path specified in those instructions: {output_path}")
-    argv = [binary, "run", "--auto", "--model", _model(),
+    # `--format json` turns stdout into a machine-readable event stream. It
+    # must stay ahead of the `argv[2:2]` splice below, which inserts
+    # `--attach` immediately after `run`.
+    #
+    # `--title` is deliberately absent. It looks like the natural way to stamp
+    # the event id on the session and to skip the extra title-generation LLM
+    # call opencode makes per task, but on opencode 1.18.20 passing it hangs
+    # `run` at startup before it reaches the model -- reproducibly, with the
+    # same invocation succeeding the moment the flag is removed. The session
+    # id in the trace below is the correlation handle instead.
+    argv = [binary, "run", "--auto", "--format", "json", "--model", _model(),
             "--dir", repo_root, task_prompt]
 
     env = {**os.environ, "OPENCODE_PERMISSION": json.dumps(_permissions())}
@@ -270,16 +401,56 @@ def run_task(prompt: str, output_path: str,
         raise OpencodeUnavailable(f"opencode binary not found: {error}") from error
 
     output_lines = []
+    trace = _Trace()
 
     def _stream():
         for line in process.stdout:
             output_lines.append(line)
             clean = _ANSI.sub("", line.rstrip())
-            if clean:
+            if not clean:
+                continue
+            event = _parse_event(clean)
+            if event is None:
                 logger.info(f"  [Harness] [{task_name}] | {clean}")
+                continue
+            trace.add(event)
+            _log_event(task_name, event)
+
+    def _log_event(task: str, event: Dict[str, Any]) -> None:
+        """Tool calls at INFO -- they are the trace worth having in the log;
+        step and text events at DEBUG, since the end-of-task summary carries
+        the totals and the agent's text lands in the output file anyway."""
+        kind = event.get("type")
+        part = event.get("part") or {}
+        if kind == "tool_use":
+            logger.info(f"  [Harness] [{task}] | tool {part.get('tool')} "
+                        f"{_tool_detail(part)}")
+        elif kind == "step_finish":
+            tokens = part.get("tokens") or {}
+            logger.debug(f"  [Harness] [{task}] | step finish "
+                         f"reason={part.get('reason')} "
+                         f"in={tokens.get('input')} out={tokens.get('output')}")
+        elif kind == "text":
+            text = str(part.get("text") or "").strip()
+            if text:
+                logger.debug(f"  [Harness] [{task}] | {text[:400]}")
 
     reader = threading.Thread(target=_stream, daemon=True)
     reader.start()
+
+    def _meter() -> None:
+        """Meter what the task spent, however it ended.
+
+        Called on the timeout path too: a task killed at the deadline still
+        burned every token it had already spent, and leaving those unrecorded
+        understates exactly the runs that cost the most. There the reader
+        thread may not have drained yet, so the tally can be short by a step --
+        an undercount on a run that already failed, which beats recording
+        nothing for it.
+        """
+        if node:
+            from src.utils import metrics
+            metrics.record_harness_usage(node, trace.summary())
 
     try:
         process.wait(timeout=task_timeout)
@@ -287,10 +458,15 @@ def run_task(prompt: str, output_path: str,
         process.kill()
         process.wait()
         reader.join(timeout=5)
+        _meter()
+        logger.warning("opencode task timed out",
+                       task=task_name, seconds=task_timeout, **trace.summary())
         raise OpencodeUnavailable(
-            f"task exceeded {task_timeout}s wall-clock deadline.")
+            f"task exceeded {task_timeout}s wall-clock deadline "
+            f"after {trace.llm_calls} LLM calls.")
 
     reader.join(timeout=5)
+    _meter()
     elapsed = time.time() - started
 
     # The agent may write to a different filename than requested (e.g.
@@ -313,34 +489,47 @@ def run_task(prompt: str, output_path: str,
                         actual=os.path.basename(fallback))
             output_path = fallback
         else:
-            transcript = "".join(output_lines)
-            tail = (transcript.strip().splitlines() or ["no output"])[-1]
+            # The agent's own last words beat the last stdout line: with
+            # `--format json` that line is a `step_finish` envelope, which
+            # says nothing about why nothing was written.
+            reason = trace.last_text
+            if not reason:
+                transcript = "".join(output_lines)
+                reason = (transcript.strip().splitlines() or ["no output"])[-1]
+            if trace.tool_errors:
+                reason = f"{reason} (tool errors: {', '.join(trace.tool_errors[:3])})"
+            logger.warning("opencode task wrote no output",
+                           task=task_name, elapsed=round(elapsed, 1),
+                           **trace.summary())
             raise OpencodeUnavailable(
-                f"task wrote no output to {output_path} after {elapsed:.0f}s. "
-                f"Last line: {tail[:200]}")
+                f"task wrote no output to {output_path} after {elapsed:.0f}s "
+                f"and {trace.llm_calls} LLM calls. Last: {reason[:200]}")
 
     with open(output_path, encoding="utf-8") as handle:
         raw = handle.read()
 
     logger.info("opencode task completed",
-                task=task_name, elapsed=round(elapsed, 1), model=_model())
+                task=task_name, elapsed=round(elapsed, 1), model=_model(),
+                **trace.summary())
 
     return {
         "output": raw,
         "output_path": output_path,
         "seconds": round(elapsed, 1),
         "model": _model(),
+        "trace": trace.summary(),
     }
 
 
 def run_task_json(prompt: str, output_path: str,
                   session: Optional[Session] = None,
-                  timeout: Optional[int] = None) -> Dict[str, Any]:
+                  timeout: Optional[int] = None,
+                  node: Optional[str] = None) -> Dict[str, Any]:
     """Run a task and parse the output as JSON.
 
     Extracts the first JSON object from the output file.
     """
-    result = run_task(prompt, output_path, session, timeout)
+    result = run_task(prompt, output_path, session, timeout, node)
     raw = result["output"]
 
     start, end = raw.find("{"), raw.rfind("}")

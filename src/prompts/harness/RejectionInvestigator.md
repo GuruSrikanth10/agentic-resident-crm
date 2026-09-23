@@ -25,7 +25,7 @@ runtime logs were not available to corroborate it.
 
 Read context.json first. It contains:
 - The Kafka payload (eventId, packetMetaData, flowMetaData.stage, etc.)
-- The enrolment type (N = new enrolment, U = biometric update)
+- The enrolment type (N or E = new enrolment, U = biometric update)
 - The DB rule configuration — this is the business rule that rejected the packet
 
 Then read supported_logs.txt if it exists. If it is absent, empty, or contains

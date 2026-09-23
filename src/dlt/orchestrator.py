@@ -125,6 +125,21 @@ def _evidence_block(state: DltGraphState) -> str:
     )
 
 
+def _write_harness_case_files(case_dir, state: DltGraphState) -> None:
+    """Write the evidence the harness Investigator and Reviewer read from disk.
+
+    DLT cases live under dlt_cases/ in the casebook store, but the opencode
+    agent can only read local files. Both harness nodes call this, so the
+    Reviewer never depends on the Investigator's pass having left the
+    directory in place.
+    """
+    case_dir.mkdir(parents=True, exist_ok=True)
+    (case_dir / "dlt_evidence.txt").write_text(_evidence_block(state), encoding="utf-8")
+    (case_dir / "dlt_failure.json").write_text(
+        json.dumps(state.get("failure") or {}, indent=2, ensure_ascii=False),
+        encoding="utf-8")
+
+
 def get_dlt_agent():
     """Build (and cache) the DLT analysis graph."""
     global _agent
@@ -173,19 +188,9 @@ def _build_dlt_agent():
             from src.utils import opencode_runner, docs_loader
             from src.utils.paths import LOCAL_CASESHEETS_DIR
 
-            # DLT cases live under dlt_cases/ in the casebook store, but for
-            # the opencode agent we write context to the local filesystem.
             ref_id = state.get("case_id", "unknown")
             case_dir = LOCAL_CASESHEETS_DIR / f"casebook_{ref_id}"
-            case_dir.mkdir(parents=True, exist_ok=True)
-
-            # Write context files for the agent
-            evidence = _evidence_block(state)
-            (case_dir / "dlt_evidence.txt").write_text(evidence, encoding="utf-8")
-
-            failure = state.get("failure") or {}
-            (case_dir / "dlt_failure.json").write_text(
-                json.dumps(failure, indent=2, ensure_ascii=False), encoding="utf-8")
+            _write_harness_case_files(case_dir, state)
 
             output_path = str(case_dir / "dlt_investigation.json")
 
@@ -208,10 +213,12 @@ def _build_dlt_agent():
                 result = opencode_runner.run_task_json(
                     prompt=harness_prompt,
                     output_path=output_path,
+                    node="dlt_investigator",
                 )
                 investigation = result["result"].get("investigation", "")
                 log.info("DLT investigator finished (opencode harness)",
-                         elapsed=result.get("seconds"))
+                         elapsed=result.get("seconds"),
+                         **(result.get("trace") or {}))
                 return {"investigation": investigation}
             except Exception as e:
                 log.warning("opencode harness failed for DLT investigator; falling back to direct LLM",
@@ -253,11 +260,6 @@ def _build_dlt_agent():
 
             ref_id = state.get("case_id", "unknown")
             case_dir = LOCAL_CASESHEETS_DIR / f"casebook_{ref_id}"
-
-            # Write the investigation for the agent to read
-            (case_dir / "dlt_investigation_text.txt").write_text(
-                investigation, encoding="utf-8")
-
             output_path = str(case_dir / "dlt_review.json")
 
             from src.utils.prompt_loader import render as render_prompt
@@ -268,16 +270,26 @@ def _build_dlt_agent():
             )
 
             try:
+                # Inside the try, and the evidence rewritten rather than
+                # assumed: a case directory that is missing or unwritable is a
+                # harness failure like any other and falls back to the direct
+                # LLM, instead of raising out of the node.
+                _write_harness_case_files(case_dir, state)
+                (case_dir / "dlt_investigation_text.txt").write_text(
+                    investigation, encoding="utf-8")
+
                 result = opencode_runner.run_task_json(
                     prompt=reviewer_harness_prompt,
                     output_path=output_path,
+                    node="dlt_reviewer",
                 )
                 verdict = result["result"].get("verdict", "REJECTED").upper()
                 feedback = result["result"].get("feedback", "")
                 if verdict == "APPROVED":
                     feedback = "APPROVED"
                 log.info("DLT reviewer finished (opencode harness)",
-                         elapsed=result.get("seconds"), verdict=verdict)
+                         elapsed=result.get("seconds"), verdict=verdict,
+                         **(result.get("trace") or {}))
                 return {"reviewer_feedback": feedback,
                         "retry_count": state.get("retry_count", 0) + 1}
             except Exception as e:

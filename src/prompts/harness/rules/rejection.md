@@ -24,11 +24,13 @@ rejection reason code is already resolved into the DB rule inside
 ### Enrolment type rules
 
 The prompt includes an "Enrolment Type" field:
-- **N (New Enrolment)**: 1:N de-duplication. Incoming biometrics must be
+- **N / E (New Enrolment)**: 1:N de-duplication. Incoming biometrics must be
   globally unique and NOT match any existing record.
-- **U (Biometric Update)**: 1:1 authentication and append. Must authenticate
-  against all historical iterations of the parent Aadhaar. New biometrics
-  are APPENDED, never replaced.
+- **U (Biometric Update)**: 1:N de-duplication and 1:1 authentication and
+  append. Must authenticate against all historical iterations of the parent
+  Aadhaar, and must not match a different parent. New biometrics are
+  APPENDED, never replaced. A Mandatory Biometric Update (MBU, a first-time
+  biometric update) is treated as a New Enrolment: full 1:N de-duplication.
 
 You MUST explicitly state the enrolment type in your findings and apply the
 correct rules for that type.

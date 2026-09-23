@@ -400,6 +400,35 @@ def record_llm_usage(node: str, response) -> None:
         logger.debug("Could not record LLM usage", node=node, error=str(e))
 
 
+def record_harness_usage(node: str, trace: dict) -> None:
+    """Meter one opencode harness task from its `--format json` event trace.
+
+    The harness path recorded nothing at all. `record_llm_usage` reads
+    `usage_metadata` off a LangChain response, and a harness task has no
+    response object -- it returns a file on disk. So with
+    USE_OPENCODE_HARNESS=true the Investigator and Reviewer nodes reported
+    zero calls and zero tokens while doing all of the work, and the spend
+    graph read as though those nodes had stopped running.
+
+    One task is an agentic loop, so `llm_calls` counts the round-trips inside
+    it, not the task -- the same unit the direct path counts. Only input and
+    output are metered, the two directions the direct path records, so a
+    dashboard can compare them without knowing which path served a packet;
+    the reasoning and cache breakdown rides along in the structured log.
+    """
+    try:
+        calls = int((trace or {}).get("llm_calls") or 0)
+        if calls:
+            LLM_CALLS.labels(node=node, outcome="ok").inc(calls)
+        tokens = (trace or {}).get("tokens") or {}
+        for direction in ("input", "output"):
+            count = int(tokens.get(direction) or 0)
+            if count:
+                LLM_TOKENS.labels(node=node, direction=direction).inc(count)
+    except Exception as e:
+        logger.debug("Could not record harness usage", node=node, error=str(e))
+
+
 def render_latest() -> Optional[bytes]:
     """Prometheus exposition text, or None when the library isn't installed."""
     if not METRICS_AVAILABLE:

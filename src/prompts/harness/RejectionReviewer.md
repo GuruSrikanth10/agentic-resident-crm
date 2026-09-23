@@ -39,8 +39,8 @@ lacking log citations when no logs were available.
    reason code matches what the DB rule and service documentation say.
 2. Glossary violations: 'demo' = face modality, 'nonDemo' = fingerprints and
    iris. 'TD' = all nonDemo matched.
-3. Enrolment type misapplication: N = 1:N dedup, U = 1:1 auth and append,
-   MBU = treated as 1:N.
+3. Enrolment type misapplication: N / E = 1:N dedup, U = 1:N dedup plus 1:1
+   auth and append against its own parent, MBU = treated as 1:N.
 4. Claims not grounded in docs: verify service behaviour claims against the
    documentation. Every claim about what the code does must cite the doc.
 5. Claims not grounded in logs (when logs ARE available): if logs were
@@ -50,11 +50,21 @@ lacking log citations when no logs were available.
 6. Wrong service identified: verify the investigation attributed the failure
    to the correct service.
 
+## STEP 4 — Propose a learning rule (only when rejecting)
+
+If you reject because of a mistake the Investigator is likely to repeat on
+other packets, propose one permanent rule to correct the behaviour: a strict,
+single-line constraint, for example "Always ensure that the solution maps
+exactly to the rule's suggested resolution." It is queued for human review,
+not applied directly. It must be general: no identifiers, values or other
+details from this packet. Use null when approving, or when the mistake is
+not one worth a permanent rule.
+
 CRITICAL: You MUST write your output to EXACTLY this file path:
   {{output_path}}
 Do NOT write to any other filename.
 Write a JSON object with this schema:
-{"verdict": "APPROVED" or "REJECTED", "feedback": "<if rejected, explain what is wrong; if approved, empty string>"}
+{"verdict": "APPROVED" or "REJECTED", "feedback": "<if rejected, explain what is wrong; if approved, empty string>", "learning_rule": {"rule_text": "<single-line rule>", "reasoning": "<why the rule is needed>"} or null}
 
 Follow the rules in AGENTS.md, and these rules for this flow:
 

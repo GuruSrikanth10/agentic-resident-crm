@@ -219,8 +219,8 @@ def test_prompt_fingerprint_is_stable_and_sensitive(tmp_path):
     """Stable across calls, and changed by any prompt edit -- otherwise it
     cannot attribute an accuracy movement to a prompt change."""
     prompts = tmp_path / "prompts"
-    prompts.mkdir()
     for name in orch.PROMPT_FILES:
+        (prompts / name).parent.mkdir(parents=True, exist_ok=True)
         (prompts / name).write_text("original", encoding="utf-8")
     (tmp_path.parent / "agent_policy_context.md").write_text("policy",
                                                              encoding="utf-8")
@@ -237,9 +237,9 @@ def test_prompt_fingerprint_distinguishes_content_moving_between_files(tmp_path)
     """Length-prefixing means content shifting across a file boundary changes
     the digest, rather than hashing to the same concatenation."""
     prompts = tmp_path / "prompts"
-    prompts.mkdir()
     names = list(orch.PROMPT_FILES)
     for name in names:
+        (prompts / name).parent.mkdir(parents=True, exist_ok=True)
         (prompts / name).write_text("", encoding="utf-8")
 
     (prompts / names[0]).write_text("ab", encoding="utf-8")

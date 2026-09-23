@@ -145,24 +145,77 @@ def gap_confidence_ceiling() -> float:
         return 0.6
 
 
-def apply_confidence_policy(result: SynthesisResult, logs: str = ""):
-    """Cap confidence on an incomplete trace, then abstain if too low.
+#: Ceilings for a resolution no log line corroborated. Only a trace WITH gaps
+#: was capped, so a packet with no logs at all could score higher than one
+#: with partial logs. The DB rule and the service documentation still say why
+#: a packet was rejected, so these are not the gap ceiling; the defaults match
+#: the DLT lane's DLT_LOGS_UNAVAILABLE_CEILING / DLT_LOGS_SILENT_CEILING, which
+#: make the same split for the same reasons:
+#:
+#:   unavailable  we never looked -- fetching disabled, or the fetch failed.
+#:                The rule stands alone and nothing contradicts it.
+#:   silent       we looked and the log source had nothing for this packet.
+#:                The logs could have spoken and did not, so it is lower.
+DEFAULT_LOGS_UNAVAILABLE_CEILING = 0.75
+DEFAULT_LOGS_SILENT_CEILING = 0.6
+
+#: The sentinels the fetch stage stores in place of a trace:
+#: `tool_registry.fetch_and_persist_logs` and `log_pipeline.pipeline`.
+_LOGS_DISABLED = "Log fetching disabled."
+_NO_LOGS_FOUND = "No logs found for ID:"
+
+
+def _ceiling_env(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+
+
+def logs_unavailable_ceiling() -> float:
+    return _ceiling_env("SYNTHESIS_LOGS_UNAVAILABLE_CEILING",
+                        DEFAULT_LOGS_UNAVAILABLE_CEILING)
+
+
+def logs_silent_ceiling() -> float:
+    return _ceiling_env("SYNTHESIS_LOGS_SILENT_CEILING", DEFAULT_LOGS_SILENT_CEILING)
+
+
+def _confidence_ceilings(logs: Optional[str]) -> list:
+    """Every (ceiling, why) that the evidence behind a resolution imposes."""
+    from src.log_pipeline.sources.k8s.gaps import BANNER_HEADER
+
+    text = (logs or "").strip()
+    ceilings = []
+    if BANNER_HEADER in text:
+        ceilings.append((gap_confidence_ceiling(),
+                         "the trace carries evidence gaps"))
+    if not text or text == _LOGS_DISABLED:
+        ceilings.append((logs_unavailable_ceiling(),
+                         "no logs were fetched, so nothing corroborated the rule"))
+    elif _NO_LOGS_FOUND in text:
+        ceilings.append((logs_silent_ceiling(),
+                         "the log source had no lines for this packet, so "
+                         "nothing corroborated the rule"))
+    return ceilings
+
+
+def apply_confidence_policy(result: SynthesisResult, logs: Optional[str] = ""):
+    """Cap confidence on missing or incomplete logs, then abstain if too low.
 
     Returns (result, abstained, reason). The result is a copy -- callers hold
     the original for the audit trail.
     """
-    from src.log_pipeline.sources.k8s.gaps import BANNER_HEADER
-
     confidence = result.confidence
     reason = None
 
-    has_gaps = bool(logs) and BANNER_HEADER in logs
-    if has_gaps and confidence is not None:
-        ceiling = gap_confidence_ceiling()
+    ceilings = _confidence_ceilings(logs)
+    if ceilings and confidence is not None:
+        ceiling, why = min(ceilings)
         if confidence > ceiling:
             reason = (
-                f"confidence lowered from {confidence} to {ceiling}: the trace "
-                f"carries evidence gaps, so a higher confidence is unsupported."
+                f"confidence lowered from {confidence} to {ceiling}: {why}, "
+                f"so a higher confidence is unsupported."
             )
             confidence = ceiling
 

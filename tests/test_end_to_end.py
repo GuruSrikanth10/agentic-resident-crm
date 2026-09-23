@@ -114,6 +114,7 @@ def test_a_packet_produces_a_valid_casebook(storage, monkeypatch):
         # The Reviewer must approve, so every agent returning the synthesis
         # JSON would loop. Approve explicitly by short-circuiting the check.
         monkeypatch.setattr(orch, "is_reviewer_approved", lambda _f: True)
+        monkeypatch.delenv("SYNTHESIS_LOGS_UNAVAILABLE_CEILING", raising=False)
         response = _run("e2e-happy")
 
     assert response["status"] == "processed"
@@ -121,7 +122,9 @@ def test_a_packet_produces_a_valid_casebook(storage, monkeypatch):
     casebook = storage.load("e2e-happy")
     assert casebook["resolution"]["action"] == "RESIDENT_PACKET_RESUBMIT"
     assert casebook["resolution"]["resident_action"] == "NEW_PACKET"
-    assert casebook["resolution"]["confidence"] == 0.9
+    # The model said 0.9, but log fetching is disabled here, so no log line
+    # corroborated it and the no-logs ceiling applies.
+    assert casebook["resolution"]["confidence"] == 0.75
     assert casebook["packet_status"]["rejection_data"]["rejection_code"] == \
         "RESIDENT_MAN_DEDUP_REJECT_TD"
     assert casebook["packet_metadata"]["ref_id"] == "REF-1"

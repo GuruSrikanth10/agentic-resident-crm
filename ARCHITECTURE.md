@@ -390,6 +390,16 @@ flowchart TD
 > read the logs". Every gap above is rendered into a banner placed **before** the
 > trace, and `apply_confidence_policy` caps confidence at
 > `SYNTHESIS_GAP_CONFIDENCE_CEILING` (0.6) whenever that banner is present.
+>
+> The same split bounds a resolution no log line corroborated at all:
+> `SYNTHESIS_LOGS_UNAVAILABLE_CEILING` (0.75) when we never looked (fetching
+> disabled, or the fetch failed) and `SYNTHESIS_LOGS_SILENT_CEILING` (0.6) when
+> the source had nothing for the packet. Only the banner used to be checked, so
+> a packet with no logs at all could score higher than one with partial logs.
+> The DB rule and the documentation still explain the rejection, so these are
+> not the gap ceiling; the defaults match the DLT lane's
+> `DLT_LOGS_UNAVAILABLE_CEILING` / `DLT_LOGS_SILENT_CEILING`. Where several
+> apply, the lowest binds.
 
 #### 1.3.3 LangGraph state machine
 
@@ -474,13 +484,18 @@ stateDiagram-v2
         the Investigator prompt without a human typing
         "promote".
 
-        When USE_OPENCODE_HARNESS=true: writes
-        investigation_text.txt to the local casebook dir,
-        then calls opencode_runner.run_task_json with the
-        RejectionReviewer harness prompt template. The agent
-        cross-references claims against supported_logs.txt,
-        context.json, and the docs_cache/ corpus. Falls back
-        to direct LLM on harness failure.
+        When USE_OPENCODE_HARNESS=true: rewrites context.json +
+        supported_logs.txt from graph state and writes
+        investigation_text.txt to the local casebook dir (so it
+        never depends on the Investigator's pass leaving the
+        directory behind), then calls
+        opencode_runner.run_task_json with the RejectionReviewer
+        harness prompt template. The agent cross-references
+        claims against those files and the docs_cache/ corpus.
+        A rejection may carry a learning_rule in its JSON, which
+        goes through the same validated queue as
+        add_learning_rule. Falls back to direct LLM on any
+        harness failure, including an unwritable case dir.
     end note
 
     state synthesize {
@@ -492,7 +507,7 @@ stateDiagram-v2
         parse2 --> policy: valid
         parse2 --> unrepairable: still invalid
         policy: apply_confidence_policy
-        policy --> capped: gap banner present - cap at GAP_CONFIDENCE_CEILING
+        policy --> capped: gap banner, no logs, or no lines for the packet - lowest ceiling binds
         policy --> abstain: confidence below SYNTHESIS_CONFIDENCE_THRESHOLD, 0 disables this
         policy --> ok
         capped --> ok
@@ -624,15 +639,22 @@ The repository follows standard Python backend architecture for modularity and s
 agentic-resident-crm/
 ├── .agents/
 │   └── AGENTS.md                   # Agentic configurations and behavioral rules
-├── AGENTS.md                        # opencode agent instructions (Rejection Investigator)
+├── .github/
+│   └── workflows/test.yml          # CI: the regression suite on push and pull request
+├── AGENTS.md                       # Shared opencode agent instructions, loaded into every
+│                                   #   harness session; each flow's own rules live in
+│                                   #   src/prompts/harness/rules/
 ├── README.md                       # Copy of this document for the repo landing page. Regenerate
 │                                   #   it from ARCHITECTURE.md; it currently lags by one revision.
+├── SYSTEM_OVERVIEW.md              # Narrative overview of the system for a non-engineering reader
 ├── .env.example                    # Annotated env-var template (the .env itself is gitignored)
 ├── agent_policy_context.md         # Foundational business logic & rules mapping for AI agents
 ├── DLT_PLAN.md                     # Dead-letter topic (DLT) analysis lane: engineering design
 ├── KUBERNETES_LOGS_PLAN.md         # Kubernetes log source: engineering design
 ├── RUNBOOK_PLAN.md                 # Standard runbook implementation plan
 ├── REMEDIATION_PLAN_2026_08_21.md  # 2026-08-21 codebase audit remediation programme
+├── REASON_CODE_DOCS_PLAN.md        # Rejection lane without opencode: reason-code documentation
+│                                   #   (proposed; per-lane harness flags, document store, rollout)
 ├── start.py                        # Process supervisor: spawns main_api.py + fast_consumer.py + slow_consumer.py
 ├── local_run.py                    # CLI: POST a local packet JSON to the running API
 ├── rules.csv                       # Rules DB export consumed by check_drift.py (gitignored;
@@ -647,9 +669,11 @@ agentic-resident-crm/
 ├── pyproject.toml                  # Project metadata, dependencies, ruff/pytest config
 ├── requirements.txt                # Pinned runtime dependencies
 ├── version.json                    # Image/service version tag
-├── opencode.json                   # opencode (Rejection Investigator agent) configuration
+├── opencode.json                   # opencode CLI config: a $schema pointer only. The provider
+│                                   #   block is written at boot by entrypoint.sh
 ├── tests/
 │   ├── conftest.py                 # Test-suite isolation from the developer's .env
+│   ├── s3_fakes.py                 # S3 fakes that misbehave the way real S3-compatible stores do
 │   ├── manual_payload_demo.py      # Manual demo: parse a real rejection payload, print extracts
 │   ├── test_end_to_end.py          # End-to-end contract test (audit G22a, N4)
 │   ├── test_fetch_analyze_split.py # Fetch/analyze consumer split (two topics, two consumers)
@@ -658,6 +682,7 @@ agentic-resident-crm/
 │   ├── test_shutdown_lifecycle.py  # Shutdown and lifecycle (REMEDIATION_PLAN phase 4)
 │   ├── test_atomic_replace.py      # Windows-lock regression tests for atomic replace
 │   ├── test_multipod_state.py      # Multi-pod correctness (REMEDIATION_PLAN phase 5)
+│   ├── test_s3_conditional_write.py # Stores that accept creates but refuse If-Match overwrites
 │   ├── test_cleanups.py            # Cleanup correctness and observability (REMEDIATION phase 6)
 │   ├── test_evidence_integrity.py  # Evidence integrity (REMEDIATION_PLAN phase 1)
 │   ├── test_context_line_attribution.py # Context-line attribution: this packet's lines vs noise
@@ -700,6 +725,8 @@ agentic-resident-crm/
 │   ├── test_dlt_fetch.py           # DLT lane: /fetch-dlt-logs, log window, evidence
 │   ├── test_dlt_corroborate.py     # DLT lane: trace-vs-log verdicts
 │   ├── test_dlt_reuse.py           # DLT lane: group records and the reuse policy
+│   ├── test_dlt_group_store.py     # DLT lane: the decomposed group store, create-only layout
+│   ├── test_dlt_flow_fixes.py      # DLT lane: claims, single-flight, per-code guard, end to end
 │   ├── test_dlt_analysis.py        # DLT lane: /analyze-dlt with a mocked LLM
 │   ├── test_dlt_analysis_replay.py # DLT lane: auto-replay and precheck, end to end
 │   ├── test_dlt_auto_replay.py     # DLT lane: auto-replay confidence gate
@@ -762,11 +789,16 @@ agentic-resident-crm/
 │   │   ├── DltInvestigatorAgent.md # DLT investigator: trace vs logs, and what it may not invent
 │   │   ├── DltReviewerAgent.md     # DLT reviewer: approval rule
 │   │   ├── DltSynthesisAgent.md    # DLT finding output contract
+│   │   ├── pending_rules.jsonl     # Reviewer-proposed rules awaiting promote_rules.py
 │   │   └── harness/                # opencode harness task instruction templates ({{var}} placeholders)
 │   │       ├── RejectionInvestigator.md  # rejection investigator harness prompt
 │   │       ├── RejectionReviewer.md      # rejection reviewer harness prompt
 │   │       ├── DltInvestigator.md        # DLT investigator harness prompt
-│   │       └── DltReviewer.md            # DLT reviewer harness prompt
+│   │       ├── DltReviewer.md            # DLT reviewer harness prompt
+│   │       └── rules/                    # Per-flow rules, inlined by `{{> rules/<flow>}}`. They
+│   │                                     #   cannot live in AGENTS.md, which every flow loads
+│   │           ├── rejection.md          # Rejection flow: evidence, enrolment types, glossary
+│   │           └── dlt.md                # DLT flow: stack trace first, per-code findings
 │   ├── runbooks/
 │   │   ├── draft/                  # LLM-generated runbook drafts (pending human review)
 │   │   └── final/                  # Human-approved runbook templates (served online)
@@ -786,6 +818,7 @@ agentic-resident-crm/
 │   │   ├── accuracy_report.py      # CLI: resolution accuracy by reason code (Phase E runbook gate)
 │   │   ├── prune_checkpoints.py    # CLI: SQLite checkpoint pruning utility
 │   │   ├── prune_casesheets.py     # CLI: Old/orphaned casesheet cleanup
+│   │   ├── probe_s3_cas.py         # CLI: does this S3 endpoint honour conditional writes?
 │   │   ├── es_diagnostic.py        # CLI: Elasticsearch connectivity and query diagnostics
 │   │   ├── fetch_pod_logs.py       # CLI: Direct Kubernetes pod log retrieval
 │   │   ├── build_log_fixture.py    # CLI: turn a prod log dump into a Kubernetes fixture tree
@@ -852,7 +885,6 @@ agentic-resident-crm/
 │                                   #   dlt_groups/          per-fingerprint records
 │                                   #   dlt_parked_replays/  packets waiting for a deploy (C7)
 │                                   #   pending_replays/     replays awaiting human approval
-│                                   # plus _prompts/, harness prompt spill -- not a storage root
 └── local_checkpoints/              # Generated (LOCAL_CHECKPOINTS_DIR): checkpoints.db, drain3_state/,
                                     #   template_catalog.json, one heartbeat file per consumer role
 ```
@@ -922,12 +954,15 @@ architecture.
   an HTML error page that surfaces as "Request is not supported by this
   version of OpenCode Server".
 - Each investigation/review call runs
-  `opencode run --attach <url> --auto --model <OPENCODE_MODEL> --dir <repo_root> <prompt>`
+  `opencode run --attach <url> --auto --format json --model <OPENCODE_MODEL> --dir <repo_root> <prompt>`
   as a fresh subprocess -- a fresh conversation, so no context bleeds between
   cases even though the server is shared. The prompt is loaded from a template
   file in `src/prompts/harness/` via `prompt_loader.render()`, which
   substitutes `{{variable}}` placeholders (`event_id`/`ref_id`, `output_path`,
   `etype_display`) and raises `KeyError` on any placeholder left unfilled.
+  `etype_display` comes from `agent_orchestrator.ENROLMENT_TYPE_DISPLAY`, the
+  one map both Investigator paths use; each used to carry its own, and they
+  disagreed on `E`, `Z` and the description of `U`.
 - **The agent is sandboxed by capability, not by trust.** `OPENCODE_PERMISSION`
   denies `bash` and `webfetch` outright, so the agent's whole world is the
   filesystem it can `Glob`/`Grep`/`Read` and the one file it is told to
@@ -935,13 +970,17 @@ architecture.
 - The agent reads context files (`context.json`, `supported_logs.txt`,
   `investigation_text.txt`) written to the local `casebook_{event_id}/`
   directory by the orchestrator, plus the documentation corpus in
-  `docs_cache/`, and writes its JSON output to a specified file path. Two
-  accommodations for a model that does not always follow instructions: a
-  prompt over 30,000 characters is spilled to
-  `local_casesheets/_prompts/<output>.prompt.txt` and replaced by an
-  instruction to read it (Windows command-line limit), and if the expected
-  output file is absent the runner accepts any other `.json` in the same
-  directory whose mtime is newer than the task's start.
+  `docs_cache/`, and writes its JSON output to a specified file path. The
+  prompt itself is always written to `<output>.prompt.txt` beside the output
+  file and the command line carries only an instruction to read it (Fortify
+  command-injection sink, and the Windows command-line limit). Beside the
+  output means it is exactly as unique as the output path and is removed
+  with the case directory; it used to go to a shared `_prompts/` directory
+  named after the output's basename alone, which is identical for every case
+  (`investigation.json`), so concurrent tasks could read each other's
+  instructions. If the expected output file is absent the runner accepts any
+  other `.json` in the same directory whose mtime is newer than the task's
+  start, since the model does not always follow instructions.
 - **One task timeout, one reader.** `OPENCODE_TASK_TIMEOUT_SECONDS` is read
   only by `opencode_runner._task_timeout()` (default
   `DEFAULT_TIMEOUT_SECONDS`, 300s); none of the four harness call sites passes
@@ -958,6 +997,50 @@ architecture.
   both lanes: a retry's whole purpose is to carry the Reviewer's feedback
   back in, which the file-based contract has no slot for. Reviewers use the
   harness on every pass.
+
+**Task trace (`--format json`).**
+One harness task is an agentic loop, not one LLM call: the agent reads the
+corpus, greps it, reads more, and answers, and each of those turns is its own
+round-trip. None of that used to be visible. `opencode run` piped to a
+subprocess with no TTY prints the final assistant text and nothing else, so a
+task that burned twenty calls and a task that burned two produced the same
+single log line, and the harness path recorded no metrics at all --
+`metrics.record_llm_usage()` reads `usage_metadata` off a LangChain response,
+and a harness task has no response object, it returns a file on disk. With
+`USE_OPENCODE_HARNESS=true` the Investigator and Reviewer nodes therefore
+reported zero calls and zero tokens while doing all of the work.
+
+`--format json` turns stdout into one JSON object per line. `_Trace` in
+`opencode_runner` folds that stream into a per-task tally -- `llm_calls`
+(one per `step_start`), `tools` (a count by tool name), `tokens`
+(input/output/reasoning/cache), `cost`, and the opencode `session_id` -- which
+is returned on the result as `trace`, logged on the completion line, and
+metered by `metrics.record_harness_usage()` under the calling node's label.
+The four call sites pass that label as `node=`; a test fails the build if any
+of them stops. Only input and output reach Prometheus, the same two directions
+the direct path records, so one dashboard compares the two paths without
+knowing which served a packet. Metering also happens on the timeout path: a
+task killed at the deadline still spent every token it had already spent, and
+those runs are the expensive ones. Tool calls log at INFO with the argument
+that drove them (`tool grep pattern=...`); steps and text log at DEBUG. Lines
+that are not events -- a provider error, a stack trace -- are still logged
+verbatim, because they are the only channel a failure the event stream never
+reaches arrives on.
+
+The runner never parsed stdout for results (it reads the output file off
+disk), so the format was free to change; only the log lines and the trace
+depend on it. Two deliberate omissions:
+
+- **`--title` is not passed.** It looks like the obvious way to stamp the
+  event id on the session and to skip the extra title-generation LLM call
+  opencode makes once per task, but on opencode 1.18.20 passing it hangs
+  `run` at startup before it reaches the model -- reproducibly, with the same
+  invocation succeeding the moment the flag is removed. The trace's
+  `session_id` is the correlation handle instead: it joins a log line to the
+  row in opencode's own sqlite store.
+- **The title-generation call is still paid.** It is a second LLM call per
+  task, with no tools and a ~2KB prompt, purely to name the session. Until
+  `--title` is safe, or opencode grows a config switch for it, it stands.
 
 **Corpus download (`src/utils/docs_loader.py`):**
 The DROA documentation corpus is downloaded from S3 (`DOCS_S3_PREFIX`,
@@ -981,7 +1064,9 @@ with `{{variable}}` placeholders. The `render(name, **vars)` function reads
 from disk on every call (edits take effect without a restart) and substitutes
 placeholders via regex. The backend (`_load_text`) is pluggable for future
 Langfuse integration without caller changes. Templates are included in
-`compute_prompt_fingerprint()` so prompt changes are tracked in every
+`compute_prompt_fingerprint()` -- together with the `rules/*.md` files they
+inline and the root `AGENTS.md` opencode loads into every session -- so
+prompt changes are tracked in every
 casebook's provenance block.
 
 **Provider configuration lives outside the process.**
@@ -1019,7 +1104,7 @@ Instead of relying on an unpredictable LLM to orchestrate the subagents, the sys
 1. **Log Fetcher Node**: Cache-first (section 3.11). Reads `fetched_logs.txt` from `CasebookStorage` -- persisted by `POST /fetch-logs` before `/analyze-rejection` ever invokes the graph -- and uses it directly if present, with no live fetch. Only when that artifact is absent (a direct `/process-rejection` call, `local_run.py`, or any caller that invokes the graph without going through `/fetch-logs` first) does it fall back to fetching live: if `ENABLE_LOG_FETCHING=true`, `fetch_and_persist_logs` triggers the same log-reduction pipeline (`fetch_logs_for`) to pull relevant Kibana/Kubernetes traces using the `eventId` and persists the result for next time.
 2. **Runbook Lookup Node**: Checks `RUNBOOK_MODE` (off/serve/shadow). If `serve`, it looks up a final runbook by `(reason_code, enrolment_type)` in `src/runbooks/final/`, verifies the DB rule fingerprint hasn't changed, and short-circuits the graph directly to `END` with the pre-built resolution (no LLM calls). In `shadow` mode, it records the runbook match but lets the agents run normally; `synthesis_node` later compares the two results and logs any divergence. If `off` (the default) or no runbook matches, it falls through to the Investigator.
 3. **Investigator Node**: A React agent constructed with an **empty tool list**. All external lookups are performed deterministically in Python before the call: `lookup_rule_by_reason_code` is invoked by the node itself, the result is filtered by `enrolmentType`, and the rule text is injected into the prompt. If the rule lookup fails or returns nothing, it falls back to `get_error_description` (from `tool_registry.py`) to inject hardcoded error definitions (e.g., for `RESIDENT_BIOMETRIC_UPDATE_IDENTIFY_FAILURE`). This removes a whole class of tool-call hallucination and redundant DB round-trips. The prompt is projected down to only the fields the Investigator needs (`eventId`, `packetMetaData`, `packetExecutionSummary`, `flowMetaData.stage`) rather than the full raw Kafka message, and on a retry it sends only the delta -- the prior investigation plus the Reviewer's feedback -- instead of resending the full payload/logs/rule context again. When `USE_OPENCODE_HARNESS=true`, the node writes `context.json` and `supported_logs.txt` to the local casebook directory, renders the `RejectionInvestigator` harness prompt template, and calls `opencode_runner.run_task_json()` -- giving the agent Glob/Grep/Read access to the `docs_cache/` DROA corpus. It falls back to the direct LLM path on harness failure (section 3.2.1).
-4. **Reviewer Node**: A distinct React agent, built once at graph-construction time (not per review) and bound to the `simple` LLM tier, that acts as a strict QC validator holding one tool (`add_learning_rule`). The tool no longer closes over the current `event_id`/investigation text per call -- it reads them from a pair of `contextvars.ContextVar`s that `reviewer_node` sets before each invocation, since each packet already runs on its own dedicated thread. When `USE_OPENCODE_HARNESS=true`, the node writes `investigation_text.txt` and renders the `RejectionReviewer` harness prompt template, giving the reviewer agent the same corpus access to verify the investigator's claims against service documentation. Falls back to direct LLM on harness failure.
+4. **Reviewer Node**: A distinct React agent, built once at graph-construction time (not per review) and bound to the `simple` LLM tier, that acts as a strict QC validator holding one tool (`add_learning_rule`). The tool no longer closes over the current `event_id`/investigation text per call -- it reads them from a pair of `contextvars.ContextVar`s that `reviewer_node` sets before each invocation, since each packet already runs on its own dedicated thread. When `USE_OPENCODE_HARNESS=true`, the node rewrites `context.json`/`supported_logs.txt` from graph state (the same `_write_harness_case_files` the Investigator uses), writes `investigation_text.txt`, and renders the `RejectionReviewer` harness prompt template, giving the reviewer agent the same corpus access to verify the investigator's claims against service documentation. The harness reviewer has no tools, so a rejection returns its proposed rule as an optional `learning_rule` object in its JSON, which is passed to the same `queue_learning_rule` function behind `add_learning_rule` -- one validated path to `pending_rules.jsonl` either way. All file writes sit inside the harness `try`, so a missing or unwritable case directory falls back to the direct LLM like any other harness failure.
 5. **Conditional Router & Loop Guard**: A pure Python control edge that checks the Reviewer's output via `is_reviewer_approved()`: the (markdown/whitespace-stripped) feedback must *start with* the literal token `APPROVED`, not merely contain it -- this closes the "NOT APPROVED"/"DISAPPROVED" false-positive that a substring match would produce. Otherwise it increments `retry_count`; once `retry_count >= MAX_INVESTIGATION_RETRIES` it routes to the `escalate` node (preventing infinite LLM loops), else it loops back to the Investigator Node. A fresh (non-resumed) invocation always starts `retry_count` at 0, so a redelivered packet can never resume a stale checkpoint with the retry budget already exhausted.
 6. **Synthesis Node**: The final agent that takes the approved, heavily vetted technical diagnosis and translates it into a human-readable JSON `Casebook`. It holds the `queue_for_replay` tool. In shadow mode, it also compares its output to the runbook's pre-built resolution and logs a warning on any `action` divergence.
 7. **Log Processor**: After the graph completes, `routes.py` structures the final casebook's `packet_status.rejection_data.rejection_logs` field into an object containing `path` and `gaps`. The trace itself is written through `CasebookStorage.save_artifact(event_id, "supported_logs.txt", ...)` and `path` records the **relative** name `"supported_logs.txt"`, so the evidence travels with the casebook and resolves identically on local disk and on S3. There is no size threshold and no truncation: whatever was fetched is persisted whole. When no logs were obtained (or `ENABLE_LOG_FETCHING=false`), `path` is the literal string `"No logs found"` and `gaps` is `null`. The `gaps` field carries the evidence-gap banner lifted out of the raw trace (matched on `BANNER_HEADER`/`BANNER_FOOTER` from `k8s/gaps.py`) so operators retain the incompleteness warning without inline clutter.
@@ -1040,7 +1125,7 @@ The architecture incorporates several resilience mechanisms to prevent runaway c
 - **Storage Abstraction & Schema Versioning**: The `CasebookStorage` interface implements retried atomic `.tmp` writes (to safely handle concurrent readers/AV scanners holding the file on Windows) and enforces a `"schema_version"` field on every saved casebook for backwards compatibility.
 - **Structured Logging & Health Checks**: `agent_orchestrator.py`, `tool_registry.py`, `kafkaConsumer.py`, `dlq_publisher.py`, `analysis_queue_publisher.py`, `s3_uploader.py` and the entire `log_pipeline/` package log through the same `structlog` logger as `routes.py` (bound to `event_id` where available) rather than bare `print()`. Verbosity is set by `LOG_LEVEL`. The operator CLIs still print to stdout deliberately -- they are interactive tools, not services. The FastAPI server provides `/health` and `/ready`. `/health` reports this process's own `status`/`draining`/`in_flight`/`capacity`, plus a heartbeat block for each of the four consumer roles (`fast_consumer`, `slow_consumer`, `dlt_consumer`, `dlt_analysis_consumer`) and a top-level `last_heartbeat`/`consumer_alive` alias for the fast consumer that predates the split. A heartbeat file that is absent reads as `null`, not `false` -- "unknown", not "dead" -- because a split-pod deployment has no local heartbeat file for any consumer, and the DLT roles are off by default; each consumer answers its own liveness on `CONSUMER_HEALTH_PORT` / `SLOW_CONSUMER_HEALTH_PORT` / `DLT_HEALTH_PORT` / `DLT_ANALYSIS_HEALTH_PORT` instead. `/ready` verifies checkpoint store connectivity and Kafka producer reachability (cached for `PRODUCER_HEALTH_TTL_SECONDS`, default 30s). When `USE_OPENCODE_HARNESS=true`, `/ready` additionally waits for the DROA corpus download (`docs_loader.corpus_available()`) and the opencode server (`opencode_runner.server_ready()`), returning 503 with "Downloading documentation corpus" or "Starting opencode server" respectively until both are ready -- so consumers do not forward packets before the harness can serve them. `validate_config()` provides fail-fast configuration validation at boot.
 - **Agent Caching**: Investigator, Synthesis, and Reviewer React agents are all created once at graph construction time and reused across invocations, avoiding per-packet (and, for the Reviewer, per-retry) LLM handshake overhead.
-- **Local Casebook Cleanup**: Every `save_terminal()` call site -- success, timeout, DLQ, shutdown straggler, consumer-side timeout, and both DLT lanes -- is followed by `cleanup_casebook_dir()`, which removes the local `casebook_{id}/` working directory. This is safe because the terminal casebook is already persisted in the storage backend (S3 or local), and the dedupe check (`storage.exists(..., terminal_only=True)`) reads from that backend, not from local disk. A background reaper daemon (started in `main_api.py` lifespan) scans `LOCAL_CASESHEETS_DIR` every `CASEBOOK_REAPER_INTERVAL_SECONDS` (default 300s) and removes directories whose mtime is older than `CASEBOOK_LOCAL_TTL_SECONDS` (default 3600s), catching those left by crashes, OOM kills, or any path where the immediate cleanup did not run. It matches **only entries named `casebook_*`**, which is load-bearing rather than incidental: `dlt_cases/`, `dlt_groups/`, `dlt_parked_replays/` and `pending_replays/` sit in the same directory under a local storage backend and are durable state -- a parked replay legitimately waits weeks for a deploy (section 4.4.1), and an unscoped TTL sweep would delete it. Neither layer ever raises: a cleanup failure must not turn a successful case into a failed one. `src/utils/case_cleanup.py`.
+- **Local Casebook Cleanup**: Every `save_terminal()` call site -- success, timeout, DLQ, shutdown straggler, consumer-side timeout, and both DLT lanes -- is followed by `cleanup_casebook_dir()`, which removes the local `casebook_{id}/` working directory. Under `CASEBOOK_STORAGE_BACKEND=s3` this is safe: the terminal casebook is already in S3, and the dedupe check (`storage.exists(..., terminal_only=True)`) reads it from there, not from local disk. **Under the default `local` backend it is not safe, and this is an open defect.** `LocalFilesystemCasebookStorage` writes `casebook.json` and `status.json` into `LOCAL_CASESHEETS_DIR/casebook_{id}/` -- the same directory the cleanup deletes -- so a completed casebook is removed as soon as it is written, and the dedupe check that reads it back finds nothing. Anything that reads casebooks afterwards (`accuracy_report`, `dlt_report`, the outcome CLIs) sees an empty store on a local deployment. A background reaper daemon (started in `main_api.py` lifespan) scans `LOCAL_CASESHEETS_DIR` every `CASEBOOK_REAPER_INTERVAL_SECONDS` (default 300s) and removes directories whose mtime is older than `CASEBOOK_LOCAL_TTL_SECONDS` (default 3600s), catching those left by crashes, OOM kills, or any path where the immediate cleanup did not run. It matches **only entries named `casebook_*`**, which is load-bearing rather than incidental: `dlt_cases/`, `dlt_groups/`, `dlt_parked_replays/` and `pending_replays/` sit in the same directory under a local storage backend and are durable state -- a parked replay legitimately waits weeks for a deploy (section 4.4.1), and an unscoped TTL sweep would delete it. Neither layer ever raises: a cleanup failure must not turn a successful case into a failed one. `src/utils/case_cleanup.py`.
 - **Non-Blocking Request Handling**: `/process-rejection` and `/analyze-rejection` are both `async def`; `agent.invoke()` runs on a dedicated `ThreadPoolExecutor` sized to `MAX_CONCURRENT_INVESTIGATIONS`, separate from Starlette's own sync-dispatch threadpool. A multi-minute investigation therefore can't starve `/health`, `/ready`, `/fetch-logs`, or the sync auth/rate-limit dependencies of a worker slot. `/fetch-logs` is deliberately plain `def`, not `async def` -- its bounded I/O runs on Starlette's own threadpool, the same one `/health`/`/ready` use, since it never needs the dedicated executor a multi-minute LLM call does.
 - **Indexed Mock Rule Lookups**: `lookup_rule_by_reason_code` builds a `reason_code -> row positions` index over the mock rules table once (cached for the process lifetime) instead of rescanning and re-casting every row on every lookup; a missing/unreadable mock DB file is also cached so the filesystem isn't re-probed on every call.
 - **Rate Limiter Eviction**: The in-memory IP rate limiter evicts stale entries when it exceeds 1000 tracked IPs to prevent unbounded memory growth.
@@ -1106,10 +1191,12 @@ status and `save_terminal()` persists the casebook to the storage backend, the
 entire local `casebook_{id}/` directory is removed by `cleanup_casebook_dir()`
 (`src/utils/case_cleanup.py`). This includes harness working files
 (`context.json`, `supported_logs.txt`, `investigation.json`, `review.json`,
-DLT equivalents) and any local-storage casebook/status files. The dedupe check
-reads from the persistent backend (S3 or local filesystem at the configured
-root), not from the per-case working directory, so deleting local working files
-does not break idempotency. A background reaper catches anything the immediate
+DLT equivalents) and, under a local storage backend, the casebook and status
+files themselves. On S3 the dedupe check reads from the bucket, not from the
+per-case working directory, so deleting local working files does not break
+idempotency. On the local backend the two are the same directory, so the
+cleanup deletes the terminal casebook it just wrote -- see the open defect
+noted in section 3.4. A background reaper catches anything the immediate
 cleanup misses (section 3.4).
 
 **Five roots share one backend.** `storage.factory.get_scoped_storage(root)`
@@ -1126,14 +1213,12 @@ implementation:
 | `dlt_parked_replays/` | `dlt/parked.py` | packets waiting for their fix to deploy (section 4.4.1) |
 | `pending_replays/` | `queue_for_replay` | replays awaiting human approval |
 
-A sixth directory sits under `local_casesheets/` but is **not** a storage
-root: `_prompts/`, written by `opencode_runner.run_task` when a rendered
-harness prompt exceeds 30,000 characters. Windows caps a command line well
-below that, so the prompt is spilled to a file and the agent is told to read
-it. These files are keyed on the output filename, so they are overwritten
-rather than accumulated per case -- but nothing deletes them: the reaper only
-matches `casebook_*` (below), and it must, because the four storage roots in
-the table above are durable state that a TTL sweep would destroy.
+The opencode harness writes its working files -- including each task's
+prompt, as `<output>.prompt.txt` -- inside the case's `casebook_<id>/`
+directory, so they share that directory's cleanup. There is no longer a
+separate `_prompts/` directory: the reaper only matches `casebook_*`
+(below), and it must, because the four storage roots in the table above are
+durable state that a TTL sweep would destroy.
 
 Keeping DLT cases out of `casebook_<eventId>/` matters: `accuracy_report`,
 `prune_casesheets` and everything else that walks `list_events()` expects
@@ -1163,7 +1248,7 @@ To ensure zero hallucinations, `routes.py` deterministically extracts static met
 - **packet_metadata** (`srn`, `sid`, `ref_id`, `source`, `packet_type`, `is_mbu`, `update_type`, `is_child`, `created_at`, `uploaded_at`)
 - **packet_status** (`status`, `service`, `sub_service`, `last_updated`, `is_in_process`, `rejection_data`)
 - **resolution** (`source`, `synthesis`, `action`, `resident_action`, `confidence`, `abstained` -- `source` is `"agent"` for LLM-generated or `"runbook:<id>@v<version>"` for runbook-served results)
-  - `resolution.provenance.prompt_fingerprint`: the SHA256 over every agent system prompt, **every harness template in `src/prompts/harness/`**, and `agent_policy_context.md` (`compute_prompt_fingerprint`). This is what lets an accuracy movement be attributed to a prompt change rather than merely correlated with one.
+  - `resolution.provenance.prompt_fingerprint`: the SHA256 over every agent system prompt, **every harness template in `src/prompts/harness/` and the `rules/` files they inline**, `agent_policy_context.md`, and the root `AGENTS.md` (`compute_prompt_fingerprint`). This is what lets an accuracy movement be attributed to a prompt change rather than merely correlated with one.
   - `resolution.shadow`: present only in `RUNBOOK_MODE=shadow`, carrying what the runbook would have decided.
   - On a contract breach the status is `FAILED_SYNTHESIS_PARSE` and `resolution` additionally carries `parse_error` and a 2000-char `raw_output`, with `action` set explicitly to `MANUAL_REVIEW` rather than left null.
 - **resolution_outcome** (optional; written by `POST /outcome/{event_id}`, not by the pipeline) -- the operator's ground-truth verdict (`CORRECT`/`INCORRECT`/`PARTIAL`), which is what `accuracy_report` scores against.
@@ -1927,7 +2012,8 @@ this file rather than editing it separately.
    `save_terminal()` call site is followed by `cleanup_casebook_dir()`, which
    removes the local working directory. A background reaper daemon catches
    directories left by crashes. Once a case is terminal in the persistent
-   backend, no trace of it remains on local disk.
+   backend, no trace of it remains on local disk -- which, on the default
+   `local` backend, also removes the casebook itself (open defect, section 3.4).
 
 Also: `Dockerfile` now installs `ripgrep` (required by opencode's Grep/Glob
 tools) and copies `AGENTS.md` (required by the harness prompts, which instruct
