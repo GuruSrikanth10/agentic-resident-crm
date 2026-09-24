@@ -77,6 +77,7 @@ ISOLATED_ENV_VARS = (
     "S3_LOGS_BUCKET",
     "CHECKPOINT_BACKEND",
     "CHECKPOINT_POSTGRES_URI",
+    "CHECKPOINT_MYSQL_URI",
     "LOCAL_CASESHEETS_DIR",
     "LOCAL_CHECKPOINTS_DIR",
     # Feature switches. Every one of these changes which branch executes.

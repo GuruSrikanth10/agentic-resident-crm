@@ -172,6 +172,15 @@ def test_postgres_without_a_uri_fails_loudly(monkeypatch):
         checkpointer.get_checkpointer()
 
 
+def test_mysql_without_a_uri_fails_loudly(monkeypatch):
+    """Same guarantee as postgres, for organisations without Postgres support."""
+    from src.core import checkpointer
+    monkeypatch.setenv("CHECKPOINT_BACKEND", "mysql")
+    monkeypatch.delenv("CHECKPOINT_MYSQL_URI", raising=False)
+    with pytest.raises(ValueError, match="CHECKPOINT_MYSQL_URI"):
+        checkpointer.get_checkpointer()
+
+
 def test_sqlite_checkpointer_builds(monkeypatch, tmp_path):
     from src.core import checkpointer
     monkeypatch.setenv("CHECKPOINT_BACKEND", "sqlite")
@@ -211,6 +220,12 @@ def test_postgres_without_uri_fails_at_boot(monkeypatch):
     _validation_errors(monkeypatch, CASEBOOK_STORAGE_BACKEND="local",
                        CHECKPOINT_BACKEND="postgres",
                        CHECKPOINT_POSTGRES_URI=None)
+
+
+def test_mysql_without_uri_fails_at_boot(monkeypatch):
+    _validation_errors(monkeypatch, CASEBOOK_STORAGE_BACKEND="local",
+                       CHECKPOINT_BACKEND="mysql",
+                       CHECKPOINT_MYSQL_URI=None)
 
 
 def test_multiple_replicas_on_local_storage_fails_at_boot(monkeypatch):

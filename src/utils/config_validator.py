@@ -80,9 +80,14 @@ def validate_config():
             errors.append(
                 "CHECKPOINT_BACKEND=postgres requires CHECKPOINT_POSTGRES_URI to be set."
             )
+    elif checkpoint_backend == "mysql":
+        if not os.environ.get("CHECKPOINT_MYSQL_URI"):
+            errors.append(
+                "CHECKPOINT_BACKEND=mysql requires CHECKPOINT_MYSQL_URI to be set."
+            )
     elif checkpoint_backend != "sqlite":
         errors.append(
-            f"Unknown CHECKPOINT_BACKEND '{checkpoint_backend}'; expected 'sqlite' or 'postgres'."
+            f"Unknown CHECKPOINT_BACKEND '{checkpoint_backend}'; expected 'sqlite', 'postgres', or 'mysql'."
         )
 
     # Local filelock does not coordinate across pods, so a multi-replica
@@ -93,8 +98,8 @@ def validate_config():
             if int(replicas) > 1:
                 errors.append(
                     "API_REPLICA_COUNT > 1 requires CASEBOOK_STORAGE_BACKEND=s3 and "
-                    "CHECKPOINT_BACKEND=postgres: local filelock and a local SQLite "
-                    "file do not coordinate across pods."
+                    "CHECKPOINT_BACKEND=postgres (or mysql): local filelock and a "
+                    "local SQLite file do not coordinate across pods."
                 )
         except ValueError:
             pass

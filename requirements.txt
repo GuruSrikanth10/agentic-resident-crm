@@ -48,3 +48,7 @@ pytest==9.1.1
 
 # Optional: only needed for CHECKPOINT_BACKEND=postgres (multi-replica).
 # langgraph-checkpoint-postgres
+
+# Optional: only needed for CHECKPOINT_BACKEND=mysql (multi-replica, no
+# Postgres support). PyMySQL above is its driver.
+# langgraph-checkpoint-mysql

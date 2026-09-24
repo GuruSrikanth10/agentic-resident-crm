@@ -10,9 +10,10 @@ checkpoint path that MAX_IN_PROGRESS_AGE_SECONDS and DLQ replay rely on.
 CHECKPOINT_BACKEND selects:
   sqlite    -- local file, the default, unchanged behaviour
   postgres  -- shared, suitable for multiple replicas
+  mysql     -- shared, for organisations without Postgres support
 
-Postgres is imported lazily and its driver is an optional dependency: a
-single-node deployment must not be forced to install it.
+Postgres and MySQL are imported lazily and their drivers are optional
+dependencies: a single-node deployment must not be forced to install either.
 """
 import os
 import sqlite3
@@ -60,9 +61,17 @@ def _resolve_config() -> tuple:
             )
         return backend, ("postgres", uri)
 
+    if backend == "mysql":
+        uri = os.environ.get("CHECKPOINT_MYSQL_URI", "").strip()
+        if not uri:
+            raise ValueError(
+                "CHECKPOINT_BACKEND=mysql requires CHECKPOINT_MYSQL_URI."
+            )
+        return backend, ("mysql", uri)
+
     if backend != "sqlite":
         raise ValueError(
-            f"Unknown CHECKPOINT_BACKEND {backend!r}; expected 'sqlite' or 'postgres'."
+            f"Unknown CHECKPOINT_BACKEND {backend!r}; expected 'sqlite', 'postgres', or 'mysql'."
         )
 
     return backend, ("sqlite", str(CHECKPOINT_DB_PATH))
@@ -109,6 +118,33 @@ def _build_postgres():
     return checkpointer
 
 
+def _build_mysql():
+    uri = os.environ.get("CHECKPOINT_MYSQL_URI", "").strip()
+    if not uri:
+        raise ValueError(
+            "CHECKPOINT_BACKEND=mysql requires CHECKPOINT_MYSQL_URI."
+        )
+
+    try:
+        from langgraph.checkpoint.mysql.pymysql import PyMySQLSaver
+    except ImportError as e:
+        raise ImportError(
+            "CHECKPOINT_BACKEND=mysql requires langgraph-checkpoint-mysql: "
+            "pip install langgraph-checkpoint-mysql"
+        ) from e
+
+    checkpointer = PyMySQLSaver.from_conn_string(uri)
+    # Enter the context manager's setup explicitly: from_conn_string returns a
+    # context manager, but the graph outlives any `with` block here.
+    if hasattr(checkpointer, "__enter__"):
+        checkpointer = checkpointer.__enter__()
+
+    # Idempotent; creates the checkpoint tables on first run.
+    checkpointer.setup()
+    logger.info("Checkpointer ready", backend="mysql")
+    return checkpointer
+
+
 def get_checkpointer():
     """Return the process-wide checkpointer, building it at most once.
 
@@ -125,7 +161,12 @@ def get_checkpointer():
         if _checkpointer is not None and _checkpointer_key == key:
             return _checkpointer
 
-        _checkpointer = _build_postgres() if backend == "postgres" else _build_sqlite()
+        if backend == "postgres":
+            _checkpointer = _build_postgres()
+        elif backend == "mysql":
+            _checkpointer = _build_mysql()
+        else:
+            _checkpointer = _build_sqlite()
         _checkpointer_key = key
         return _checkpointer
 
@@ -154,8 +195,10 @@ def health_check() -> bool:
         _sqlite_conn.execute("SELECT 1")
         return True
 
-    # psycopg connections and pools both expose execute(); if this saver
-    # exposes neither, a successfully built saver is the best signal available.
+    # psycopg connections and pools both expose execute(); PyMySQLSaver's raw
+    # pymysql connection does not (queries go through a cursor instead), so it
+    # falls through to the "successfully built saver" signal below -- the best
+    # available without opening a cursor on every probe.
     conn = getattr(checkpointer, "conn", None)
     if conn is None or not hasattr(conn, "execute"):
         return checkpointer is not None
