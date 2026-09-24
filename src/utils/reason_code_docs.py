@@ -300,7 +300,10 @@ def _code_entry(document: dict, source: str, code: dict) -> dict:
         body += ["", f"## {_GUIDANCE_HEADING}", ""] + lines
     return {
         "kind": "code",
-        "ref": str(numeric) if numeric is not None else "-",
+        # The reason code when there is no numeric one: 18 of the shipped
+        # enu-biometric codes have `numeric_code: null`, and `[Source: ...,
+        # code -]` names nothing a reader could look up.
+        "ref": str(numeric) if numeric is not None else str(code.get("reason_code") or "-"),
         "source": source,
         "enrolment_type": None,
         "body": "\n".join(body).rstrip(),

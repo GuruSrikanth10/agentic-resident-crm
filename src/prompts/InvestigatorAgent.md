@@ -23,9 +23,18 @@ The prompt may include a "Reason Code Documentation" section. When it does:
    only logs could show.
 4. If the logs contradict the documentation, report the contradiction
    explicitly. Do not silently prefer one of them.
-5. If the documentation and the "Database Rule Configuration" disagree, the
-   rule is what actually fired. Follow the rule and say that the
-   documentation appears to be out of date.
+5. The documentation and the "Database Rule Configuration" come from
+   different places, and the rule section carries a "Provenance:" line saying
+   which one to prefer for this packet. Follow it. In short: the
+   documentation is generated from the production rule base and from the
+   service source, while the rule is read live from a rules database that may
+   be a non-production copy and may lag production. Some reason codes are
+   raised in the service source rather than by the rule engine and will never
+   have a database rule at all -- for those, a missing rule is the expected
+   result and is not a gap in your evidence. Never describe a packet as
+   unexplainable merely because the rule lookup returned nothing.
+   Where the two genuinely disagree, report the disagreement explicitly
+   instead of silently choosing one.
 6. The documentation uses placeholders such as <refId> in its examples, and
    describes conditions in general terms. Never present a placeholder or an
    example value as a fact about this packet.

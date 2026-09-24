@@ -22,6 +22,7 @@ from src.utils.outcomes import (
     record_outcome,
 )
 from src.core.agent_orchestrator import get_agent, prompt_fingerprint
+from src.utils import packet_claims
 from src.storage.factory import get_casebook_storage
 from src.utils.dlq_publisher import publish_to_dlq
 from src.utils.analysis_queue_publisher import publish_to_analysis_queue
@@ -739,6 +740,19 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
                 # instead of falling through to a full duplicate reprocess.
                 pre_invoke_log.info("IN_PROGRESS and not stale; skipping duplicate invocation")
                 return {"status": "already_processing", "event_id": event_id}
+
+    # Claim the packet before writing the stub. Everything above this line is
+    # a read-then-decide, which five concurrent deliveries all passed on
+    # 2026-09-24: they read status.json before any of them had written it, and
+    # all five went on to invoke the graph against one thread_id. The claim is
+    # a create-only write, so the check and the act are one operation and
+    # exactly one caller can win it. See src/utils/packet_claims.py.
+    claim = await _off_loop(packet_claims.claim_packet, event_id)
+    if not claim.won:
+        logger.bind(event_id=event_id).info(
+            "Skipping duplicate invocation; another run holds this packet",
+            claim_outcome=claim.outcome, claim_age_seconds=claim.age_seconds)
+        return {"status": "already_processing", "event_id": event_id}
 
     # Write IN_PROGRESS stub before invoking graph to status.json
     await _off_loop(storage.save, event_id, {

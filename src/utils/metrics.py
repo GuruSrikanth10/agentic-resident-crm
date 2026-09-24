@@ -113,6 +113,16 @@ REJECTION_PROMPT_TRIMS = _counter(
     ("node",),
 )
 
+PACKET_CLAIMS = _counter(
+    "agentic_resident_crm_packet_claims_total",
+    "Analysis claims at /analyze-rejection: won, duplicate (another delivery "
+    "of the same packet is already being investigated), finished, reclaimed "
+    "(the holder died or released it), disabled, or error (the claim store "
+    "was unreachable and the packet proceeded). A rising `duplicate` count is "
+    "duplicate LLM work that is now being avoided.",
+    ("outcome",),
+)
+
 SHADOW_DIVERGENCE = _counter(
     "agentic_resident_crm_shadow_divergence_total",
     "Shadowed runbooks whose action disagreed with the agents' verdict.",
@@ -261,6 +271,11 @@ def record_dlt_group_write(operation: str, ok: bool) -> None:
     if DLT_GROUP_WRITES is not None:
         DLT_GROUP_WRITES.labels(operation=operation,
                                 outcome="ok" if ok else "failed").inc()
+
+
+def record_packet_claim(outcome: str) -> None:
+    if PACKET_CLAIMS is not None:
+        PACKET_CLAIMS.labels(outcome=outcome).inc()
 
 
 def record_dlt_claim(outcome: str) -> None:

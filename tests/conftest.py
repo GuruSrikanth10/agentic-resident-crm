@@ -110,6 +110,10 @@ ISOLATED_ENV_VARS = (
     "REJECTION_PROMPT_MAX_CHARS",
     "REJECTION_REVIEWER_EVIDENCE",
     "REJECTION_SYNTHESIS_DOC_GUIDANCE",
+    # The duplicate-invocation claim. A stray value would either disable the
+    # guard for the whole session or make every live claim look abandoned.
+    "PACKET_CLAIM_ENABLED",
+    "PACKET_CLAIM_TTL_SECONDS",
     # LLM provider selection.
     "USE_HF",
     "MOCK_LLM_WITH_MISTRAL",

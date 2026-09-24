@@ -68,12 +68,23 @@ def is_reviewer_approved(feedback: str) -> bool:
     A naive `"APPROVED" in feedback.upper()` substring check also matches
     "NOT APPROVED", "DISAPPROVED", or prose like "this is not approved
     because...", silently skipping the QC loop. The Reviewer is instructed to
-    reply with exactly 'APPROVED' when findings are valid, so requiring the
-    (markdown/whitespace-stripped) verdict to *start with* that token is both
-    correct for the happy path and closed against negation phrasing.
+    put its verdict on the FIRST line, so that line -- stripped of markdown and
+    whitespace -- must start with the token.
+
+    Only the first non-empty line is read, and that matters more than it
+    looks. A react agent's final message can carry a leading blank line or a
+    fenced wrapper, and once the Reviewer was given the full evidence
+    (REJECTION_REVIEWER_EVIDENCE) it began writing its reasoning out at
+    length. Scanning the whole string for a leading token would then fail on
+    any reply that opened with a newline, and reading further than the first
+    line would let a discussion of what "approved" would require count as an
+    approval. One line, at the top, is the contract ReviewerAgent.md states.
     """
-    normalized = (feedback or "").strip().strip("*_`\"' \t\n\r").upper()
-    return normalized.startswith("APPROVED")
+    for line in (feedback or "").splitlines():
+        candidate = line.strip().strip("*_`\"' \t\r")
+        if candidate:
+            return candidate.upper().startswith("APPROVED")
+    return False
 
 
 #: How each payload `enrolmentType` is described to the Investigator. One map
@@ -945,7 +956,14 @@ def _build_agent():
         metrics.record_llm_usage("reviewer", res)
         metrics.LLM_CALLS.labels(node="reviewer", outcome="ok").inc()
         feedback = res["messages"][-1].content
-        log.info("Reviewer finished assessment")
+        # The verdict text, truncated. Without it a rejection loop is
+        # undiagnosable from the logs alone -- "Reviewer REJECTED findings"
+        # says nothing about what it objected to, and the only other copy is
+        # inside an escalation casebook that only exists once the loop has
+        # already burned every retry.
+        log.info("Reviewer finished assessment",
+                 approved=is_reviewer_approved(feedback),
+                 verdict=(feedback or "").strip()[:600])
         return {"reviewer_feedback": feedback,
                 "retry_count": state.get("retry_count", 0) + 1,
                 "reviewer_path": "direct"}
@@ -961,10 +979,13 @@ def _build_agent():
             log.info("Reviewer APPROVED findings", transition="synthesis")
             return "synthesis"
         elif retry_count >= max_retries:
-            log.warning("Maximum retries reached", max_retries=max_retries, transition="escalate", state="NEEDS_MANUAL_REVIEW")
+            log.warning("Maximum retries reached", max_retries=max_retries,
+                        transition="escalate", state="NEEDS_MANUAL_REVIEW",
+                        verdict=(feedback or "").strip()[:600])
             return "escalate"
         else:
-            log.info("Reviewer REJECTED findings", transition="investigator", state="RETRYING")
+            log.info("Reviewer REJECTED findings", transition="investigator",
+                     state="RETRYING", verdict=(feedback or "").strip()[:600])
             return "investigator"
 
     def escalate_node(state: GraphState):

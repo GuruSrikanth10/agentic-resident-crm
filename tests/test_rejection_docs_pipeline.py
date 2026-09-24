@@ -387,7 +387,7 @@ def test_the_reviewer_gets_the_evidence_by_default(monkeypatch):
     for fragment in ("THE RULE", json.dumps(orch._project_payload(PAYLOAD)),
                      BASE_STATE["logs"], "the findings"):
         assert fragment in prompt
-    assert "reply with exactly 'APPROVED'" in prompt
+    assert "'APPROVED' or 'REJECTED' on the first line" in prompt
 
 
 def test_the_reviewer_gets_the_document_the_investigator_had(monkeypatch):
@@ -617,3 +617,90 @@ def test_an_older_casebook_denormalises_to_none(tmp_path, monkeypatch):
 ])
 def test_reason_code_extraction_tolerates_none_at_every_level(payload, expected):
     assert orch._reason_code_of(payload) == expected
+
+
+# ---------------------------------------------------------------------------
+# The Reviewer's verdict: format, and being able to see it.
+# ---------------------------------------------------------------------------
+#
+# On 2026-09-24 the Reviewer rejected three times out of three on every run,
+# escalating every packet. Nothing recorded what it objected to, so the loop
+# was undiagnosable from the logs alone.
+
+@pytest.mark.parametrize("reply,approved", [
+    ("APPROVED", True),
+    ("APPROVED\n\nThe investigation cites the decision line correctly.", True),
+    ("  APPROVED  \nreasoning follows", True),
+    ("\n\nAPPROVED\nreasoning", True),          # a leading blank line
+    ("**APPROVED**\nreasoning", True),
+    ("REJECTED\nThe candidate count is unsupported.", False),
+    ("The investigation is sound. APPROVED", False),   # verdict not first
+    ("NOT APPROVED", False),
+    ("", False),
+    ("\n \n", False),
+])
+def test_only_a_verdict_on_the_first_line_approves(reply, approved):
+    """A react agent's final message can open with a blank line or a fence, so
+    the first NON-EMPTY line is the verdict. Reading further would let a
+    discussion of what approval requires count as an approval."""
+    assert orch.is_reviewer_approved(reply) is approved
+
+
+def test_the_reviewer_logs_what_it_decided(monkeypatch, caplog):
+    """Without the verdict text a rejection loop cannot be diagnosed: the only
+    other copy is in an escalation casebook, which exists only after the loop
+    has already burned every retry."""
+    import logging
+
+    monkeypatch.delenv("REJECTION_REVIEWER_EVIDENCE", raising=False)
+    review = _node(monkeypatch, "review",
+                   _Recorder("REJECTED\nThe score is not in the logs."))
+
+    with caplog.at_level(logging.INFO):
+        review(_state(investigation="the findings"))
+
+    assert "The score is not in the logs." in caplog.text
+
+
+def test_an_escalation_still_carries_the_verdict_to_the_casebook(monkeypatch):
+    escalate = _node(monkeypatch, "escalate", _Recorder())
+    result = escalate(_state(investigation="the findings",
+                             reviewer_feedback="REJECTED: unsupported claim",
+                             retry_count=3))
+
+    assert "unsupported claim" in json.loads(result["synthesis"])["rejection_description"]
+
+
+def test_the_reviewer_prompt_states_the_output_contract_before_the_policy():
+    """`load_prompt` appends ~5KB of business policy AFTER this file, so an
+    output contract written at the bottom is the one thing the model reads
+    least recently."""
+    text = (paths.REPO_ROOT / "src" / "prompts" / "ReviewerAgent.md").read_text(
+        encoding="utf-8")
+    contract = text.index("FIRST line of your reply")
+    assert contract < len(text) / 2, "the output contract has drifted down the file"
+    assert "APPROVED" in text and "REJECTED" in text
+
+
+def test_the_reviewer_prompt_says_when_to_approve():
+    """Seven REJECT criteria and no stated grounds for approval is a prompt
+    that only knows how to say no."""
+    text = (paths.REPO_ROOT / "src" / "prompts" / "ReviewerAgent.md").read_text(
+        encoding="utf-8")
+    assert "WHEN TO APPROVE" in text
+    assert "Do NOT reject for any of these" in text
+
+
+def test_the_investigator_prompt_defers_to_the_provenance_note():
+    """It used to say the database rule always wins. That is wrong when the
+    rule comes from a staging copy, and wrong again for a code the rule engine
+    never raises."""
+    text = (paths.REPO_ROOT / "src" / "prompts" / "InvestigatorAgent.md").read_text(
+        encoding="utf-8")
+    # Matched on unwrapped text: the file is hard-wrapped, so a phrase can
+    # carry a newline and an indent in the middle of it.
+    unwrapped = " ".join(text.split())
+    assert "Provenance:" in unwrapped
+    assert "rule is what actually fired" not in unwrapped
+    assert "will never have a database rule at all" in unwrapped
+    assert "a missing rule is the expected result" in unwrapped

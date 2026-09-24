@@ -758,6 +758,7 @@ agentic-resident-crm/
 │   ├── test_dlt_bitbucket.py       # C4: source adapter against recorded responses, no network
 │   ├── test_dlt_code_check.py      # C5: the four verdicts and all three asymmetries
 │   ├── test_dlt_parked.py          # C7: parking, release, expiry, and the cap
+│   ├── test_packet_claims.py       # One investigation per packet under concurrent duplicates
 │   ├── test_reason_code_docs.py    # Reason-code store: lookup, rendering, validator, CLI
 │   ├── test_rejection_context.py   # The direct lane's prompt builders and the size limit
 │   ├── test_rejection_docs_pipeline.py # The graph with documentation on, and with it off
@@ -889,6 +890,8 @@ agentic-resident-crm/
 │       ├── paths.py                # Centralized path constants (CHECKPOINT_DB_PATH, etc.)
 │       ├── reason_code_docs.py     # The reason-code store: lookup (never raises), rendering,
 │       │                           #   provenance, and the validator (section 3.2.2)
+│       ├── packet_claims.py       # One investigation per packet: a create-only claim, so
+│       │                           #   concurrent duplicates cannot both invoke the graph
 │       ├── config_validator.py     # Fail-fast boot-time configuration validation
 │       ├── logging_config.py       # structlog JSON logging setup
 │       ├── kafkaConsumer.py        # Background topic polling + bounded worker pool (CONSUMER_ROLE=fast|slow|dlt|dlt_analysis)
@@ -2050,6 +2053,58 @@ first means group state is not accumulating.
 
 This section records where the running code diverges from the design intent above.
 It is maintained deliberately so the document stays a truthful source of truth.
+
+**Update 2026-09-24 (b):** First live test of the direct lane, and the four
+things it exposed. Logs: five deliveries of one event, nineteen minutes, an
+escalation.
+
+1. **Duplicate invocations (pre-existing, now fixed).**
+   `_investigate_packet` guarded duplicates by reading `status.json`, testing
+   it, then writing the `IN_PROGRESS` stub -- a check-then-act with a storage
+   round trip in between. Five deliveries arriving within six milliseconds all
+   read it before any wrote it, and all five invoked the graph against one
+   `thread_id`, interleaving writes into a single checkpoint row and
+   saturating `MAX_CONCURRENT_INVESTIGATIONS`. Replaced by a create-only claim
+   (`src/utils/packet_claims.py`), the same primitive `src/dlt/claims.py`
+   already uses for the DLT lane. Counted on
+   `agentic_resident_crm_packet_claims_total`.
+2. **The Reviewer rejected three times out of three, on every run.** Two
+   causes, both addressed. `is_reviewer_approved` requires the verdict to lead
+   the reply, and nothing in `ReviewerAgent.md` said so -- its only output
+   instruction was "simply confirm them", buried mid-prompt because
+   `load_prompt` appends the policy document after it. And the prompt listed
+   seven grounds for rejection and none for approval. It now opens with a
+   mechanical output contract (first line exactly `APPROVED` or `REJECTED`),
+   states when to approve, and lists what must not be rejected for.
+   `is_reviewer_approved` reads the first non-empty line, so a leading blank
+   line or fence no longer reads as a rejection.
+3. **The verdict was never logged.** `"Reviewer REJECTED findings"` carried no
+   reason, and the only other copy was inside an escalation casebook that
+   exists only after the loop has burned every retry. The verdict text is now
+   logged at each of the three decision points.
+4. **Rule-versus-documentation precedence was backwards.** See below.
+
+**Evidence precedence (section 3.2.2).** The documentation is generated from
+the **production** rule base and from the service source. The Database Rule
+Configuration is read live from whichever rules database is configured, which
+may be a staging copy that lags production or is missing codes. On top of
+that, a number of reason codes are raised in the service source rather than by
+the rule engine -- they appear in the store's `codes[]` and will never have a
+database rule at all.
+
+`InvestigatorAgent.md` previously said the database rule always wins and the
+documentation is out of date. That is wrong in both of those cases, and it
+made a routine database miss read as missing evidence. The rule section now
+carries a `Provenance:` line naming which source to prefer for this packet,
+and the prompt defers to it:
+
+| Documentation | Database rule | What the model is told |
+|---|---|---|
+| hit, from `rules[]` | either | Prefer the documentation; report any disagreement rather than silently choosing |
+| hit, from `codes[]` only | either | The rule engine does not raise this code; a missing rule is normal and says nothing about the packet |
+| miss | present | The database is authoritative -- most likely a rule added to production after the store was generated. **This is the signal to regenerate the service file.** |
+| miss | missing | Say so plainly; reason from the reason code, payload and logs, and invent no rule |
+| off | either | No note; there is nothing to weigh the rule against |
 
 **Update 2026-09-24:** The rejection lane can now run without opencode
 (`REASON_CODE_DOCS_PLAN.md`, Phases 1-8). Five changes:

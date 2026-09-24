@@ -284,3 +284,101 @@ def test_the_trim_marker_counts_what_it_actually_dropped(monkeypatch):
     stated = int(re.search(r"\.\.\. (\d+) characters omitted", prompt).group(1))
     kept = prompt.count("Q")
     assert stated == len(logs) - kept
+
+
+# ---------------------------------------------------------------------------
+# Which rule description wins.
+# ---------------------------------------------------------------------------
+#
+# The documentation is generated from the PRODUCTION rule base and from the
+# service source; the Database Rule Configuration is read live from whichever
+# rules database is configured, which may be a staging copy. On top of that,
+# some reason codes are raised in the service source and will never have a
+# database rule at all. A single fixed precedence was wrong for both cases, so
+# the prompt states which one applies to this packet.
+
+def _rule_hit(kind, refs=1):
+    return {"outcome": "hit", "text": "DOC TEXT", "sha256": "sha256:x",
+            "refs": [{"source": "services/s.json", "kind": kind, "ref": "r"}] * refs,
+            "resolution_guidance": [], "truncated": False}
+
+
+@pytest.mark.parametrize("build", [_investigation, _retry, _review])
+def test_a_documented_rule_outranks_a_possibly_stale_database(build):
+    prompt, _ = build(doc_state=_rule_hit("rule"), db_rule="THE RULE")
+    assert ctx.RULE_NOTE_DOC_FROM_RULES in prompt
+    assert "prefer the documentation" in prompt
+
+
+@pytest.mark.parametrize("build", [_investigation, _retry, _review])
+def test_a_source_raised_code_expects_no_database_rule(build):
+    """These codes are thrown in the Java source, not by the rule engine. A
+    database miss is the expected result and must not read as missing
+    evidence."""
+    prompt, _ = build(doc_state=_rule_hit("code"),
+                      db_rule="Rule not found for reason code: X in live DB.")
+    assert ctx.RULE_NOTE_DOC_FROM_CODE in prompt
+    assert "not expected to hold a rule" in prompt
+
+
+def test_a_mixed_document_uses_the_rule_note():
+    """A rule entry makes a claim about the rule base and so is the one that
+    can disagree with the database; a code entry cannot."""
+    state = _rule_hit("code")
+    state["refs"].append({"source": "services/s.json", "kind": "rule", "ref": "r2"})
+    prompt, _ = _investigation(doc_state=state)
+    assert ctx.RULE_NOTE_DOC_FROM_RULES in prompt
+
+
+def test_an_undocumented_code_with_a_database_rule_trusts_the_database():
+    """The signal that the store needs regenerating: production has a rule the
+    documentation has never seen."""
+    prompt, _ = _investigation(doc_state={"outcome": "miss"}, db_rule="THE RULE")
+    assert ctx.RULE_NOTE_RULE_ONLY in prompt
+    assert "added to production after the documentation was generated" in prompt
+
+
+@pytest.mark.parametrize("db_rule", [
+    "", "[]", "   ",
+    "Rule not found for reason code: X in mock DB (Searched column: y).",
+    "Rule lookup failed for reason code X: timeout",
+])
+def test_with_neither_source_the_model_is_told_to_invent_nothing(db_rule):
+    prompt, _ = _investigation(doc_state={"outcome": "miss"}, db_rule=db_rule)
+    assert ctx.RULE_NOTE_NEITHER in prompt
+    assert "do not invent a rule" in prompt
+
+
+@pytest.mark.parametrize("doc_state", [None, {"outcome": "disabled"}])
+def test_no_precedence_note_when_the_documentation_is_switched_off(doc_state):
+    """With nothing to weigh the rule against there is nothing to say, and a
+    note would only add tokens."""
+    prompt, _ = _investigation(doc_state=doc_state, db_rule="THE RULE")
+    assert "Provenance:" not in prompt
+
+
+@pytest.mark.parametrize("db_rule,present", [
+    ("[{\"rule_id\": 1}]", True),
+    ("some rule text", True),
+    ("", False), (None, False), ("   ", False), ("[]", False),
+    ("Rule not found for reason code: X in live DB.", False),
+    ("Rule lookup failed for reason code X: boom", False),
+])
+def test_rule_is_present_recognises_the_lookup_s_miss_messages(db_rule, present):
+    """Both misses arrive as prose in the same slot a real rule would, so
+    emptiness is not the test."""
+    assert ctx.rule_is_present(db_rule) is present
+
+
+def test_the_note_never_displaces_the_rule_itself():
+    prompt, _ = _investigation(doc_state=_rule_hit("rule"), db_rule="THE RULE")
+    assert "THE RULE" in prompt
+
+
+def test_the_review_task_asks_for_a_verdict_on_the_first_line():
+    """`is_reviewer_approved` reads the first line; the Reviewer began writing
+    prose first once it was given the full evidence, and every such reply
+    counted as a rejection."""
+    prompt, _ = _review()
+    assert "on the first line" in prompt
+    assert "nothing before it" in prompt

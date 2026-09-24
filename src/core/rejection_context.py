@@ -84,6 +84,86 @@ NO_LOGS = (
 LOGS_OMITTED = ("The logs were omitted: the rest of this prompt already fills "
                 "REJECTION_PROMPT_MAX_CHARS.")
 
+# ---------------------------------------------------------------------------
+# Which of the two rule descriptions wins.
+# ---------------------------------------------------------------------------
+#
+# The documentation and the Database Rule Configuration describe the same
+# thing from different places, and neither is authoritative in every case:
+#
+# * The documentation is generated from the PRODUCTION rule base and from the
+#   service source. The rules database the pipeline actually queries may be a
+#   staging copy, so it can lag production or be missing codes entirely.
+# * Some reason codes are raised in the service source rather than by the rule
+#   engine. Those have a `codes[]` entry and will NEVER have a database rule --
+#   a miss there is the expected result, not a gap in the evidence.
+# * A code the documentation does not cover but the database does is the
+#   interesting case: it is most likely a rule added to production after the
+#   documentation was generated, so the database is the only current account
+#   of it, and the store needs regenerating.
+#
+# Telling the model which case it is in is the whole job of these notes. A
+# single fixed precedence ("the rule always wins") was wrong for the first two
+# cases, and made a normal database miss look like missing evidence.
+RULE_NOTE_DOC_FROM_RULES = (
+    "Provenance: the Reason Code Documentation above is generated from the "
+    "production rule base. The rule below is read live from the configured "
+    "rules database, which may be a non-production environment and may lag "
+    "production. Where the two describe the same condition, prefer the "
+    "documentation, and report any disagreement explicitly rather than "
+    "silently choosing one.")
+RULE_NOTE_DOC_FROM_CODE = (
+    "Provenance: this reason code is raised in the service source, not by the "
+    "rule engine, so the rules database is not expected to hold a rule for "
+    "it. A missing or unrelated rule below is normal and says nothing about "
+    "this packet. Reason from the Reason Code Documentation above.")
+RULE_NOTE_RULE_ONLY = (
+    "Provenance: no documentation covers this reason code, but the rules "
+    "database does. Treat the rule below as the authoritative description -- "
+    "it is most likely a rule added to production after the documentation was "
+    "generated. Reason from it.")
+RULE_NOTE_NEITHER = (
+    "Provenance: neither the documentation nor the rules database describes "
+    "this reason code. Say so plainly in your findings, reason from the "
+    "reason code, the payload and the logs alone, and do not invent a rule.")
+
+#: How `tool_registry.lookup_rule_text` reports that it found nothing, or
+#: could not look. Both are prose the Investigator is meant to see, so they
+#: arrive in `db_rule` exactly like a real rule would and have to be
+#: recognised here rather than inferred from emptiness.
+_RULE_MISS_PREFIXES = ("Rule not found", "Rule lookup failed")
+
+
+def rule_is_present(db_rule) -> bool:
+    """Whether `db_rule` actually holds a rule, as opposed to a miss message."""
+    text = str(db_rule or "").strip()
+    if not text or text == "[]":
+        return False
+    return not text.startswith(_RULE_MISS_PREFIXES)
+
+
+def _rule_note(doc_state, db_rule) -> str:
+    """The provenance note for this combination of the two sources."""
+    outcome = (doc_state or {}).get("outcome")
+    if outcome == "hit":
+        refs = (doc_state or {}).get("refs") or []
+        # A rule entry makes a claim about the rule base, so it is the one
+        # that can disagree with the database. Code entries cannot.
+        if any(ref.get("kind") == "rule" for ref in refs):
+            return RULE_NOTE_DOC_FROM_RULES
+        return RULE_NOTE_DOC_FROM_CODE
+    if outcome in (None, "disabled"):
+        # The documentation is switched off, so there is nothing to weigh the
+        # rule against and nothing useful to say about precedence.
+        return ""
+    return RULE_NOTE_RULE_ONLY if rule_is_present(db_rule) else RULE_NOTE_NEITHER
+
+
+def _rule_body(doc_state, db_rule) -> str:
+    note = _rule_note(doc_state, db_rule)
+    body = db_rule or ""
+    return f"{body}\n\n{note}" if note else body
+
 _TRIM_MARKER = ("\n\n... {} characters omitted from the middle of this trace "
                 "(REJECTION_PROMPT_MAX_CHARS) ...\n\n")
 
@@ -94,9 +174,12 @@ _TASK_INVESTIGATION = (
     "packet-specific details.")
 _TASK_RETRY = ("Revise your previous analysis to address the Reviewer "
                "Feedback, using the evidence above.")
-_TASK_REVIEW = ("Validate the investigation above against this evidence. If it "
-                "is correct, reply with exactly 'APPROVED'. If not, explain "
-                "what is wrong.")
+_TASK_REVIEW = ("Validate the investigation above against this evidence. Reply "
+                "with exactly 'APPROVED' or 'REJECTED' on the first line, and "
+                "nothing before it. If you reject, explain what is wrong on "
+                "the lines after it. Approve a sound investigation: reject "
+                "only a claim that is wrong or unsupported, never one that is "
+                "merely brief or cautious.")
 
 
 def prompt_max_chars() -> int:
@@ -198,7 +281,7 @@ def build_investigation_prompt(*, doc_state, db_rule, enrolment_display,
                "Configuration") if doc_body is not None \
         else "the Database Rule Configuration"
     sections = _with_documentation([
-        (DATABASE_RULE, db_rule or ""),
+        (DATABASE_RULE, _rule_body(doc_state, db_rule)),
         (ENROLMENT_TYPE, enrolment_display or ""),
         (KAFKA_PAYLOAD, json.dumps(payload_projection)),
         (LOGS, ""),
@@ -218,7 +301,7 @@ def build_retry_prompt(*, previous_investigation, feedback, doc_state, db_rule,
     citations removed cannot comply (G12).
     """
     sections = _with_documentation([
-        (DATABASE_RULE, db_rule or ""),
+        (DATABASE_RULE, _rule_body(doc_state, db_rule)),
         (ENROLMENT_TYPE, enrolment_display or ""),
         (LOGS, ""),
         (TASK, _TASK_RETRY),
@@ -237,7 +320,7 @@ def build_review_prompt(*, investigation, doc_state, db_rule, enrolment_display,
     first is how a reviewer ends up looking for support for them instead.
     """
     sections = _with_documentation([
-        (DATABASE_RULE, db_rule or ""),
+        (DATABASE_RULE, _rule_body(doc_state, db_rule)),
         (ENROLMENT_TYPE, enrolment_display or ""),
         (KAFKA_PAYLOAD, json.dumps(payload_projection)),
         (LOGS, ""),

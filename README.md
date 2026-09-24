@@ -671,6 +671,7 @@ agentic-resident-crm/
 │   ├── test_dlt_bitbucket.py       # C4: source adapter against recorded responses, no network
 │   ├── test_dlt_code_check.py      # C5: the four verdicts and all three asymmetries
 │   ├── test_dlt_parked.py          # C7: parking, release, expiry, and the cap
+│   ├── test_packet_claims.py       # One investigation per packet under concurrent duplicates
 │   ├── test_reason_code_docs.py    # Reason-code store: lookup, rendering, validator, CLI
 │   ├── test_rejection_context.py   # The direct lane's prompt builders and the size limit
 │   ├── test_rejection_docs_pipeline.py # The graph with documentation on, and with it off
@@ -790,6 +791,8 @@ agentic-resident-crm/
 │       ├── paths.py                # Centralized path constants (CHECKPOINT_DB_PATH, etc.)
 │       ├── reason_code_docs.py     # The reason-code store: lookup (never raises), rendering,
 │       │                           #   provenance, and the validator
+│       ├── packet_claims.py       # One investigation per packet: a create-only claim, so
+│       │                           #   concurrent duplicates cannot both invoke the graph
 │       ├── config_validator.py     # Fail-fast boot-time configuration validation
 │       ├── logging_config.py       # structlog JSON logging setup
 │       ├── kafkaConsumer.py        # Background topic polling + bounded worker pool (CONSUMER_ROLE=fast|slow|dlt|dlt_analysis)
