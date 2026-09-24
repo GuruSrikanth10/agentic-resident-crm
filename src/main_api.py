@@ -13,7 +13,44 @@ from src.api.routes import begin_draining, drain_and_shutdown
 from src.api.routes import router as api_router
 from src.utils.config_validator import validate_config
 
+
+def validate_reason_code_docs() -> None:
+    """Refuse to boot on a broken reason-code document store.
+
+    Deliberately not folded into `validate_config()`: the consumers call that
+    too, and they never read a document. Only the API does, so only the API
+    checks.
+
+    The convention is `validate_config`'s -- log each error, print it to
+    stderr so a boot failure is visible even when the log stream is shipped
+    elsewhere, and exit 1. A store that cannot be read is a configuration
+    failure and has to be loud: at run time the same problem is silent by
+    design, because `lookup` never raises and every packet simply loses its
+    documentation.
+    """
+    from src.utils.reason_code_docs import docs_enabled, validate
+
+    if not docs_enabled():
+        return
+
+    errors, warnings = validate()
+    for warning in warnings:
+        _docs_logger().warning("Reason-code document store warning", detail=warning)
+    if errors:
+        for error in errors:
+            _docs_logger().error("Reason-code document store error", detail=error)
+            print(f"Reason-code document store error: {error}", file=sys.stderr)
+        sys.exit(1)
+    _docs_logger().info("Reason-code document store validated")
+
+
+def _docs_logger():
+    from src.utils.logging_config import get_logger
+    return get_logger(__name__)
+
+
 validate_config()
+validate_reason_code_docs()
 
 
 def _install_draining_signal_handlers():
@@ -82,6 +119,9 @@ async def lifespan(app: FastAPI):
     # boot take 15-30s; doing them in the lifespan blocked the API from
     # accepting connections, causing consumers to fail with connection
     # refused errors.
+    #
+    # `is_enabled()` is the ANY-lane question, which is the right one here:
+    # one server and one corpus serve whichever lanes are on opencode.
     from src.utils.opencode_runner import is_enabled as harness_enabled
     _harness_thread = None
     if harness_enabled():

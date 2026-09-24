@@ -95,6 +95,24 @@ RUNBOOK_LOOKUPS = _counter(
     ("outcome",),
 )
 
+REASON_CODE_DOC_LOOKUPS = _counter(
+    "agentic_resident_crm_reason_code_doc_lookups_total",
+    "Reason-code document lookups by outcome (hit, miss, error, "
+    "no_reason_code, disabled) and by which enrolment type matched (exact, "
+    "any, none). The miss rate per reason code is what says which document "
+    "to write next, so every outcome is counted and the rate has a "
+    "denominator.",
+    ("outcome", "match"),
+)
+
+REJECTION_PROMPT_TRIMS = _counter(
+    "agentic_resident_crm_rejection_prompt_trims_total",
+    "Direct rejection prompts whose logs were trimmed to fit "
+    "REJECTION_PROMPT_MAX_CHARS, by graph node. A rising count means the cap "
+    "is binding and the model is reasoning from a partial trace.",
+    ("node",),
+)
+
 SHADOW_DIVERGENCE = _counter(
     "agentic_resident_crm_shadow_divergence_total",
     "Shadowed runbooks whose action disagreed with the agents' verdict.",

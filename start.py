@@ -104,8 +104,13 @@ def main():
     # returns 503 "Downloading documentation corpus" while downloading,
     # 503 "Starting opencode server" while the server boots, and 503 with
     # other details for Kafka/checkpoint issues (which we accept).
-    harness_enabled = os.environ.get("USE_OPENCODE_HARNESS", "false").lower() == "true"
-    if harness_enabled:
+    #
+    # Whether a server is coming up at all is resolved by opencode_runner, not
+    # re-derived here: the lane switches and their fallback to the older single
+    # switch then have exactly one reader, so the supervisor can never disagree
+    # with the API about it. `load_dotenv()` already ran at module import.
+    from src.utils.opencode_runner import is_enabled as harness_enabled
+    if harness_enabled():
         print("Waiting for documentation corpus and opencode server...")
         harness_ready = False
         for i in range(300):

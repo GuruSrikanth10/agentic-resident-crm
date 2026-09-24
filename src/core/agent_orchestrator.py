@@ -8,7 +8,8 @@ from langgraph.graph import StateGraph, START, END
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.prebuilt import create_react_agent
 
-from src.utils import metrics
+from src.utils import metrics, reason_code_docs
+from src.core import rejection_context
 from src.utils.llm_utils import get_llm
 from src.tools.tool_registry import (
     fetch_and_persist_logs,
@@ -24,6 +25,7 @@ from src.models.synthesis import (
     apply_confidence_policy,
     parse_synthesis,
 )
+from src.utils.env import get_bool_env
 from src.utils.resilience import retry_transient, llm_breaker
 from src.utils.runbook_validator import validate_learning_rule
 from src.utils.logging_config import get_logger
@@ -94,6 +96,117 @@ def enrolment_type_display(payload: dict) -> str:
     return ENROLMENT_TYPE_DISPLAY.get(str(raw).strip().upper(), raw or "Unknown")
 
 
+def _reason_code_of(payload: dict):
+    """The packet's first non-empty `errorReasonCode`, or None.
+
+    Tolerant of None at every level: a payload that carries no execution
+    summary, a null `errorData`, or a null entry inside it is a packet with
+    no reason code, not a packet that fails the node.
+    """
+    exec_summary = payload.get("packetExecutionSummary") or {}
+    for error in exec_summary.get("errorData") or []:
+        if error and error.get("errorReasonCode"):
+            return error.get("errorReasonCode")
+    return None
+
+
+def _doc_match_label(doc_state: dict) -> str:
+    """The `match` label for REASON_CODE_DOC_LOOKUPS.
+
+    `exact` and `any` are counted apart because they say different things
+    about the store: `any` means the code is documented but not for this
+    packet's enrolment type, which is a narrower gap than a miss and a
+    different piece of authoring work.
+    """
+    matched = doc_state.get("matched_type")
+    if not matched:
+        return "none"
+    return "exact" if matched == doc_state.get("requested_type") else "any"
+
+
+def _resolve_reason_code_doc(state: dict, payload: dict, log):
+    """The documentation for this packet, looked up at most once (D9).
+
+    Retries, the Reviewer and Synthesis all read the stored result, so a
+    document edited mid-packet cannot produce an investigation reasoned from
+    one version and a review reasoned from another. A checkpoint written
+    before this feature existed carries no entry, so a retry resuming from one
+    does the lookup itself.
+    """
+    doc_state = state.get("reason_code_doc")
+    if doc_state is not None:
+        return doc_state
+
+    if not reason_code_docs.docs_enabled():
+        return {"outcome": "disabled"}
+
+    reason_code = _reason_code_of(payload)
+    raw_type = (payload.get("packetMetaData") or {}).get("enrolmentType")
+    try:
+        doc_state = reason_code_docs.lookup(reason_code, raw_type)
+    except Exception as e:
+        # `lookup` never raises; this guards a bug in it, because a
+        # documentation problem must not be able to fail a packet.
+        log.warning("Reason-code document lookup raised",
+                    error=f"{type(e).__name__}: {e}")
+        doc_state = reason_code_docs.error_state(
+            reason_code, f"{type(e).__name__}: {e}")
+
+    metrics.REASON_CODE_DOC_LOOKUPS.labels(
+        outcome=doc_state.get("outcome", "error"),
+        match=_doc_match_label(doc_state)).inc()
+    # The sha256, never the text: the text is large, identical for every
+    # packet with this reason code, and the digest already says which version
+    # the model was shown.
+    log.info("Reason-code documentation resolved",
+             outcome=doc_state.get("outcome"), reason_code=reason_code,
+             requested_type=doc_state.get("requested_type"),
+             matched_type=doc_state.get("matched_type"),
+             doc_sha256=doc_state.get("sha256"),
+             detail=doc_state.get("detail"))
+    return doc_state
+
+
+#: What Synthesis is told about the documentation's own recommendation. Its
+#: own switch, off by default (D12), so the effect on `action` and
+#: `resident_action` can be measured apart from everything else this feature
+#: changes. The values are already validated against synthesis.ACTIONS and
+#: RESIDENT_ACTIONS by the document validator, so the model is not being
+#: offered an action the contract would then reject.
+_SYNTHESIS_GUIDANCE_HEADER = (
+    "\n\n### Resolution guidance from the reason code documentation\n")
+_SYNTHESIS_GUIDANCE_FOOTER = (
+    "\nUse this guidance to choose action and resident_action, unless the "
+    "approved investigation shows this packet does not fit it. In that case "
+    "follow the investigation and say why in the synthesis.\n")
+
+
+def _synthesis_doc_guidance(doc_state) -> str:
+    """The guidance block to append to the Synthesis prompt, or "".
+
+    Silent unless the switch is on, the lookup hit, and the document actually
+    carries guidance. A header with nothing under it would read as an empty
+    recommendation rather than as an absent one.
+    """
+    if not get_bool_env("REJECTION_SYNTHESIS_DOC_GUIDANCE", False):
+        return ""
+    if not doc_state or doc_state.get("outcome") != "hit":
+        return ""
+    guidance = doc_state.get("resolution_guidance") or []
+    if not guidance:
+        return ""
+
+    lines = []
+    for item in guidance:
+        line = (f"- action: {item.get('action')} | "
+                f"resident_action: {item.get('resident_action')}")
+        if item.get("when"):
+            line += f" | when: {item['when']}"
+        lines.append(line)
+    return (_SYNTHESIS_GUIDANCE_HEADER + "\n".join(lines)
+            + _SYNTHESIS_GUIDANCE_FOOTER)
+
+
 def _project_payload(payload: dict) -> dict:
     """Only the payload fields the Investigator uses.
 
@@ -153,6 +266,18 @@ class GraphState(TypedDict):
     #: and the outcome record, which is what turns shadow mode into evidence
     #: instead of log noise (G18).
     shadow_comparison: dict
+    #: The reason-code documentation this packet was reasoned from, in the
+    #: shape `utils/reason_code_docs.lookup` returns. Looked up once, on the
+    #: Investigator's first pass, and reused by every retry, by the Reviewer
+    #: and by Synthesis: one packet must never be reasoned about with two
+    #: versions of a document. LangGraph only carries keys declared here.
+    reason_code_doc: dict
+    #: Which path actually produced each half of the investigation --
+    #: `harness` or `direct`. A harness task that fails falls back to the
+    #: direct LLM silently, so without this a comparison between the two
+    #: paths would be scoring runs that were not on the path they claim.
+    investigator_path: str
+    reviewer_path: str
 
 _agent = None
 
@@ -537,14 +662,8 @@ def _build_agent():
 
         # Optimize DB Calls: Fetch rule in Python if not already fetched
         if not db_rule:
-            exec_summary = payload.get("packetExecutionSummary") or {}
-            error_data = exec_summary.get("errorData") or []
-            reason_code = None
-            for err in error_data:
-                if err and err.get("errorReasonCode"):
-                    reason_code = err.get("errorReasonCode")
-                    break
-            
+            reason_code = _reason_code_of(payload)
+
             if reason_code:
                 # Lookup + enrolment-type filtering now live together in
                 # tool_registry.lookup_rule_text; this node previously carried
@@ -569,9 +688,16 @@ def _build_agent():
 
         is_retry = bool(feedback)
 
-        # Check if the opencode harness is enabled
-        from src.utils.opencode_runner import is_enabled as harness_enabled
-        use_harness = harness_enabled()
+        # Before the harness branch, so the harness path records which
+        # document this packet would have been given and a fallback to the
+        # direct LLM already has it in hand.
+        doc_state = _resolve_reason_code_doc(state, payload, log)
+
+        # Check if the rejection lane runs on the opencode harness. Per lane,
+        # not global: the DLT lane can stay on opencode while this one moves
+        # to the direct path.
+        from src.utils.opencode_runner import lane_enabled
+        use_harness = lane_enabled("rejection")
 
         if use_harness and not is_retry:
             # opencode harness path: the agent reads files from disk and
@@ -626,13 +752,38 @@ def _build_agent():
                 log.info("Investigator finished (opencode harness)",
                          elapsed=result.get("seconds"),
                          **(result.get("trace") or {}))
-                return {"investigation": investigation, "db_rule": db_rule}
+                # The harness is deliberately NOT given the documents (D13):
+                # it explores the corpus itself, and leaving its prompt alone
+                # keeps the two paths comparable. The state is carried anyway
+                # so the Reviewer and the casebook see the same shape on both.
+                return {"investigation": investigation, "db_rule": db_rule,
+                        "reason_code_doc": doc_state,
+                        "investigator_path": "harness"}
             except Exception as e:
                 log.warning("opencode harness failed; falling back to direct LLM",
                             error=f"{type(e).__name__}: {e}")
                 # Fall through to the direct LLM path below
 
-        if is_retry:
+        if reason_code_docs.docs_enabled():
+            # Assembled in rejection_context, in a fixed order and under
+            # REJECTION_PROMPT_MAX_CHARS. Both branches send the same
+            # document: the retry reuses the one already in state.
+            if is_retry:
+                prompt, log_trimmed = rejection_context.build_retry_prompt(
+                    previous_investigation=investigation, feedback=feedback,
+                    doc_state=doc_state, db_rule=db_rule,
+                    enrolment_display=enrolment_type_display(payload),
+                    logs=logs)
+            else:
+                prompt, log_trimmed = rejection_context.build_investigation_prompt(
+                    doc_state=doc_state, db_rule=db_rule,
+                    enrolment_display=enrolment_type_display(payload),
+                    payload_projection=_project_payload(payload), logs=logs)
+            if log_trimmed:
+                metrics.REJECTION_PROMPT_TRIMS.labels(node="investigator").inc()
+                log.warning("Trimmed the logs to fit REJECTION_PROMPT_MAX_CHARS",
+                            node="investigator")
+        elif is_retry:
             # Retry: send the delta plus the evidence.
             #
             # 2.3 dropped the payload, the rule AND the logs on retry, on the
@@ -677,7 +828,8 @@ def _build_agent():
         metrics.record_llm_usage("investigator", res)
         metrics.LLM_CALLS.labels(node="investigator", outcome="ok").inc()
         log.info("Investigator finished analysis")
-        return {"investigation": res["messages"][-1].content, "db_rule": db_rule}
+        return {"investigation": res["messages"][-1].content, "db_rule": db_rule,
+                "reason_code_doc": doc_state, "investigator_path": "direct"}
 
     def reviewer_node(state: GraphState):
         investigation = state.get("investigation", "")
@@ -691,9 +843,11 @@ def _build_agent():
         _current_event_id.set(event_id)
         _current_investigation.set(investigation)
 
-        # Check if the opencode harness is enabled
-        from src.utils.opencode_runner import is_enabled as harness_enabled
-        use_harness = harness_enabled()
+        # Check if the rejection lane runs on the opencode harness. Per lane,
+        # not global: the DLT lane can stay on opencode while this one moves
+        # to the direct path.
+        from src.utils.opencode_runner import lane_enabled
+        use_harness = lane_enabled("rejection")
 
         if use_harness:
             from src.utils import opencode_runner
@@ -745,13 +899,39 @@ def _build_agent():
                          elapsed=result.get("seconds"), verdict=verdict,
                          **(result.get("trace") or {}))
                 return {"reviewer_feedback": feedback,
-                        "retry_count": state.get("retry_count", 0) + 1}
+                        "retry_count": state.get("retry_count", 0) + 1,
+                        "reviewer_path": "harness"}
             except Exception as e:
                 log.warning("opencode harness failed for reviewer; falling back to direct LLM",
                             error=f"{type(e).__name__}: {e}")
                 # Fall through to the direct LLM path below
 
-        prompt = f"Validate this investigation:\n{investigation}\n\nIf it's perfect, reply with exactly 'APPROVED'. If not, explain what is wrong."
+        # The Reviewer sees the evidence the Investigator had (D8, on by
+        # default). It was previously given the investigation text alone,
+        # while ReviewerAgent.md asked it to check that text against the
+        # payload and the evidence-gaps banner -- so its most common
+        # rejection, "this is not grounded in the logs", was one it had no
+        # way to verify either direction. Setting the variable to false
+        # restores the old prompt exactly.
+        #
+        # The builder leaves the documentation section out for a `disabled`
+        # or missing state, so this needs no separate check on the docs
+        # switch.
+        if get_bool_env("REJECTION_REVIEWER_EVIDENCE", True):
+            payload = state.get("payload", {})
+            prompt, log_trimmed = rejection_context.build_review_prompt(
+                investigation=investigation,
+                doc_state=state.get("reason_code_doc"),
+                db_rule=state.get("db_rule", ""),
+                enrolment_display=enrolment_type_display(payload),
+                payload_projection=_project_payload(payload),
+                logs=state.get("logs"))
+            if log_trimmed:
+                metrics.REJECTION_PROMPT_TRIMS.labels(node="reviewer").inc()
+                log.warning("Trimmed the logs to fit REJECTION_PROMPT_MAX_CHARS",
+                            node="reviewer")
+        else:
+            prompt = f"Validate this investigation:\n{investigation}\n\nIf it's perfect, reply with exactly 'APPROVED'. If not, explain what is wrong."
 
         @llm_breaker
         @retry_transient
@@ -766,7 +946,9 @@ def _build_agent():
         metrics.LLM_CALLS.labels(node="reviewer", outcome="ok").inc()
         feedback = res["messages"][-1].content
         log.info("Reviewer finished assessment")
-        return {"reviewer_feedback": feedback, "retry_count": state.get("retry_count", 0) + 1}
+        return {"reviewer_feedback": feedback,
+                "retry_count": state.get("retry_count", 0) + 1,
+                "reviewer_path": "direct"}
 
     def check_approval(state: GraphState):
         feedback = state.get("reviewer_feedback", "")
@@ -821,6 +1003,7 @@ def _build_agent():
         log.info("Synthesis node started", state="SYNTHESIZING")
         investigation = state.get("investigation", "")
         prompt = f"Create the final JSON casebook based strictly on this approved investigation:\n{investigation}"
+        prompt += _synthesis_doc_guidance(state.get("reason_code_doc"))
 
         @llm_breaker
         @retry_transient

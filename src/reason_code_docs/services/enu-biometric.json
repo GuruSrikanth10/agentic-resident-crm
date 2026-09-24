@@ -1,0 +1,1107 @@
+{
+  "schema_version": 1,
+  "title": "ENU Biometric Stage - Rejection/Reason Codes (Code-Verified)",
+  "description": "All rejection and reason codes for the enu-biometric service (BIO stage, substage BIO_DEDUP). Each code has been traced through the actual Java source to confirm: (1) whether it is actively thrown or dead (defined but never used), (2) the exact method and line that triggers it, (3) the condition that causes it, (4) what happens to the packet, (5) whether it is retryable, and (6) what a CRM agent should advise the resident.",
+  "service": "enu-biometric",
+  "total_codes": 105,
+  "codes": [
+    {
+      "numeric_code": 2301,
+      "reason_code": "PACKET_VALIDATION_FAIL",
+      "description": "DEAD CODE — defined but never thrown. Was a generic 'data verification failure' code that has been superseded by specific codes like EXT_PKT_PHOTO_DATA_MISSING, RESIDENT_BIO_EXCEPTION_PHOTO_NOT_PRESENT, etc. No active code path throws this.",
+      "category": "Business",
+      "is_retryable": null
+    },
+    {
+      "numeric_code": 2309,
+      "reason_code": "ABISMW_QUALITY_RESPONSE_FAIL",
+      "description": "DEAD CODE — defined but never thrown. The active code at BioDeDuplicationServiceImpl.java:1036 throws RESIDENT_BIOMETRIC_QUALITY_CHECK_FAILED instead when the ABIS-MW quality response status is not SUCCESS.",
+      "category": "Business",
+      "is_retryable": null
+    },
+    {
+      "numeric_code": 2313,
+      "reason_code": "ABISMW_ENROLMENT_RESPONSE_VALIDATION_FAIL",
+      "description": "DEAD CODE — defined but never thrown. The method processAbisMwEnrolmentResponse does not throw this code. The active branching on ABIS enrolment response status uses RESIDENT_BIOMETRIC_UPDATE_IDENTIFY_FAILURE, BIO_ABIS_RESPONSE_NON_FAIL_OR_SUCCESS, or routes to consistency check.",
+      "category": "Business",
+      "is_retryable": null
+    },
+    {
+      "numeric_code": 2314,
+      "reason_code": "ABISMW_RESPONSE_TYPE_UNIDENTIFIED",
+      "description": "DEAD CODE — defined but never thrown. An unrecognized ABIS-MW RequestType is caught by the generic catch(Exception) at BioDeDuplicationServiceImpl.java:808-810 and re-thrown as ABIS_MW_RESPONSE_PROCESSING_FAILED (2315), not as this code.",
+      "category": "Business",
+      "is_retryable": null
+    },
+    {
+      "numeric_code": 2315,
+      "reason_code": "ABIS_MW_RESPONSE_PROCESSING_FAILED",
+      "description": "Thrown as an ApplicationException when any unanticipated non-ApplicationException technical error occurs while processing an ABIS-MW inbound Kafka message. This is the catch-all for: malformed payloads, unrecognized RequestType values (which throw IllegalArgumentException from AbisRequestType.valueOf), NPEs, deserialization errors, or thread interruption during retry backoff. The exception propagates to the Kafka consumer which auto-retries with exponential backoff.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 2316,
+      "reason_code": "POSTENROLMENT_RESPONSE_PROCESSING_FAILED",
+      "description": "Thrown as an ApplicationException when a technical error occurs while processing the post-enrolment candidate completion response. After ABIS enrolment deduplication identifies potential duplicate candidates, the post-enrolment service processes completion responses for those candidates. If this processing fails, the exception propagates for Kafka retry.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 2335,
+      "reason_code": "MDD_TIME_LIMIT_EXCEEDED_NO_RESPONSE",
+      "description": "DEAD CODE — defined but never thrown. The MDD-timeout feature is not wired in this codebase. SLA-breach events are handled separately by processSlaBreachEvent. The comment in source says 'keep till discussion'.",
+      "category": "Business",
+      "is_retryable": null
+    },
+    {
+      "numeric_code": 2336,
+      "reason_code": "PKT_BIO_INVALID_UPDATE_CONSENT",
+      "description": "DEAD CODE — explicitly marked 'not in use' in source. Never thrown anywhere in active code.",
+      "category": "Business",
+      "is_retryable": null
+    },
+    {
+      "numeric_code": 2337,
+      "reason_code": "MDD_PACKET_RESPONSE_PROCESSING_FAIL",
+      "description": "Thrown as an ApplicationException when any non-ApplicationException runtime error occurs while processing an MFC (Manual Fraud Check) portal response. This is the catch-all for errors in duplicate-response checking, validation, helper-record fetching, portal-request preparation, candidate filtering, or PB2 routing within processMFCPortalResponse.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 2338,
+      "reason_code": "SDK_CONSISTENCY_CHECK_FAIL",
+      "description": "DEAD CODE — defined but never thrown. Its description is a copy-paste error ('Technical Error while processing MDD Packet Response'). The actually-thrown codes for consistency-check failure are: BIO_CONSISTENCY_CHECK_FAILED (business reject, applicant's own biometrics inconsistent) and SDK_CONSISTENCY_CHECK_PREPROCESSING_FAILED (technical error, from common-library TechnicalReasonCode).",
+      "category": "Technical",
+      "is_retryable": null
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "RESIDENT_BIOMETRIC_QUALITY_CHECK_FAILED",
+      "description": "Set as a ValidationError (terminal reject) when the ABIS-MW quality response status is not SUCCESS (e.g. FAILURE, HOLD, or any unrecognized status). This is checked in isQualitySuccess() at BioDeDuplicationServiceImpl.java:1036. The packet is marked REJECTED and published to the bio stage completion topic. NOTE: This is different from the 9 BIO_QUALITY_* codes — those check per-modality thresholds on a SUCCESS-status response and are currently NOT acted upon due to a dead code branch (see critical finding #3).",
+      "category": "Business",
+      "is_retryable": false
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "BIO_ABIS_RESPONSE_NON_FAIL_OR_SUCCESS",
+      "description": "Set as a ValidationError (terminal reject) when the ABIS-MW enrolment or identify response status is neither 'SUCCESS' nor 'FAILURE' — e.g. 'HOLD', 'PARTIAL', an empty string, or any unexpected status value. Checked in isManualDedupRequired() at BioDeDuplicationServiceImpl.java:1174. The system will not guess what an unrecognized status means; the packet is rejected.",
+      "category": "Business",
+      "is_retryable": false
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "RESIDENT_BIOMETRIC_UPDATE_IDENTIFY_FAILURE",
+      "description": "Set as a ValidationError (terminal reject) in two scenarios: (1) In isManualDedupRequired() at line 1159 — when an ONLY_IDENTIFY ABIS response comes back SUCCESS, meaning the applicant's biometrics were found in the gallery as themselves, which for an update packet is treated as a failure (the master was not found as expected). (2) In processCREPolicyBatch0Response() at line 3360 — when CRE Policy Batch 0 explicitly rejected the applicant (and the applicant is not whitelisted/force-matched). The TODO comment at line 3359 indicates this is a catch-all for PB0 applicant rejections.",
+      "category": "Business",
+      "is_retryable": false
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "RESIDENT_UPDATE_REJECT_FOR_IDENTIFY_FAILURE",
+      "description": "Set as a ValidationError (terminal reject) in two scenarios: (1) In isCandidateManualDedupRequired() at line 1208 — when ABIS identify found NO matched candidates at all and no candidates are in-process, meaning the system could not find the resident's existing biometric identity in the ABIS gallery. (2) In processAutoDispositionResponseForNoMatchedCandidatesCase() at line 2765 — when all candidates have been filtered out during consistency/cross-match/PB1 processing and none remain. For update packets, this means the applicant's master identity could not be matched. For new enrolments (not update), validationError is null and the packet is APPROVED (no duplicates = success for new enrolment).",
+      "category": "Business",
+      "is_retryable": false
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "RESIDENT_BIOMETRIC_UPDATE_FAILURE",
+      "description": "Set as a ValidationError (terminal reject) when the ABIS-MW BIOUPDATE response status is not SUCCESS. The BIOUPDATE operation updates the resident's biometric template in the ABIS gallery. If ABIS-MW returns FAILURE or any non-SUCCESS status, the biometric template update has failed and the packet is rejected. The BIO_DEDUP_ABIS_BIO_UPDATE_REJECT_COUNTER metric is incremented.",
+      "category": "Business",
+      "is_retryable": false
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "BIO_CONSISTENCY_CHECK_FAILED",
+      "description": "Set as a ValidationError (terminal reject) when the consistency check determines the applicant's own biometrics are internally inconsistent. This means the resident's biometric captures across multiple attempts within the same enrolment session show significant variation — the same person's biometrics were not captured consistently. This could indicate device malfunction, operator error, or attempted fraud. Set in processConsistencyResponseToESB() at line 2440 when the consistency check response routes to ESB rejection instead of cross-match.",
+      "category": "Business",
+      "is_retryable": false
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "RESIDENT_MAN_DEDUP_DUPLICATE",
+      "description": "Set as a ValidationError (terminal reject) when CRE rejects the applicant but the match is NOT a confirmed True Duplicate (TD). This is the else branch of the TD check at line 3191: either (a) no matching EIDs were found in the reject-interceptor cache, or (b) the packet is an update case (not a new enrolment). If CRE provided explicit rejectReasonCodes, those codes replace this one on the packet (via prepareReasonCodeListForRejection + convertReasonCodesToValidationErrors at line 3200). NOTE: This code has NO numeric ID in BioDedupExceptionHelper — it is defined in the common-library BusinessReasonCode enum only.",
+      "category": "Business",
+      "is_retryable": false
+    },
+    {
+      "numeric_code": 17040,
+      "reason_code": "RESIDENT_MAN_DEDUP_REJECT_TD",
+      "description": "Set as a ValidationError (terminal reject) when CRE PB1/PB2 rejects the applicant AND the reject-interceptor cache returned non-empty matching EIDs AND the packet is a new enrolment (not update). 'True Duplicate' means the applicant's biometrics match an existing Aadhaar holder confirmed as the same person (same EID). A DedupMatchingEidEvent is published to the reject-interceptor topic before recording the validation error. The packet is rejected to prevent duplicate Aadhaar issuance.",
+      "category": "Business",
+      "is_retryable": false
+    },
+    {
+      "numeric_code": 17041,
+      "reason_code": "RESIDENT_MAN_DEDUP_REJECT",
+      "description": "DEAD CODE as a thrown reason code — the enum constant is never thrown. The only runtime reference is at BioDeDuplicationServiceImpl.java:3579 in prepareReasonCodeListForRejection, which mines the description string from bioDedupReasonCodes.get(17041) to wrap CRE-supplied reject reason codes. The actual reject codes attached to the packet in that branch are the strings CRE supplied in rejectReasonCodes (converted to dynamic ValidationErrors), not this code.",
+      "category": "Business",
+      "is_retryable": null
+    },
+    {
+      "numeric_code": 17031,
+      "reason_code": "CONSISTENCY_CHECK_FAILED",
+      "description": "DEAD CODE — defined but never thrown. The active code for applicant-side consistency failure is BIO_CONSISTENCY_CHECK_FAILED (from common-library BusinessReasonCode, no numeric ID). The active code for technical preprocessing failure of the consistency response is SDK_CONSISTENCY_CHECK_PREPROCESSING_FAILED (from common-library TechnicalReasonCode, no numeric ID).",
+      "category": "Business",
+      "is_retryable": null
+    },
+    {
+      "numeric_code": 17032,
+      "reason_code": "ENU_BIO_NO_GALLERY_RECORD_AVAILABLE",
+      "description": "Set as a ValidationError (terminal reject) when, for an update packet, the ABIS gallery ID list built from UidOriginTracker records is empty — meaning there is no master biometric packet in the ABIS gallery for this UID. The resident's Aadhaar may have been issued without biometrics, or the biometric record was deleted. Set in ObjectTransformerServiceImpl.prepareAbisGalleryIdList at line 240; the packet is then routed to processRequestToEsbForRejection.",
+      "category": "Business",
+      "is_retryable": false
+    },
+    {
+      "numeric_code": 17033,
+      "reason_code": "RESIDENT_BIO_INVALID_ENROLMENT",
+      "description": "Set as a ValidationError (terminal reject) when an adult (age >= 5) new enrolment packet has the biometric bit OFF — meaning no biometrics (fingerprints/iris) were captured. Adults must have biometrics captured during enrolment. This is detected at processEnrolmentServiceBusResponse line 236-243 and the packet is routed to rejectBiometricAdultInvalidEnrolment at line 538. This is a packet preparation error at the enrolment client.",
+      "category": "Business",
+      "is_retryable": false
+    },
+    {
+      "numeric_code": 17034,
+      "reason_code": "RESIDENT_BIO_INVALID_CHILD_CASE",
+      "description": "Set as a ValidationError (terminal reject) when a child (age < 5) packet contains biometric data (iris or finger count > 0). Children under 5 should not have biometrics captured — their enrolment is based on face-match data and a facial photo only. The presence of biometric data in a child's packet is invalid. Detected via childPacketContainsBiometrics at line 524 and routed to rejectBiometricChildInvalidCase at line 511.",
+      "category": "Business",
+      "is_retryable": false
+    },
+    {
+      "numeric_code": 17035,
+      "reason_code": "RESIDENT_BIO_PKT_AUTH_FAIL",
+      "description": "DEAD CODE in this project — defined but never thrown in enu-biometric. The auth-failure path is handled elsewhere (in the operator-authentication / ESB layers of enu-common), not in BioDeDuplicationServiceImpl.",
+      "category": "Business",
+      "is_retryable": null
+    },
+    {
+      "numeric_code": 17036,
+      "reason_code": "RESIDENT_BIO_PKT_RVERIFY_FAIL",
+      "description": "Set as a ValidationError (terminal reject) when the ABIS-MW R-Verify response status is not SUCCESS. RVerify is a biometric verification service that checks whether the biometric data in the update packet matches the resident's existing biometric record in the ABIS gallery. A failure means the new biometric data does not match the stored biometrics, which could indicate wrong person, data corruption, or degraded biometrics.",
+      "category": "Business",
+      "is_retryable": false
+    },
+    {
+      "numeric_code": 17037,
+      "reason_code": "BIO_STAGE_TRACKER_DATA_NOT_FOUND",
+      "description": "Thrown as an ApplicationException when a BioStageTracker record passed for deserialization is null — no IN_PROGRESS entry exists in the bio_stage_tracker DB for the refId + substage being processed. This typically means the response arrived for a substage that was never initiated, or was already completed and the IN_PROGRESS row was purged.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 17038,
+      "reason_code": "ABISMW_BIO_HELPER_CACHE_STORE_DATA_NOT_FOUND",
+      "description": "DEAD CODE under this exact name — the actually-thrown code is BIO_HELPER_CACHE_STORE_DATA_NOT_FOUND (without the ABISMW_ prefix), thrown at BioDeDuplicationServiceImpl.java:2246 and :3671. The thrown code is itself NOT in the BioDedupExceptionHelper numeric map, so it has no 5-digit numeric ID. Naming mismatch: the helper map reserves 17038 for 'ABISMW_BIO_HELPER_CACHE_STORE_DATA_NOT_FOUND' but the thrown enum constant is 'BIO_HELPER_CACHE_STORE_DATA_NOT_FOUND'.",
+      "category": "Business",
+      "is_retryable": null
+    },
+    {
+      "numeric_code": 17039,
+      "reason_code": "BIO_PARKING_QUEUE_STORE_DATA_NOT_FOUND",
+      "description": "Thrown as an ApplicationException when the applicant's ParkingInProcessPairQueue record is not found in either the Redis cache or the bio_parking_queue_store DB during candidate departure processing. This means the applicant was never parked, or its parking record was purged before the departing candidate completion arrived.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 17042,
+      "reason_code": "CANDIDATE_HELPER_RECORD_BIO_HELPER_CACHE_STORE_DATA_NOT_FOUND",
+      "description": "DEAD CODE — exists only in BioDedupExceptionHelper.java:61. Never thrown. The applicant-candidate-helper-record-not-found path uses BIO_HELPER_CACHE_STORE_DATA_NOT_FOUND and APPLICANT_CANDIDATE_HELPER_RECORD_UNAVAILABLE instead.",
+      "category": "Business",
+      "is_retryable": null
+    },
+    {
+      "numeric_code": 17043,
+      "reason_code": "UPDATE_CHECKER_BIO_HELPER_CACHE_STORE_DATA_NOT_FOUND",
+      "description": "Thrown as an ApplicationException when both cache (Redis) and DB lookups fail for the UpdateCheckerResponse in bio_helper_cache_store. The update-checker response was never persisted, or was purged, when later needed by PB0/PB1 processing.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 37004,
+      "reason_code": "MDD_PACKET_RESPONSE_VALIDATION_FAIL",
+      "description": "Thrown as an ApplicationException when the MFC portal response fails validation: (a) applicantRefId is null, (b) invalid fields detected (empty candidate-modality list, null refId, null modality type, or sourceAttempt/targetAttempt outside [0,3]), or (c) any unexpected error during validation. Checked in EventValidationServiceImpl.validateManualDedupPortalResponse at lines 346, 387, 390.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 37005,
+      "reason_code": "SDK_CROSS_MATCH_REQUEST_PREP_FAIL",
+      "description": "Thrown as an ApplicationException when an error occurs while building the CrossMatchCheckRequest payload in ObjectTransformerServiceImpl.prepareSDKCrossMatchRequest. This is the catch-all for errors assembling the cross-match request from the applicant-candidate helper record.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 37006,
+      "reason_code": "PACKET_ATTEMPTS_QUALITY_UNAVAILABLE",
+      "description": "Thrown as an ApplicationException when an error occurs building the modality-quality-score list from the packet's biometric capture trail. Note: per-refId errors are caught and logged silently; only an error in the outer try triggers this code. Thrown in BioScoreSyncServiceImpl.prepareModalityQualityScoreList at line 775.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 37007,
+      "reason_code": "CONSISTENCY_CHECK_PREPROCESSING_FAILED",
+      "description": "DEAD CODE under this exact name — only in BioDedupExceptionHelper.java:41, not declared as an enum constant. The actually-thrown code is SDK_CONSISTENCY_CHECK_PREPROCESSING_FAILED (from common-library TechnicalReasonCode), thrown at BioDeDuplicationServiceImpl.java:2206 as a catch-all for consistency-check response processing errors.",
+      "category": "Technical",
+      "is_retryable": null
+    },
+    {
+      "numeric_code": 37008,
+      "reason_code": "CROSS_CHECK_PREPROCESSING_FAILED",
+      "description": "DEAD CODE under this exact name — only in BioDedupExceptionHelper.java:42, not declared as an enum constant. The actually-thrown code is SDK_CROSS_CHECK_PREPROCESSING_FAILED (from common-library TechnicalReasonCode), thrown at BioDeDuplicationServiceImpl.java:2633 as a catch-all for cross-match response processing errors.",
+      "category": "Technical",
+      "is_retryable": null
+    },
+    {
+      "numeric_code": 37009,
+      "reason_code": "ESB_INCOMING_REQ_PROCESSING_FAILED",
+      "description": "Thrown as an ApplicationException when a technical error occurs while processing the incoming request from the Enrolment Service Bus (ESB). This is the catch-all at BioDeDuplicationServiceImpl.java:299 for errors in the initial ESB request handling (packet metadata extraction, biometric validation, routing to ABIS).",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 37010,
+      "reason_code": "ENROLMENT_EVENT_REQUEST_PREP_FAIL",
+      "description": "Thrown as an ApplicationException when an error occurs while preparing the enrolment event request to send to ABIS for deduplication enrolment. Thrown in ObjectTransformerServiceImpl at line 168 as the catch-all for request construction errors.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 37011,
+      "reason_code": "BMS_TEMPLATIZATION_FAILURE",
+      "description": "Thrown as an ApplicationException when the BMS (Biometric Matching Service) response contains SDK/templatization errors that cannot be cleaned up. BMS converts raw biometric captures into standardized templates for matching. If BMS returns errors that the cleanup logic cannot handle, this code is thrown. The code comment says 'Sending msg to DLT'. Thrown in BioDeDuplicationServiceImpl.handleBMSErrorResponse at line 2364.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 37012,
+      "reason_code": "CRE_PROCESSING_FAIL",
+      "description": "Thrown as an ApplicationException when CRE returns conflicting disposition actions for the applicant. For update packets: both REJECT and APPROVE contain APPLICANT. For enrolment packets: any two of REJECT/APPROVE/PORTAL contain APPLICANT. CRE returned contradictory rules, so the system cannot determine the correct disposition. Thrown in updateCreResponseForConflictingRules at line 3621.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 37013,
+      "reason_code": "CANDIDATE_COUNT_MISMATCH",
+      "description": "DEAD CODE — defined but never thrown. There is no candidate-count cross-check between CrossMatchCheckResponse and EnrolmentEventResponse in the active code.",
+      "category": "Technical",
+      "is_retryable": null
+    },
+    {
+      "numeric_code": 37014,
+      "reason_code": "QUALITY_DATA_NOT_AVAILABLE",
+      "description": "Thrown as an ApplicationException when isThrowExceptionOnMissingQualityScore is true and no ModalityQualityScoreRecord matches the given (refId, modalityType, attemptNumber) — the quality-score list built from the packet's biometric capture trail does not contain a score for the requested modality/attempt. Thrown in CREHelperUtil.getQualityScore at line 45.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 37015,
+      "reason_code": "APPLICANT_CANDIDATE_HELPER_RECORD_UNAVAILABLE",
+      "description": "Thrown as an ApplicationException when an error occurs reading the applicant-candidate helper record from Redis cache (deserialization error, Redis connectivity, etc.). This is the catch-all at BioDeDuplicationServiceImpl.java:2026 around applicantCandidateHelperRecordOperations.getApplicantCandidateHelperRecordData.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 37016,
+      "reason_code": "CRE_DATA_PREPARATION_FAIL",
+      "description": "Thrown as an ApplicationException when an error occurs while building the initial PB0 (Policy Batch 0) MddPolicyBatchRequestData — the CRE initial request payload assembled from the applicant-candidate helper record. Thrown in ObjectTransformerServiceImpl.prepareMddInitialBatchData at line 1036.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 37017,
+      "reason_code": "FAILED_TO_FETCH_WHITELISTED_CANDIDATES",
+      "description": "Thrown as an ApplicationException when the DB response code is neither DB_SELECT_EXECUTION_SUCCESS nor DB_NO_RECORDS_FOUND while checking whether an EID is whitelisted. Thrown in BioDataBaseHelperServiceImpl.isWhitelistedEid at line 111.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 37018,
+      "reason_code": "FAILED_TO_PROCESS_IGNORED_CANDIDATES",
+      "description": "Thrown as an ApplicationException when an error occurs checking or creating an ignore-candidate record. Thrown at two sites: BioDataBaseHelperServiceImpl.isIgnoredCandidate:125 (checking) and BioDeDuplicationServiceImpl.handleIgnoreCandidate:4556 (creating).",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 37019,
+      "reason_code": "FAILED_TO_SEND_CSD_EVENT",
+      "description": "DEAD CODE — declared but never thrown. The CSD dispatch path does not throw this code; failures there propagate as ApplicationException from downstream calls.",
+      "category": "Technical",
+      "is_retryable": null
+    },
+    {
+      "numeric_code": 37020,
+      "reason_code": "FAILED_TO_SIGN_CSD_REQUEST",
+      "description": "Thrown as an ApplicationException when the HSM-backed digital signing operation fails (Signature.getInstance SHA256withRSA → initSign → sign). This means the HSM (Hardware Security Module) was unreachable, the key was invalid, or the signing library encountered an error. Thrown in HSMCryptoImpl.signData at line 75.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 37021,
+      "reason_code": "FAILED_TO_LOAD_PRIVATE_KEY",
+      "description": "DEAD CODE — declared but never thrown. HSMCryptoImpl.getKeyFromHSM throws ERROR_FETCHING_HSM_KEY instead on HSM key-load failure. That code is not in the BioDedupExceptionHelper numeric map.",
+      "category": "Technical",
+      "is_retryable": null
+    },
+    {
+      "numeric_code": 37022,
+      "reason_code": "CANDIDATE_MATCH_ANALYSIS_DATA_FETCH_ERROR",
+      "description": "Thrown as an ApplicationException when: (a) the DB response is neither a List nor an AbisCandidateMatchAnalysis (unexpected response type), or (b) any error occurs fetching the candidate-match-analysis record from the DB. Thrown in BioScoreSyncServiceImpl.getCandidateMatchAnalysisList at lines 798 and 804.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 37023,
+      "reason_code": "MDD_DEMO_DUPLICATE_DATA_FETCH_ERROR",
+      "description": "Thrown as an ApplicationException when an error occurs fetching ManualDedupDemoDuplicate records from the DB for each candidate. Thrown in BioScoreSyncServiceImpl.getMDDDemoDuplicateList at line 821.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 37024,
+      "reason_code": "PORTAL_POLICY_BATCH_DISPOSITION_FAIL",
+      "description": "Thrown as an ApplicationException when CRE's reject list contains CANDIDATES_WITHOUT_AADHAAR AND at least one such candidate exists. CRE mandates that candidates without an Aadhaar must be rejected, and the disposition of these candidates to the rejection list failed. Thrown in BioDeDuplicationServiceImpl.handleCandidatesWithoutAadhaarCase at line 4472.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 37025,
+      "reason_code": "CANDIDATE_DATA_MISSING_CONSISTENCY_CHECK",
+      "description": "Thrown as an ApplicationException when: (a) a BDR refId present in the bdrCaptureCountMap is not found in any ConsistencyCheckResult of the consistency-check response, or (b) for a modality with count > 1, the modality-score list does not cover all expected combinations. Thrown in EventValidationServiceImpl at lines 612 and 646.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 37026,
+      "reason_code": "WRONG_BDR_STATUS_CONSISTENCY_CHECK",
+      "description": "Thrown as an ApplicationException when the availabilityStatus reported in the consistency-check result does not match the BdrStatus computed from the BDR capture counts (SINGLE/ZERO/MULTIPLE_AVAILABILITY). SDK reported an availability status inconsistent with the capture counts it sent. Thrown in EventValidationServiceImpl.verifyRefIdAvailabilityInResponse at line 592.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 37027,
+      "reason_code": "BDR_COUNT_MISMATCH",
+      "description": "DEAD CODE — declared but never thrown. The actual BDR-count-vs-packet mismatch path in EventValidationServiceImpl.checkModality throws CONSISTENCY_RESPONSE_VALIDATION_FAIL instead, which is not in the BioDedupExceptionHelper numeric map.",
+      "category": "Technical",
+      "is_retryable": null
+    },
+    {
+      "numeric_code": 37028,
+      "reason_code": "CANDIDATE_DATA_MISSING_CROSS_MATCH",
+      "description": "DEAD CODE — declared but never thrown. The cross-match missing-modality path uses MODALITIES_MISSING_CROSS_MATCH (37029) instead.",
+      "category": "Technical",
+      "is_retryable": null
+    },
+    {
+      "numeric_code": 37029,
+      "reason_code": "MODALITIES_MISSING_CROSS_MATCH",
+      "description": "Thrown as an ApplicationException when, for a modality in the cross-match response, the modality-score list does not cover all expected candidate-vs-applicant combinations. Thrown in EventValidationServiceImpl.crossMatchResponseCombinationsValidation at line 761.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 37030,
+      "reason_code": "EMPTY_CROSS_MATCH_RESPONSE",
+      "description": "Thrown as an ApplicationException when the cross-match response from BMS is null or empty — BMS was asked to compare the applicant's biometrics against potential duplicate candidates but returned no results at all. Thrown in EventValidationServiceImpl.validateCrossMatchResponse at line 679.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 37031,
+      "reason_code": "FAILED_TO_FETCH_CANDIDATE_DATA",
+      "description": "Thrown as an ApplicationException when a candidate refId in the applicant-candidate helper record is not present in either the abisCandidateMatchAnalysisList or the manualDedupDemoDuplicateList — the two analysis lists are inconsistent with the helper record's candidate set. Thrown in CandidateFilteringService.makeMatchAnalysisAndHelperRecordConsistentWithFilteredCandidates at line 453.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 37032,
+      "reason_code": "INVALID_CRE_RESPONSE",
+      "description": "Thrown as an ApplicationException when CRE returns an action value that is not one of the recognised MddPolicyResponseActionValues (APPROVE, REJECT, SUSPEND, IGNORE, PORTAL, UN_SUSPEND). Thrown in CsdDispatchService.filteringBasedOnActions at line 451.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 37033,
+      "reason_code": "APPLICANT_PARKING_DATA_PREP_ERROR",
+      "description": "Thrown as an ApplicationException when an error occurs while preparing data for parking the applicant-candidate pair. Thrown in CandidateParkingService at line 281.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 37034,
+      "reason_code": "ABISMW_CANDIDATES_DB_OBJECT_PREP_ERROR",
+      "description": "Thrown as an ApplicationException when an error occurs while preparing the database object for ABIS MW candidates data. Thrown in BioDeDuplicationServiceImpl at line 1376.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 37035,
+      "reason_code": "APPLICANT_CANDIDATE_HELPER_RECORD_DB_OBJECT_PREP_ERROR",
+      "description": "Thrown as an ApplicationException when an error occurs while building the BioHelperCacheStore record for the applicant-candidate helper record (JSON serialization). Thrown in BioDeDuplicationServiceImpl at line 2923.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 37036,
+      "reason_code": "BIOMETRICS_NOT_PRESENT_IN_BMS_RESPONSE",
+      "description": "Thrown as an ApplicationException when BMS reports zero biometrics captured for a refId that should have biometrics (captureCount.isBiometricsPresent() returns false). Thrown in EventValidationServiceImpl.validateBiometricsPresence at line 487.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 37037,
+      "reason_code": "PARKING_HELPER_RECORD_DB_OBJECT_PREP_ERROR",
+      "description": "Thrown as an ApplicationException when an error occurs while building the BioHelperCacheStore parking-helper record (JSON serialization of allCandidatesPerModalityOverallMatchResult). Thrown in BioDeDuplicationServiceImpl at line 2704.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 37038,
+      "reason_code": "BMS_ERROR_IN_APPLICANT",
+      "description": "Thrown as an ApplicationException when, during consistency-check validation, the applicant's own refId has SDK errors in its modality scores for the MULTIPLE_AVAILABILITY case. BMS reported SDK errors in the applicant's own biometric modality. Thrown in EventValidationServiceImpl.verifyRefIdAvailabilityInResponse at line 604.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 37039,
+      "reason_code": "NO_VALID_MODALITY_ATTEMPTS_AFTER_BMS_ERROR_CLEANUP",
+      "description": "Thrown as an ApplicationException when, after BMS-error cleanup, a candidate's modality-score list is null or empty — all combinations were removed by the cleanup. Thrown at two sites: EventValidationServiceImpl.java:467 (consistency) and :729 (cross-match). NOTE: Only thrown when env flags skipSDKErrorCandidateCrossMatch / skipSDKErrorAttemptForCandidateCrossMatch are OFF.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 37040,
+      "reason_code": "BMS_ERROR_IN_CANDIDATE",
+      "description": "Thrown as an ApplicationException when, after BMS-error cleanup (if skipSDKErrorCandidateCrossMatch / skipSDKErrorAttemptForCandidateCrossMatch are OFF), a candidate still has errored modality attempts in its score list. Thrown at two sites: EventValidationServiceImpl.java:474 (consistency) and :736 (cross-match).",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 37041,
+      "reason_code": "NO_CRE_RULES_APPLIED_HOLDING_PACKET",
+      "description": "Thrown as an ApplicationException when PB1 response is received and none of reject/approve/portal contain APPLICANT (no PB1 rule fired for the applicant) AND the enrolment type is not 'N' (i.e. it is an update/MBU case). For 'N' enrolments in this state, the code routes to MFC portal instead. The packet is held (no COMPLETED stage-tracker entry, no auto-disposition). Thrown at line 3235.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 37042,
+      "reason_code": "UPDATE_CHECKER_PROCESSING_FAILED",
+      "description": "Thrown as an ApplicationException at three sites: (1) BioDeDuplicationServiceImpl.java:337 — catch around publishing the update-checker request to Kafka. (2) BioDeDuplicationServiceImpl.java:3949 — catch-all around the update-checker response processing (PB0 orchestration, lock acquisition, cross-stage verification). (3) UpdateCheckerResponseConsumer.java:117 — wraps processing failures at the consumer level.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 37043,
+      "reason_code": "UPDATE_CHECKER_HELPER_RECORD_DB_OBJECT_PREP_ERROR",
+      "description": "Thrown as an ApplicationException when an error occurs while building the BioHelperCacheStore record for the update-checker helper record (JSON serialization of UpdateCheckerResponse). Thrown in BioDeDuplicationServiceImpl at line 2753.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 37044,
+      "reason_code": "ABIS_IDENTIFY_PROCESSING_FAILED",
+      "description": "Thrown as an ApplicationException when any unanticipated non-ApplicationException technical error occurs while processing an ONLY_IDENTIFY ABIS response in the post-Update-Checker (PB0) integration path — after the distributed PB0 lock is acquired and cross-stage verification against the Update Checker is being done. Note: the specific ABIS_IDENTIFY_RACE_CONDITION code (thrown when the PB0 lock is held by another process) is caught separately and locally retried 3x — it is NOT this code. Thrown at line 1592.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 37045,
+      "reason_code": "ERROR_ROUTING_PB0_TO_PB1",
+      "description": "Thrown as an ApplicationException when any non-ApplicationException error occurs in the PB0-to-PB1 routing block for update packets (builds modality-quality-score list, runs processUpdateCheckerResponseForMatchResult, calls candidateParkingService.candidateStatusCheck, prepares PB1 helper records, calls processingAndHandlingPB1Preprocessing). Thrown at line 3553.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 37046,
+      "reason_code": "POLICY_BATCH_0_PROCESSING_FAILED",
+      "description": "Thrown as an ApplicationException when any non-ApplicationException error occurs while handling the PB0 disposition (reject/approve/flag/forward/no-rule branches, master-ref-id injection, candidate filtering, processPB0ToSDKConsistencySubstage). Thrown at line 3408.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 12006,
+      "reason_code": "REDIS_GET_EXCEPTION",
+      "description": "DEAD CODE — declared but never thrown in active code.",
+      "category": "Data Exception",
+      "is_retryable": null
+    },
+    {
+      "numeric_code": 12007,
+      "reason_code": "REDIS_DELETE_EXCEPTION",
+      "description": "DEAD CODE — declared but never thrown in active code.",
+      "category": "Data Exception",
+      "is_retryable": null
+    },
+    {
+      "numeric_code": 12008,
+      "reason_code": "PACKET_DATA_UNAVAILABLE",
+      "description": "Thrown as an ApplicationException when an error occurs while getting relevant data from the extracted packet. Thrown in ObjectTransformerServiceImpl at line 1433.",
+      "category": "Data Exception",
+      "is_retryable": false
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "RESIDENT_BIO_EXCEPTION_PHOTO_NOT_PRESENT",
+      "description": "Set as a ValidationError (terminal reject) in bioValidationAndException when an adult packet has a face photo but is missing the biometric-exception photo, while also being biometric-incomplete (iris < 2 or finger < 10). The exception photo is mandatory when biometrics are incomplete — it documents the reason for the missing biometric. The packet is flagged as fraud/invalid and routed to fraudBiometricException. Thrown at EventValidationServiceImpl.java:164.",
+      "category": "Business",
+      "is_retryable": false
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "EXT_PKT_PHOTO_DATA_MISSING",
+      "description": "Set as a ValidationError (terminal reject) in bioValidationAndException when an adult packet has NO face photo at all (facePhotoCount == 0) and is biometric-incomplete (iris < 2 or finger < 10). The face photo is mandatory for all packets. The packet is flagged as fraud/invalid and routed to fraudBiometricException. Thrown at EventValidationServiceImpl.java:162.",
+      "category": "Business",
+      "is_retryable": false
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "BIO_QUALITY_FACE_IMAGE_ERROR",
+      "description": "BUG — DETECTED BUT NOT ACTED UPON. This code is returned by EventValidationServiceImpl.validateAbisMwQualityResponseThreshold when the face quality score is below abisMwFaceQualityThreshold. However, due to a dead code branch at BioDeDuplicationServiceImpl.java:1030 (if (reasonCode != null) checks a local variable that is always null), the validation error is never applied to the packet. A SUCCESS-status ABIS quality response with sub-threshold face quality is NOT rejected and proceeds to the next substage. This is likely a latent bug.",
+      "category": "Biometric Quality Rejection",
+      "is_retryable": false
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "BIO_QUALITY_FACE_LIVENESS_ERROR",
+      "description": "BUG — DETECTED BUT NOT ACTED UPON. Returned when face liveness score < abisMwFaceLivenessThreshold, but never applied due to the dead branch at line 1030. See BIO_QUALITY_FACE_IMAGE_ERROR for details.",
+      "category": "Biometric Quality Rejection",
+      "is_retryable": false
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "BIO_QUALITY_FACE_SYSTEMATIC_CAPTURE_ERROR",
+      "description": "BUG — DETECTED BUT NOT ACTED UPON. Returned when face unsystematicCapture score < abisMwFaceSystematicCaptureThreshold, but never applied due to the dead branch at line 1030. See BIO_QUALITY_FACE_IMAGE_ERROR for details.",
+      "category": "Biometric Quality Rejection",
+      "is_retryable": false
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "BIO_QUALITY_FINGER_IMAGE_ERROR",
+      "description": "BUG — DETECTED BUT NOT ACTED UPON. Returned when finger quality score < abisMwFingerQualityThreshold, but never applied due to the dead branch at line 1030. See BIO_QUALITY_FACE_IMAGE_ERROR for details.",
+      "category": "Biometric Quality Rejection",
+      "is_retryable": false
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "BIO_QUALITY_FINGER_LIVENESS_ERROR",
+      "description": "BUG — DETECTED BUT NOT ACTED UPON. Returned when finger liveness score < abisMwFingerLivenessThreshold, but never applied due to the dead branch at line 1030. See BIO_QUALITY_FACE_IMAGE_ERROR for details.",
+      "category": "Biometric Quality Rejection",
+      "is_retryable": false
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "BIO_QUALITY_FINGER_SYSTEMATIC_CAPTURE_ERROR",
+      "description": "BUG — DETECTED BUT NOT ACTED UPON. Returned when finger unsystematicCapture score < abisMwFingerSystematicCaptureThreshold, but never applied due to the dead branch at line 1030. See BIO_QUALITY_FACE_IMAGE_ERROR for details.",
+      "category": "Biometric Quality Rejection",
+      "is_retryable": false
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "BIO_QUALITY_IRIS_IMAGE_ERROR",
+      "description": "BUG — DETECTED BUT NOT ACTED UPON. Returned when iris quality score < abisMwIrisQualityThreshold, but never applied due to the dead branch at line 1030. See BIO_QUALITY_FACE_IMAGE_ERROR for details.",
+      "category": "Biometric Quality Rejection",
+      "is_retryable": false
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "BIO_QUALITY_IRIS_LIVENESS_ERROR",
+      "description": "BUG — DETECTED BUT NOT ACTED UPON. Returned when iris liveness score < abisMwIrisLivenessThreshold, but never applied due to the dead branch at line 1030. See BIO_QUALITY_FACE_IMAGE_ERROR for details.",
+      "category": "Biometric Quality Rejection",
+      "is_retryable": false
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "BIO_QUALITY_IRIS_SYSTEMATIC_CAPTURE_ERROR",
+      "description": "BUG — DETECTED BUT NOT ACTED UPON. Returned when iris unsystematicCapture score < abisMwIrisSystematicCaptureThreshold, but never applied due to the dead branch at line 1030. See BIO_QUALITY_FACE_IMAGE_ERROR for details.",
+      "category": "Biometric Quality Rejection",
+      "is_retryable": false
+    },
+    {
+      "numeric_code": 1500,
+      "reason_code": "SEDA_STAGE_IVS_REJECT",
+      "description": "The packet was rejected as an IVS (Identity Verification System) Healthy packet. IVS performs an identity verification check and the packet was flagged by IVS policy. This is a stage-level rejection from the SEDA pipeline.",
+      "category": "Biometric Quality Rejection",
+      "is_retryable": false
+    },
+    {
+      "numeric_code": 1501,
+      "reason_code": "SEDA_STAGE_IVS_HOLD",
+      "description": "A problem occurred while calling or validating the IVS (Identity Verification System) API. The IVS service was unreachable, returned an error, or the response failed validation. The packet is held pending a successful IVS check.",
+      "category": "Biometric Quality Rejection",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": 1502,
+      "reason_code": "PKT_RBIO_QUALITY_FINGER_IMAGE_ERROR",
+      "description": "The packet was rejected because the fingerprint image quality score was below the acceptable threshold. Poor quality can result from dirty scanner glass, dry/wet fingers, incorrect finger placement, or device malfunction.",
+      "category": "Biometric Quality Rejection",
+      "is_retryable": false
+    },
+    {
+      "numeric_code": 1503,
+      "reason_code": "PKT_RBIO_QUALITY_FINGER_SYSTEMATIC_CAPTURE_ERROR",
+      "description": "The packet was rejected because the fingerprint capture was not systematic — the captures were not taken in the correct sequence, or the capture device reported an inconsistency in the capture pattern.",
+      "category": "Biometric Quality Rejection",
+      "is_retryable": false
+    },
+    {
+      "numeric_code": 1504,
+      "reason_code": "PKT_RBIO_QUALITY_FINGER_LIVENESS_ERROR",
+      "description": "The packet was rejected because the fingerprint liveness check failed. Liveness detection verifies the fingerprint is from a live human finger, not a fake/artificial fingerprint. A failure may indicate spoofing or sensor malfunction.",
+      "category": "Biometric Quality Rejection",
+      "is_retryable": false
+    },
+    {
+      "numeric_code": 1505,
+      "reason_code": "PKT_RBIO_QUALITY_IRIS_IMAGE_ERROR",
+      "description": "The packet was rejected because the iris image quality score was below the acceptable threshold. Poor quality can result from poor lighting, glasses/glare, closed eyes, incorrect distance from the scanner, or device malfunction.",
+      "category": "Biometric Quality Rejection",
+      "is_retryable": false
+    },
+    {
+      "numeric_code": 1506,
+      "reason_code": "PKT_RBIO_QUALITY_IRIS_SYSTEMATIC_CAPTURE_ERROR",
+      "description": "The packet was rejected because the iris capture was not systematic — the captures were not taken in the correct sequence (left/right eye), or the device reported a capture pattern inconsistency.",
+      "category": "Biometric Quality Rejection",
+      "is_retryable": false
+    },
+    {
+      "numeric_code": 1507,
+      "reason_code": "PKT_RBIO_QUALITY_IRIS_LIVENESS_ERROR",
+      "description": "The packet was rejected because the iris liveness check failed. Liveness detection verifies the iris is from a live human eye, not a printed image, contact lens with a fake iris pattern, or a prosthetic eye.",
+      "category": "Biometric Quality Rejection",
+      "is_retryable": false
+    },
+    {
+      "numeric_code": 1508,
+      "reason_code": "PKT_RBIO_QUALITY_FACE_IMAGE_ERROR",
+      "description": "The packet was rejected because the face image quality score was below the acceptable threshold. Poor quality can result from poor lighting, blurred image, face not centered, accessories (glasses, mask, hat), or device malfunction.",
+      "category": "Biometric Quality Rejection",
+      "is_retryable": false
+    },
+    {
+      "numeric_code": 1509,
+      "reason_code": "PKT_RBIO_QUALITY_FACE_SYSTEMATIC_CAPTURE_ERROR",
+      "description": "The packet was rejected because the face capture was not systematic — the captures were not taken in the correct sequence or the device reported a capture pattern inconsistency.",
+      "category": "Biometric Quality Rejection",
+      "is_retryable": false
+    },
+    {
+      "numeric_code": 1510,
+      "reason_code": "PKT_RBIO_QUALITY_FACE_LIVENESS_ERROR",
+      "description": "The packet was rejected because the face liveness check failed. Liveness detection verifies the face is from a live human, not a photograph, video, or 3D mask. A failure may indicate spoofing or sensor malfunction.",
+      "category": "Biometric Quality Rejection",
+      "is_retryable": false
+    }
+  ],
+  "rules": {
+    "description": "Policy/rule-based rejection rules evaluated by the rule engine. Each rule contains a condition and a resulting action. Only rules that result in the applicant being rejected are included.",
+    "total_rules": 58,
+    "rules": [
+      {
+        "rule_id": "cre-0f11bc38",
+        "reject_reason_code": "(CRE_REJECT_APPLICANT)",
+        "module": "MDD_POLICY_BATCH_2",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_2. This rule fires when NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (the applicant has a wrong biometric capture); NOT (at least one candidate has inconsistent biometrics); NOT (at least one candidate has a wrong capture); at least one candidate is a True Duplicate (confirmed same person); AND the number of face-duplicate candidates is exactly 0. The APPLICANT is REJECTED (the enrolment/update is denied). Candidates without Aadhaar are also REJECTED. Candidates that are SUSPENDED: CANDIDATES_WITH_AADHAAR. ",
+        "condition_description": "NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (the applicant has a wrong biometric capture); NOT (at least one candidate has inconsistent biometrics); NOT (at least one candidate has a wrong capture); at least one candidate is a True Duplicate (confirmed same person); AND the number of face-duplicate candidates is exactly 0"
+      },
+      {
+        "rule_id": "cre-144f2e8e",
+        "reject_reason_code": "(CRE_REJECT_APPLICANT)",
+        "module": "MDD_POLICY_BATCH_2",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_2. This rule fires when NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (the applicant has a wrong biometric capture); NOT (at least one candidate has inconsistent biometrics); NOT (at least one candidate has a wrong capture); all candidates have matching face match (the applicant face photo matched the candidate face); AND there is more than 0 candidate(s) with Aadhaar; AND there is more than 0 non-NRC candidate(s) without Aadhaar. The APPLICANT is REJECTED (the enrolment/update is denied). ",
+        "condition_description": "NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (the applicant has a wrong biometric capture); NOT (at least one candidate has inconsistent biometrics); NOT (at least one candidate has a wrong capture); all candidates have matching face match (the applicant face photo matched the candidate face); AND there is more than 0 candidate(s) with Aadhaar; AND there is more than 0 non-NRC candidate(s) without Aadhaar"
+      },
+      {
+        "rule_id": "cre-14f9c766",
+        "reject_reason_code": "RESIDENT_MAN_DEDUPE_REJECT_WL_DEMOMATCH_TD",
+        "module": "MDD_POLICY_BATCH_1",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_1. Reject reason code: RESIDENT_MAN_DEDUPE_REJECT_WL_DEMOMATCH_TD. This rule fires when the enrolment type is 'ENROLMENT' (New Enrolment); AND the applicant is whitelisted (previously reviewed and approved); all candidates have matching face match (the applicant face photo matched the candidate face); at least one True Duplicate candidate has an Aadhaar; AND there is more than 0 unique candidate(s); AND the number of unique candidates is at most 20; AND the number of whitelisted candidates that don't face-match is at most 0. The APPLICANT is REJECTED (the enrolment/update is denied). Candidates without Aadhaar are also REJECTED. Candidates that are SUSPENDED: CANDIDATES_WITH_AADHAAR. Candidates that are UN-SUSPENDED (reinstated): SUSPENDED_EARLIEST_TD_WITH_AADHAAR. ",
+        "condition_description": "the enrolment type is 'ENROLMENT' (New Enrolment); AND the applicant is whitelisted (previously reviewed and approved); all candidates have matching face match (the applicant face photo matched the candidate face); at least one True Duplicate candidate has an Aadhaar; AND there is more than 0 unique candidate(s); AND the number of unique candidates is at most 20; AND the number of whitelisted candidates that don't face-match is at most 0"
+      },
+      {
+        "rule_id": "cre-17b504ec",
+        "reject_reason_code": "RESIDENT_MAN_DEDUPE_REJECT_ANOMALOUS",
+        "module": "MDD_POLICY_BATCH_1",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_1. Reject reason code: RESIDENT_MAN_DEDUPE_REJECT_ANOMALOUS. This rule fires when the enrolment type is 'ENROLMENT' (New Enrolment); AND NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (at least one candidate is a True Duplicate (confirmed same person)); NOT (at least one candidate could not be determined (neither TD nor FP)); AND there is more than 1 anomalous match(es); AND there is more than 0 unique candidate(s); AND the number of unique candidates is at most 20; AND the number of whitelisted candidates is at most 0; AND the number of face-matching candidates is at most 0. The APPLICANT is REJECTED (the enrolment/update is denied). Candidates that are SUSPENDED: CANDIDATES_WITH_AADHAAR. ",
+        "condition_description": "the enrolment type is 'ENROLMENT' (New Enrolment); AND NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (at least one candidate is a True Duplicate (confirmed same person)); NOT (at least one candidate could not be determined (neither TD nor FP)); AND there is more than 1 anomalous match(es); AND there is more than 0 unique candidate(s); AND the number of unique candidates is at most 20; AND the number of whitelisted candidates is at most 0; AND the number of face-matching candidates is at most 0"
+      },
+      {
+        "rule_id": "cre-18f4ddda",
+        "reject_reason_code": "RESIDENT_MAN_DEDUPE_REJECT_WHITELISTED_CANDIDATES_PRESENT",
+        "module": "MDD_POLICY_BATCH_1",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_1. Reject reason code: RESIDENT_MAN_DEDUPE_REJECT_WHITELISTED_CANDIDATES_PRESENT. This rule fires when the enrolment type is 'ENROLMENT' (New Enrolment); AND NOT (the applicant is whitelisted (previously reviewed and approved)); AND there is more than 0 whitelisted candidate(s). The APPLICANT is REJECTED (the enrolment/update is denied). ",
+        "condition_description": "the enrolment type is 'ENROLMENT' (New Enrolment); AND NOT (the applicant is whitelisted (previously reviewed and approved)); AND there is more than 0 whitelisted candidate(s)"
+      },
+      {
+        "rule_id": "cre-1fff57c9",
+        "reject_reason_code": "RESIDENT_MAN_DEDUPE_REJECT_UNIQUE_CANDIDATES_NO_DEMO_MATCH",
+        "module": "MDD_POLICY_BATCH_1",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_1. Reject reason code: RESIDENT_MAN_DEDUPE_REJECT_UNIQUE_CANDIDATES_NO_DEMO_MATCH. This rule fires when the enrolment type is 'ENROLMENT' (New Enrolment); AND NOT (all candidates have anomalous matches); NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (only one match is anomalous); NOT (all candidates are false positives (different people with similar biometrics)); NOT (at least one candidate is a True Duplicate (confirmed same person)); NOT (at least one candidate could not be determined (neither TD nor FP)); NOT (at least one candidate is a True Duplicate or anomalous and non-NRC); AND the number of face-matching candidates is exactly 0; AND there is more than 0 unique candidate(s); AND the number of unique candidates is at most 20; AND the number of whitelisted candidates is at most 0. The APPLICANT is REJECTED (the enrolment/update is denied). Candidates without Aadhaar are also REJECTED. Candidates that are SUSPENDED: CANDIDATES_WITH_AADHAAR. ",
+        "condition_description": "the enrolment type is 'ENROLMENT' (New Enrolment); AND NOT (all candidates have anomalous matches); NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (only one match is anomalous); NOT (all candidates are false positives (different people with similar biometrics)); NOT (at least one candidate is a True Duplicate (confirmed same person)); NOT (at least one candidate could not be determined (neither TD nor FP)); NOT (at least one candidate is a True Duplicate or anomalous and non-NRC); AND the number of face-matching candidates is exactly 0; AND there is more than 0 unique candidate(s); AND the number of unique candidates is at most 20; AND the number of whitelisted candidates is at most 0"
+      },
+      {
+        "rule_id": "cre-252a8cfe",
+        "reject_reason_code": "(CRE_REJECT_APPLICANT)",
+        "module": "MDD_POLICY_BATCH_2",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_2. This rule fires when NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (the applicant has a wrong biometric capture); NOT (at least one candidate has inconsistent biometrics); NOT (at least one candidate has a wrong capture); NOT (all candidates have matching face match (the applicant face photo matched the candidate face)); AND there is more than 0 face-duplicate candidate(s). The APPLICANT is REJECTED (the enrolment/update is denied). Candidates without Aadhaar are also REJECTED. Candidates that are SUSPENDED: CANDIDATES_WITH_AADHAAR. ",
+        "condition_description": "NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (the applicant has a wrong biometric capture); NOT (at least one candidate has inconsistent biometrics); NOT (at least one candidate has a wrong capture); NOT (all candidates have matching face match (the applicant face photo matched the candidate face)); AND there is more than 0 face-duplicate candidate(s)"
+      },
+      {
+        "rule_id": "cre-2c29386a",
+        "reject_reason_code": "(CRE_REJECT_APPLICANT)",
+        "module": "MDD_POLICY_BATCH_2",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_2. This rule fires when the applicant is whitelisted (previously reviewed and approved); NOT (the applicant has a wrong biometric capture); NOT (at least one candidate has inconsistent biometrics); NOT (at least one candidate has a wrong capture); all candidates have matching face match (the applicant face photo matched the candidate face); at least one True Duplicate candidate has an Aadhaar. The APPLICANT is REJECTED (the enrolment/update is denied). Candidates without Aadhaar are also REJECTED. Candidates that are SUSPENDED: CANDIDATES_WITH_AADHAAR_LEAVING_OLDEST. Candidates that are UN-SUSPENDED (reinstated): SUSPENDED_EARLIEST_TD_WITH_AADHAAR. ",
+        "condition_description": "the applicant is whitelisted (previously reviewed and approved); NOT (the applicant has a wrong biometric capture); NOT (at least one candidate has inconsistent biometrics); NOT (at least one candidate has a wrong capture); all candidates have matching face match (the applicant face photo matched the candidate face); at least one True Duplicate candidate has an Aadhaar"
+      },
+      {
+        "rule_id": "cre-2e184509",
+        "reject_reason_code": "RESIDENT_MAN_DEDUPE_REJECT_ALL_CANDIDATES_FP",
+        "module": "MDD_POLICY_BATCH_1",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_1. Reject reason code: RESIDENT_MAN_DEDUPE_REJECT_ALL_CANDIDATES_FP. This rule fires when the enrolment type is 'ENROLMENT' (New Enrolment); AND NOT (all candidates have anomalous matches); NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (only one match is anomalous); all candidates are false positives (different people with similar biometrics); NOT (at least one candidate is a True Duplicate (confirmed same person)); NOT (at least one candidate could not be determined (neither TD nor FP)); NOT (at least one candidate is a True Duplicate or anomalous and non-NRC); AND the number of face-matching candidates is exactly 0; AND there is more than 0 unique candidate(s); AND the maximum ABIS match score is at most 70; AND the number of unique candidates is at most 20; AND the number of whitelisted candidates is at most 0. The APPLICANT is REJECTED (the enrolment/update is denied). Candidates without Aadhaar are also REJECTED. Candidates that are SUSPENDED: CANDIDATES_WITH_AADHAAR. ",
+        "condition_description": "the enrolment type is 'ENROLMENT' (New Enrolment); AND NOT (all candidates have anomalous matches); NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (only one match is anomalous); all candidates are false positives (different people with similar biometrics); NOT (at least one candidate is a True Duplicate (confirmed same person)); NOT (at least one candidate could not be determined (neither TD nor FP)); NOT (at least one candidate is a True Duplicate or anomalous and non-NRC); AND the number of face-matching candidates is exactly 0; AND there is more than 0 unique candidate(s); AND the maximum ABIS match score is at most 70; AND the number of unique candidates is at most 20; AND the number of whitelisted candidates is at most 0"
+      },
+      {
+        "rule_id": "cre-3868b7da",
+        "reject_reason_code": "(CRE_REJECT_APPLICANT)",
+        "module": "MDD_POLICY_BATCH_2",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_2. This rule fires when NOT (the applicant has a wrong biometric capture); at least one candidate has inconsistent biometrics. The APPLICANT is REJECTED (the enrolment/update is denied). Candidates that are SUSPENDED: INCONSISTENT_OR_WRONG_CAPTURE_CANDIDATES. ",
+        "condition_description": "NOT (the applicant has a wrong biometric capture); at least one candidate has inconsistent biometrics"
+      },
+      {
+        "rule_id": "cre-3acd6f2d",
+        "reject_reason_code": "RESIDENT_MAN_DEDUPE_REJECT_WL_UNIQUE_CANDIDATES_EXCEED_LIMIT",
+        "module": "MDD_POLICY_BATCH_1",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_1. Reject reason code: RESIDENT_MAN_DEDUPE_REJECT_WL_UNIQUE_CANDIDATES_EXCEED_LIMIT. This rule fires when the enrolment type is 'ENROLMENT' (New Enrolment); AND the applicant is whitelisted (previously reviewed and approved); AND there is more than 20 unique candidate(s). The APPLICANT is REJECTED (the enrolment/update is denied). Candidates without Aadhaar are also REJECTED. Candidates that are SUSPENDED: CANDIDATES_WITH_AADHAAR. ",
+        "condition_description": "the enrolment type is 'ENROLMENT' (New Enrolment); AND the applicant is whitelisted (previously reviewed and approved); AND there is more than 20 unique candidate(s)"
+      },
+      {
+        "rule_id": "cre-3f8c21a7",
+        "reject_reason_code": "RESIDENT_MAN_DEDUPE_REJECT_ALL_FP_DEMO",
+        "module": "MDD_POLICY_BATCH_1",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_1. Reject reason code: RESIDENT_MAN_DEDUPE_REJECT_ALL_FP_DEMO. This rule fires when the enrolment type is 'UPDATE' (Update); AND NOT (this is the first biometric update for this resident); NOT (the applicant is whitelisted (previously reviewed and approved)); all candidates are false positives (different people with similar biometrics); all candidates have matching face match (the applicant face photo matched the candidate face); NOT (at least one false positive is from the same parent); AND the number of unique candidates is at most 20; AND the number of whitelisted candidates is at most 0. The APPLICANT is REJECTED (the enrolment/update is denied). Candidates that are SUSPENDED: DEMO_MATCH_FP_CANDIDATES_FROM_DIFFERENT_PARENT, APPLICANT. ",
+        "condition_description": "the enrolment type is 'UPDATE' (Update); AND NOT (this is the first biometric update for this resident); NOT (the applicant is whitelisted (previously reviewed and approved)); all candidates are false positives (different people with similar biometrics); all candidates have matching face match (the applicant face photo matched the candidate face); NOT (at least one false positive is from the same parent); AND the number of unique candidates is at most 20; AND the number of whitelisted candidates is at most 0"
+      },
+      {
+        "rule_id": "cre-4000b6dd",
+        "reject_reason_code": "(CRE_REJECT_APPLICANT)",
+        "module": "MDD_POLICY_BATCH_1",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_1. This rule fires when the enrolment type is 'UPDATE' (Update); AND NOT (this is the first biometric update for this resident); NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (the applicant has a wrong face capture); NOT (at least one face-matching True Duplicate is from the same parent (family)); at least one non-face-matching True Duplicate is from the same parent; all candidates from the same parent are True Duplicates; AND the number of whitelisted candidates that don't face-match is exactly 0; AND there is more than 0 unique candidate(s); AND there is more than 0 True Duplicate candidate(s) from the same parent; AND the number of unique candidates is at most 20. The APPLICANT is REJECTED (the enrolment/update is denied). Candidates that are SUSPENDED: DEMO_MATCH_TRUE_DUPLICATE_CANDIDATES_WITH_AADHAAR_WITH_DIFFERENT_PARENT, DEMO_MATCH_ANOMALOUS_CANDIDATES_WITH_AADHAAR_WITH_DIFFERENT_PARENT. ",
+        "condition_description": "the enrolment type is 'UPDATE' (Update); AND NOT (this is the first biometric update for this resident); NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (the applicant has a wrong face capture); NOT (at least one face-matching True Duplicate is from the same parent (family)); at least one non-face-matching True Duplicate is from the same parent; all candidates from the same parent are True Duplicates; AND the number of whitelisted candidates that don't face-match is exactly 0; AND there is more than 0 unique candidate(s); AND there is more than 0 True Duplicate candidate(s) from the same parent; AND the number of unique candidates is at most 20"
+      },
+      {
+        "rule_id": "cre-468e9710",
+        "reject_reason_code": "RESIDENT_MAN_DEDUPE_REJECT_FP_FROM_SAME_PARENT",
+        "module": "MDD_POLICY_BATCH_1",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_1. Reject reason code: RESIDENT_MAN_DEDUPE_REJECT_FP_FROM_SAME_PARENT. This rule fires when the enrolment type is 'UPDATE' (Update); AND NOT (this is the first biometric update for this resident); NOT (the applicant is whitelisted (previously reviewed and approved)); at least one false positive is from the same parent; NOT (all candidates from the same parent are True Duplicates); AND the number of whitelisted candidates that don't face-match is exactly 0; AND there is more than 0 unique candidate(s); AND there is more than 0 True Duplicate candidate(s) from the same parent. The APPLICANT is REJECTED (the enrolment/update is denied). Candidates that are SUSPENDED: DEMO_MATCH_TRUE_DUPLICATE_CANDIDATES_WITH_AADHAAR_WITH_DIFFERENT_PARENT, DEMO_MATCH_ANOMALOUS_CANDIDATES_WITH_AADHAAR_WITH_DIFFERENT_PARENT. ",
+        "condition_description": "the enrolment type is 'UPDATE' (Update); AND NOT (this is the first biometric update for this resident); NOT (the applicant is whitelisted (previously reviewed and approved)); at least one false positive is from the same parent; NOT (all candidates from the same parent are True Duplicates); AND the number of whitelisted candidates that don't face-match is exactly 0; AND there is more than 0 unique candidate(s); AND there is more than 0 True Duplicate candidate(s) from the same parent"
+      },
+      {
+        "rule_id": "cre-47064258",
+        "reject_reason_code": "(CRE_REJECT_APPLICANT)",
+        "module": "MDD_POLICY_BATCH_2",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_2. This rule fires when NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (the applicant has a wrong biometric capture); NOT (at least one candidate has inconsistent biometrics); NOT (at least one candidate has a wrong capture); all candidates have matching face match (the applicant face photo matched the candidate face); NOT (all candidates are True Duplicates). The APPLICANT is REJECTED (the enrolment/update is denied). Candidates without Aadhaar are also REJECTED. Candidates that are SUSPENDED: CANDIDATES_WITH_AADHAAR. ",
+        "condition_description": "NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (the applicant has a wrong biometric capture); NOT (at least one candidate has inconsistent biometrics); NOT (at least one candidate has a wrong capture); all candidates have matching face match (the applicant face photo matched the candidate face); NOT (all candidates are True Duplicates)"
+      },
+      {
+        "rule_id": "cre-4c135e28",
+        "reject_reason_code": "RESIDENT_MAN_DEDUPE_REJECT_NON_DEMO_TD_SAME_PARENT",
+        "module": "MDD_POLICY_BATCH_1",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_1. Reject reason code: RESIDENT_MAN_DEDUPE_REJECT_NON_DEMO_TD_SAME_PARENT. This rule fires when the enrolment type is 'UPDATE' (Update); AND NOT (this is the first biometric update for this resident); NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (at least one face-matching True Duplicate is from the same parent (family)); at least one non-face-matching True Duplicate is from the same parent; AND the number of whitelisted candidates that don't face-match is exactly 0; AND there is more than 0 unique candidate(s); AND there is more than 0 True Duplicate candidate(s) from the same parent. The APPLICANT is REJECTED (the enrolment/update is denied). Candidates that are SUSPENDED: DEMO_MATCH_TRUE_DUPLICATE_CANDIDATES_WITH_AADHAAR_WITH_DIFFERENT_PARENT, DEMO_MATCH_ANOMALOUS_CANDIDATES_WITH_AADHAAR_WITH_DIFFERENT_PARENT. ",
+        "condition_description": "the enrolment type is 'UPDATE' (Update); AND NOT (this is the first biometric update for this resident); NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (at least one face-matching True Duplicate is from the same parent (family)); at least one non-face-matching True Duplicate is from the same parent; AND the number of whitelisted candidates that don't face-match is exactly 0; AND there is more than 0 unique candidate(s); AND there is more than 0 True Duplicate candidate(s) from the same parent"
+      },
+      {
+        "rule_id": "cre-4d9e6b3c",
+        "reject_reason_code": "RESIDENT_MAN_DEDUPE_REJECT_FP_DEMO_MATCH",
+        "module": "MDD_POLICY_BATCH_1",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_1. Reject reason code: RESIDENT_MAN_DEDUPE_REJECT_FP_DEMO_MATCH. This rule fires when the enrolment type is 'UPDATE' (Update); AND NOT (this is the first biometric update for this resident); NOT (the applicant is whitelisted (previously reviewed and approved)); all candidates are false positives (different people with similar biometrics); all candidates have matching face match (the applicant face photo matched the candidate face); AND the number of unique candidates is at most 20; AND the number of whitelisted candidates is at most 0. The APPLICANT is REJECTED (the enrolment/update is denied). Candidates that are SUSPENDED: DEMO_MATCH_TRUE_DUPLICATE_CANDIDATES_WITH_AADHAAR_WITH_DIFFERENT_PARENT, DEMO_MATCH_ANOMALOUS_CANDIDATES_WITH_AADHAAR_WITH_DIFFERENT_PARENT. ",
+        "condition_description": "the enrolment type is 'UPDATE' (Update); AND NOT (this is the first biometric update for this resident); NOT (the applicant is whitelisted (previously reviewed and approved)); all candidates are false positives (different people with similar biometrics); all candidates have matching face match (the applicant face photo matched the candidate face); AND the number of unique candidates is at most 20; AND the number of whitelisted candidates is at most 0"
+      },
+      {
+        "rule_id": "cre-50058053",
+        "reject_reason_code": "(CRE_REJECT_APPLICANT)",
+        "module": "MDD_POLICY_BATCH_2",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_2. This rule fires when the applicant has a wrong biometric capture. The APPLICANT is REJECTED (the enrolment/update is denied). ",
+        "condition_description": "the applicant has a wrong biometric capture"
+      },
+      {
+        "rule_id": "cre-5305fdff",
+        "reject_reason_code": "(CRE_REJECT_APPLICANT)",
+        "module": "MDD_POLICY_BATCH_2",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_2. This rule fires when the applicant is whitelisted (previously reviewed and approved); NOT (the applicant has a wrong biometric capture); NOT (at least one candidate has inconsistent biometrics); NOT (at least one candidate has a wrong capture); at least one candidate is a True Duplicate (confirmed same person); AND the number of face-matching candidates is exactly 0; AND the number of whitelisted candidates that don't face-match is exactly 0. The APPLICANT is REJECTED (the enrolment/update is denied). Candidates without Aadhaar are also REJECTED. Candidates that are SUSPENDED: CANDIDATES_WITH_AADHAAR. ",
+        "condition_description": "the applicant is whitelisted (previously reviewed and approved); NOT (the applicant has a wrong biometric capture); NOT (at least one candidate has inconsistent biometrics); NOT (at least one candidate has a wrong capture); at least one candidate is a True Duplicate (confirmed same person); AND the number of face-matching candidates is exactly 0; AND the number of whitelisted candidates that don't face-match is exactly 0"
+      },
+      {
+        "rule_id": "cre-5b490252",
+        "reject_reason_code": "RESIDENT_MAN_DEDUPE_REJECT_NON_NRC_TD_OR_ANOMALOUS_NO_DEMO_MATCH",
+        "module": "MDD_POLICY_BATCH_1",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_1. Reject reason code: RESIDENT_MAN_DEDUPE_REJECT_NON_NRC_TD_OR_ANOMALOUS_NO_DEMO_MATCH. This rule fires when the enrolment type is 'ENROLMENT' (New Enrolment); AND NOT (the applicant is whitelisted (previously reviewed and approved)); there are non-NRC candidates to process; at least one candidate is a True Duplicate or anomalous and non-NRC; AND the number of face-matching candidates is exactly 0; AND there is more than 0 unique candidate(s) without Aadhaar; AND the number of unique candidates is at most 20. The APPLICANT is REJECTED (the enrolment/update is denied). Candidates without Aadhaar are also REJECTED. Candidates that are SUSPENDED: CANDIDATES_WITH_AADHAAR. ",
+        "condition_description": "the enrolment type is 'ENROLMENT' (New Enrolment); AND NOT (the applicant is whitelisted (previously reviewed and approved)); there are non-NRC candidates to process; at least one candidate is a True Duplicate or anomalous and non-NRC; AND the number of face-matching candidates is exactly 0; AND there is more than 0 unique candidate(s) without Aadhaar; AND the number of unique candidates is at most 20"
+      },
+      {
+        "rule_id": "cre-5c7a9d4e",
+        "reject_reason_code": "RESIDENT_MAN_DEDUPE_REJECT_ALL_ANOMALOUS",
+        "module": "MDD_POLICY_BATCH_1",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_1. Reject reason code: RESIDENT_MAN_DEDUPE_REJECT_ALL_ANOMALOUS. This rule fires when the enrolment type is 'UPDATE' (Update); AND NOT (this is the first biometric update for this resident); all candidates have anomalous matches; NOT (the applicant is whitelisted (previously reviewed and approved)); AND the number of unique candidates is at most 20; AND the number of whitelisted candidates is at most 0; AND the number of face-duplicate candidates is at most 0; AND the number of non-face-matching anomalous candidates from a different parent is at most 0. The APPLICANT is REJECTED (the enrolment/update is denied). Candidates that are SUSPENDED: DEMO_MATCH_TRUE_DUPLICATE_CANDIDATES_WITH_AADHAAR_WITH_DIFFERENT_PARENT, DEMO_MATCH_ANOMALOUS_CANDIDATES_WITH_AADHAAR_WITH_DIFFERENT_PARENT. ",
+        "condition_description": "the enrolment type is 'UPDATE' (Update); AND NOT (this is the first biometric update for this resident); all candidates have anomalous matches; NOT (the applicant is whitelisted (previously reviewed and approved)); AND the number of unique candidates is at most 20; AND the number of whitelisted candidates is at most 0; AND the number of face-duplicate candidates is at most 0; AND the number of non-face-matching anomalous candidates from a different parent is at most 0"
+      },
+      {
+        "rule_id": "cre-5da992ac",
+        "reject_reason_code": "RESIDENT_MAN_DEDUPE_REJECT_DEMO_ANOMALOUS_SAME_PARENT",
+        "module": "MDD_POLICY_BATCH_1",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_1. Reject reason code: RESIDENT_MAN_DEDUPE_REJECT_DEMO_ANOMALOUS_SAME_PARENT. This rule fires when the enrolment type is 'UPDATE' (Update); AND NOT (this is the first biometric update for this resident); NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (the applicant has a wrong face capture); at least one face-matching anomalous candidate is from the same parent; NOT (at least one false positive is from the same parent); NOT (at least one cannot-determine candidate is from the same parent); NOT (at least one non-face-matching anomalous candidate is from the same parent); NOT (at least one face-matching True Duplicate is from the same parent (family)); NOT (at least one non-face-matching True Duplicate is from the same parent); NOT (all candidates from the same parent are True Duplicates); NOT (all modality match counts exceed the anomalous threshold); AND the number of whitelisted candidates that don't face-match is exactly 0; AND there is more than 0 unique candidate(s); AND the number of unique candidates is at most 20. The APPLICANT is REJECTED (the enrolment/update is denied). ",
+        "condition_description": "the enrolment type is 'UPDATE' (Update); AND NOT (this is the first biometric update for this resident); NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (the applicant has a wrong face capture); at least one face-matching anomalous candidate is from the same parent; NOT (at least one false positive is from the same parent); NOT (at least one cannot-determine candidate is from the same parent); NOT (at least one non-face-matching anomalous candidate is from the same parent); NOT (at least one face-matching True Duplicate is from the same parent (family)); NOT (at least one non-face-matching True Duplicate is from the same parent); NOT (all candidates from the same parent are True Duplicates); NOT (all modality match counts exceed the anomalous threshold); AND the number of whitelisted candidates that don't face-match is exactly 0; AND there is more than 0 unique candidate(s); AND the number of unique candidates is at most 20"
+      },
+      {
+        "rule_id": "cre-660f5626",
+        "reject_reason_code": "RESIDENT_MAN_DEDUPE_REJECT_HIGH_SCORE_DEMO_MATCH_PRESENT",
+        "module": "MDD_POLICY_BATCH_1",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_1. Reject reason code: RESIDENT_MAN_DEDUPE_REJECT_HIGH_SCORE_DEMO_MATCH_PRESENT. This rule fires when the enrolment type is 'ENROLMENT' (New Enrolment); AND NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (all candidates are false positives (different people with similar biometrics)); NOT (all candidates have matching face match (the applicant face photo matched the candidate face)); NOT (at least one candidate could not be determined (neither TD nor FP)); AND the maximum ABIS match score is above 70; AND there is more than 0 face-matching candidate(s); AND the number of unique candidates is at most 20. The APPLICANT is REJECTED (the enrolment/update is denied). Candidates without Aadhaar are also REJECTED. Candidates that are SUSPENDED: CANDIDATES_WITH_AADHAAR. ",
+        "condition_description": "the enrolment type is 'ENROLMENT' (New Enrolment); AND NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (all candidates are false positives (different people with similar biometrics)); NOT (all candidates have matching face match (the applicant face photo matched the candidate face)); NOT (at least one candidate could not be determined (neither TD nor FP)); AND the maximum ABIS match score is above 70; AND there is more than 0 face-matching candidate(s); AND the number of unique candidates is at most 20"
+      },
+      {
+        "rule_id": "cre-66955fa5",
+        "reject_reason_code": "RESIDENT_MAN_DEDUPE_REJECT_WL_TD_DEMO",
+        "module": "MDD_POLICY_BATCH_1",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_1. Reject reason code: RESIDENT_MAN_DEDUPE_REJECT_WL_TD_DEMO. This rule fires when the enrolment type is 'ENROLMENT' (New Enrolment); AND the applicant is whitelisted (previously reviewed and approved); NOT (all candidates have matching face match (the applicant face photo matched the candidate face)); at least one face-matching True Duplicate candidate has an Aadhaar; AND there is more than 0 face-matching candidate(s); AND the number of unique candidates is at most 20; AND the number of whitelisted candidates that don't face-match is at most 0. The APPLICANT is REJECTED (the enrolment/update is denied). Candidates without Aadhaar are also REJECTED. Candidates that are SUSPENDED: CANDIDATES_WITH_AADHAAR. Candidates that are UN-SUSPENDED (reinstated): SUSPENDED_EARLIEST_TD_WITH_AADHAAR. ",
+        "condition_description": "the enrolment type is 'ENROLMENT' (New Enrolment); AND the applicant is whitelisted (previously reviewed and approved); NOT (all candidates have matching face match (the applicant face photo matched the candidate face)); at least one face-matching True Duplicate candidate has an Aadhaar; AND there is more than 0 face-matching candidate(s); AND the number of unique candidates is at most 20; AND the number of whitelisted candidates that don't face-match is at most 0"
+      },
+      {
+        "rule_id": "cre-6b8f2e1a",
+        "reject_reason_code": "RESIDENT_MAN_DEDUPE_REJECT_ALL_ANOMALOUS",
+        "module": "MDD_POLICY_BATCH_1",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_1. Reject reason code: RESIDENT_MAN_DEDUPE_REJECT_ALL_ANOMALOUS. This rule fires when the enrolment type is 'UPDATE' (Update); AND NOT (this is the first biometric update for this resident); all candidates have anomalous matches; NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (at least one non-face-matching anomalous candidate is from the same parent); AND the number of unique candidates is at most 20; AND the number of whitelisted candidates is at most 0; AND the number of face-duplicate candidates is at most 0. The APPLICANT is REJECTED (the enrolment/update is denied). Candidates that are SUSPENDED: DEMO_MATCH_TRUE_DUPLICATE_CANDIDATES_WITH_AADHAAR_WITH_DIFFERENT_PARENT, DEMO_MATCH_ANOMALOUS_CANDIDATES_WITH_AADHAAR_WITH_DIFFERENT_PARENT. ",
+        "condition_description": "the enrolment type is 'UPDATE' (Update); AND NOT (this is the first biometric update for this resident); all candidates have anomalous matches; NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (at least one non-face-matching anomalous candidate is from the same parent); AND the number of unique candidates is at most 20; AND the number of whitelisted candidates is at most 0; AND the number of face-duplicate candidates is at most 0"
+      },
+      {
+        "rule_id": "cre-6cb864c8",
+        "reject_reason_code": "RESIDENT_MAN_DEDUPE_REJECT_CANDIDATES_PRESENT",
+        "module": "MDD_POLICY_BATCH_1",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_1. Reject reason code: RESIDENT_MAN_DEDUPE_REJECT_CANDIDATES_PRESENT. This rule fires when the enrolment type is 'UPDATE' (Update); AND this is the first biometric update for this resident; NOT (the applicant is whitelisted (previously reviewed and approved)); AND the number of whitelisted candidates that don't face-match is exactly 0; AND the number of candidates with a different parent is exactly 0; AND there is more than 0 unique candidate(s). The APPLICANT is REJECTED (the enrolment/update is denied). ",
+        "condition_description": "the enrolment type is 'UPDATE' (Update); AND this is the first biometric update for this resident; NOT (the applicant is whitelisted (previously reviewed and approved)); AND the number of whitelisted candidates that don't face-match is exactly 0; AND the number of candidates with a different parent is exactly 0; AND there is more than 0 unique candidate(s)"
+      },
+      {
+        "rule_id": "cre-707b927b",
+        "reject_reason_code": "RESIDENT_MAN_DEDUPE_REJECT_WL_NON_DEMO",
+        "module": "MDD_POLICY_BATCH_1",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_1. Reject reason code: RESIDENT_MAN_DEDUPE_REJECT_WL_NON_DEMO. This rule fires when the enrolment type is 'UPDATE' (Update); AND NOT (this is the first biometric update for this resident); the applicant is whitelisted (previously reviewed and approved); AND there is more than 0 whitelisted candidate(s) that don't face-match. The APPLICANT is REJECTED (the enrolment/update is denied). Candidates without Aadhaar are also REJECTED. Candidates that are SUSPENDED: CANDIDATES_WITH_AADHAAR. ",
+        "condition_description": "the enrolment type is 'UPDATE' (Update); AND NOT (this is the first biometric update for this resident); the applicant is whitelisted (previously reviewed and approved); AND there is more than 0 whitelisted candidate(s) that don't face-match"
+      },
+      {
+        "rule_id": "cre-78b39491",
+        "reject_reason_code": "(CRE_REJECT_APPLICANT)",
+        "module": "MDD_POLICY_BATCH_2",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_2. This rule fires when NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (the applicant has a wrong biometric capture); NOT (at least one candidate has inconsistent biometrics); NOT (at least one candidate has a wrong capture); all candidates have matching face match (the applicant face photo matched the candidate face); all candidates are True Duplicates; AND the number of candidates with Aadhaar is exactly 1. The APPLICANT is REJECTED (the enrolment/update is denied). Candidates without Aadhaar are also REJECTED. ",
+        "condition_description": "NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (the applicant has a wrong biometric capture); NOT (at least one candidate has inconsistent biometrics); NOT (at least one candidate has a wrong capture); all candidates have matching face match (the applicant face photo matched the candidate face); all candidates are True Duplicates; AND the number of candidates with Aadhaar is exactly 1"
+      },
+      {
+        "rule_id": "cre-7e25682c",
+        "reject_reason_code": "RESIDENT_MAN_DEDUPE_REJECT_NONNRC_NOAADHAAR_DIFF_PARENT",
+        "module": "MDD_POLICY_BATCH_1",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_1. Reject reason code: RESIDENT_MAN_DEDUPE_REJECT_NONNRC_NOAADHAAR_DIFF_PARENT. This rule fires when the enrolment type is 'UPDATE' (Update); AND this is the first biometric update for this resident; NOT (the applicant is whitelisted (previously reviewed and approved)); there are non-NRC candidates to process; AND the number of whitelisted candidates that don't face-match is exactly 0; AND the number of unique candidates with Aadhaar is exactly 0; AND there is more than 0 face-matching candidate(s); AND there is more than 0 candidate(s) with a different parent; AND there is more than 0 non-NRC candidate(s) without Aadhaar. The APPLICANT is REJECTED (the enrolment/update is denied). ",
+        "condition_description": "the enrolment type is 'UPDATE' (Update); AND this is the first biometric update for this resident; NOT (the applicant is whitelisted (previously reviewed and approved)); there are non-NRC candidates to process; AND the number of whitelisted candidates that don't face-match is exactly 0; AND the number of unique candidates with Aadhaar is exactly 0; AND there is more than 0 face-matching candidate(s); AND there is more than 0 candidate(s) with a different parent; AND there is more than 0 non-NRC candidate(s) without Aadhaar"
+      },
+      {
+        "rule_id": "cre-7f17df5a",
+        "reject_reason_code": "(CRE_REJECT_APPLICANT)",
+        "module": "MDD_POLICY_BATCH_2",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_2. This rule fires when NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (the applicant has a wrong biometric capture); NOT (at least one candidate has inconsistent biometrics); NOT (at least one candidate has a wrong capture); all candidates have matching face match (the applicant face photo matched the candidate face); all candidates are True Duplicates; AND there is more than 1 candidate(s) with Aadhaar. The APPLICANT is REJECTED (the enrolment/update is denied). Candidates without Aadhaar are also REJECTED. Candidates that are SUSPENDED: CANDIDATES_WITH_AADHAAR_LEAVING_OLDEST. ",
+        "condition_description": "NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (the applicant has a wrong biometric capture); NOT (at least one candidate has inconsistent biometrics); NOT (at least one candidate has a wrong capture); all candidates have matching face match (the applicant face photo matched the candidate face); all candidates are True Duplicates; AND there is more than 1 candidate(s) with Aadhaar"
+      },
+      {
+        "rule_id": "cre-814ca2b0",
+        "reject_reason_code": "RESIDENT_MAN_DEDUPE_REJECT_ALL_DEMO_TD",
+        "module": "MDD_POLICY_BATCH_1",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_1. Reject reason code: RESIDENT_MAN_DEDUPE_REJECT_ALL_DEMO_TD. This rule fires when the enrolment type is 'ENROLMENT' (New Enrolment); AND NOT (the applicant is whitelisted (previously reviewed and approved)); all candidates have matching face match (the applicant face photo matched the candidate face); NOT (at least one candidate could not be determined (neither TD nor FP)); all candidates are True Duplicates; AND the maximum ABIS match score is above 70; AND there is more than 1 unique candidate(s) with Aadhaar; AND the number of unique candidates is at most 20; AND the number of whitelisted candidates is at most 0. The APPLICANT is REJECTED (the enrolment/update is denied). Candidates without Aadhaar are also REJECTED. Candidates that are SUSPENDED: CANDIDATES_WITH_AADHAAR_LEAVING_OLDEST. ",
+        "condition_description": "the enrolment type is 'ENROLMENT' (New Enrolment); AND NOT (the applicant is whitelisted (previously reviewed and approved)); all candidates have matching face match (the applicant face photo matched the candidate face); NOT (at least one candidate could not be determined (neither TD nor FP)); all candidates are True Duplicates; AND the maximum ABIS match score is above 70; AND there is more than 1 unique candidate(s) with Aadhaar; AND the number of unique candidates is at most 20; AND the number of whitelisted candidates is at most 0"
+      },
+      {
+        "rule_id": "cre-8ee38d15",
+        "reject_reason_code": "(CRE_REJECT_APPLICANT)",
+        "module": "MDD_POLICY_BATCH_2",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_2. This rule fires when NOT (the applicant has a wrong biometric capture); at least one candidate has a wrong capture. The APPLICANT is REJECTED (the enrolment/update is denied). Candidates that are SUSPENDED: INCONSISTENT_OR_WRONG_CAPTURE_CANDIDATES. ",
+        "condition_description": "NOT (the applicant has a wrong biometric capture); at least one candidate has a wrong capture"
+      },
+      {
+        "rule_id": "cre-904deb6c",
+        "reject_reason_code": "RESIDENT_MAN_DEDUPE_REJECT_WL_UNIQUE_CANDIDATES_EXCEED_LIMIT",
+        "module": "MDD_POLICY_BATCH_1",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_1. Reject reason code: RESIDENT_MAN_DEDUPE_REJECT_WL_UNIQUE_CANDIDATES_EXCEED_LIMIT. This rule fires when the enrolment type is 'UPDATE' (Update); AND NOT (this is the first biometric update for this resident); the applicant is whitelisted (previously reviewed and approved); AND there is more than 20 unique candidate(s). The APPLICANT is REJECTED (the enrolment/update is denied). ",
+        "condition_description": "the enrolment type is 'UPDATE' (Update); AND NOT (this is the first biometric update for this resident); the applicant is whitelisted (previously reviewed and approved); AND there is more than 20 unique candidate(s)"
+      },
+      {
+        "rule_id": "cre-92c4c223",
+        "reject_reason_code": "(CRE_REJECT_APPLICANT)",
+        "module": "MDD_POLICY_BATCH_2",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_2. This rule fires when the applicant is whitelisted (previously reviewed and approved); NOT (the applicant has a wrong biometric capture); NOT (at least one candidate has inconsistent biometrics); NOT (at least one candidate has a wrong capture); NOT (all candidates have matching face match (the applicant face photo matched the candidate face)); at least one True Duplicate candidate has an Aadhaar; AND the number of whitelisted candidates that don't face-match is exactly 0; AND there is more than 0 face-matching candidate(s). The APPLICANT is REJECTED (the enrolment/update is denied). Candidates without Aadhaar are also REJECTED. Candidates that are SUSPENDED: CANDIDATES_WITH_AADHAAR_LEAVING_OLDEST. Candidates that are UN-SUSPENDED (reinstated): SUSPENDED_EARLIEST_TD_WITH_AADHAAR. ",
+        "condition_description": "the applicant is whitelisted (previously reviewed and approved); NOT (the applicant has a wrong biometric capture); NOT (at least one candidate has inconsistent biometrics); NOT (at least one candidate has a wrong capture); NOT (all candidates have matching face match (the applicant face photo matched the candidate face)); at least one True Duplicate candidate has an Aadhaar; AND the number of whitelisted candidates that don't face-match is exactly 0; AND there is more than 0 face-matching candidate(s)"
+      },
+      {
+        "rule_id": "cre-9da382ad",
+        "reject_reason_code": "RESIDENT_MAN_DEDUPE_REJECT_TD_DIFF_PARENT",
+        "module": "MDD_POLICY_BATCH_1",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_1. Reject reason code: RESIDENT_MAN_DEDUPE_REJECT_TD_DIFF_PARENT. This rule fires when the enrolment type is 'UPDATE' (Update); AND this is the first biometric update for this resident; NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (the applicant has a wrong face capture); AND the number of whitelisted candidates that don't face-match is exactly 0; AND there is more than 0 unique candidate(s); AND there is more than 0 candidate(s) with a different parent; AND there is more than 0 face-matching True Duplicate candidate(s) from a different parent. The APPLICANT is REJECTED (the enrolment/update is denied). Candidates that are SUSPENDED: NOT_DEMO_MATCH_CANDIDATES_FROM_DIFFERENT_PARENT, DEMO_MATCH_FP_CANDIDATES_FROM_DIFFERENT_PARENT, DEMO_MATCH_CANNOT_DETERMINE_CANDIDATES_FROM_DIFFERENT_PARENT. ",
+        "condition_description": "the enrolment type is 'UPDATE' (Update); AND this is the first biometric update for this resident; NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (the applicant has a wrong face capture); AND the number of whitelisted candidates that don't face-match is exactly 0; AND there is more than 0 unique candidate(s); AND there is more than 0 candidate(s) with a different parent; AND there is more than 0 face-matching True Duplicate candidate(s) from a different parent"
+      },
+      {
+        "rule_id": "cre-9da382ae",
+        "reject_reason_code": "RESIDENT_MAN_DEDUPE_REJECT_ANOMALOUS_DEMO_DIFF_PARENT",
+        "module": "MDD_POLICY_BATCH_1",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_1. Reject reason code: RESIDENT_MAN_DEDUPE_REJECT_ANOMALOUS_DEMO_DIFF_PARENT. This rule fires when the enrolment type is 'UPDATE' (Update); AND this is the first biometric update for this resident; NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (the applicant has a wrong face capture); AND the number of whitelisted candidates that don't face-match is exactly 0; AND there is more than 0 unique candidate(s); AND there is more than 0 candidate(s) with a different parent; AND there is more than 0 face-matching anomalous candidate(s) from a different parent. The APPLICANT is REJECTED (the enrolment/update is denied). Candidates that are SUSPENDED: NOT_DEMO_MATCH_CANDIDATES_FROM_DIFFERENT_PARENT, DEMO_MATCH_FP_CANDIDATES_FROM_DIFFERENT_PARENT, DEMO_MATCH_CANNOT_DETERMINE_CANDIDATES_FROM_DIFFERENT_PARENT. ",
+        "condition_description": "the enrolment type is 'UPDATE' (Update); AND this is the first biometric update for this resident; NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (the applicant has a wrong face capture); AND the number of whitelisted candidates that don't face-match is exactly 0; AND there is more than 0 unique candidate(s); AND there is more than 0 candidate(s) with a different parent; AND there is more than 0 face-matching anomalous candidate(s) from a different parent"
+      },
+      {
+        "rule_id": "cre-9da382af",
+        "reject_reason_code": "RESIDENT_MAN_DEDUPE_REJECT_FP_DIFF_PARENT",
+        "module": "MDD_POLICY_BATCH_1",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_1. Reject reason code: RESIDENT_MAN_DEDUPE_REJECT_FP_DIFF_PARENT. This rule fires when the enrolment type is 'UPDATE' (Update); AND this is the first biometric update for this resident; NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (the applicant has a wrong face capture); AND the number of whitelisted candidates that don't face-match is exactly 0; AND the number of face-matching True Duplicate candidates from a different parent is exactly 0; AND the number of face-matching anomalous candidates from a different parent is exactly 0; AND there is more than 0 unique candidate(s); AND there is more than 0 face-matching false positive candidate(s) from a different parent; AND there is more than 0 candidate(s) with a different parent. Candidates that are SUSPENDED: NOT_DEMO_MATCH_CANDIDATES_FROM_DIFFERENT_PARENT, DEMO_MATCH_CANNOT_DETERMINE_CANDIDATES_FROM_DIFFERENT_PARENT. ",
+        "condition_description": "the enrolment type is 'UPDATE' (Update); AND this is the first biometric update for this resident; NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (the applicant has a wrong face capture); AND the number of whitelisted candidates that don't face-match is exactly 0; AND the number of face-matching True Duplicate candidates from a different parent is exactly 0; AND the number of face-matching anomalous candidates from a different parent is exactly 0; AND there is more than 0 unique candidate(s); AND there is more than 0 face-matching false positive candidate(s) from a different parent; AND there is more than 0 candidate(s) with a different parent"
+      },
+      {
+        "rule_id": "cre-9da382b0",
+        "reject_reason_code": "RESIDENT_MAN_DEDUPE_REJECT_CND_DEMO_DIFF_PARENT",
+        "module": "MDD_POLICY_BATCH_1",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_1. Reject reason code: RESIDENT_MAN_DEDUPE_REJECT_CND_DEMO_DIFF_PARENT. This rule fires when the enrolment type is 'UPDATE' (Update); AND this is the first biometric update for this resident; NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (the applicant has a wrong face capture); AND the number of whitelisted candidates that don't face-match is exactly 0; AND the number of face-matching True Duplicate candidates from a different parent is exactly 0; AND the number of face-matching anomalous candidates from a different parent is exactly 0; AND there is more than 0 unique candidate(s); AND there is more than 0 candidate(s) with a different parent; AND there is more than 0 face-matching cannot-determine candidate(s) from a different parent. The APPLICANT is REJECTED (the enrolment/update is denied). Candidates that are SUSPENDED: APPLICANT, NOT_DEMO_MATCH_CANDIDATES_FROM_DIFFERENT_PARENT, DEMO_MATCH_FP_CANDIDATES_FROM_DIFFERENT_PARENT, DEMO_MATCH_CANNOT_DETERMINE_CANDIDATES_FROM_DIFFERENT_PARENT. ",
+        "condition_description": "the enrolment type is 'UPDATE' (Update); AND this is the first biometric update for this resident; NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (the applicant has a wrong face capture); AND the number of whitelisted candidates that don't face-match is exactly 0; AND the number of face-matching True Duplicate candidates from a different parent is exactly 0; AND the number of face-matching anomalous candidates from a different parent is exactly 0; AND there is more than 0 unique candidate(s); AND there is more than 0 candidate(s) with a different parent; AND there is more than 0 face-matching cannot-determine candidate(s) from a different parent"
+      },
+      {
+        "rule_id": "cre-9da382b1",
+        "reject_reason_code": "RESIDENT_MAN_DEDUPE_REJECT_NON_DEMO_ANOMALOUS_DIFF_PARENT",
+        "module": "MDD_POLICY_BATCH_1",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_1. Reject reason code: RESIDENT_MAN_DEDUPE_REJECT_NON_DEMO_ANOMALOUS_DIFF_PARENT. This rule fires when the enrolment type is 'UPDATE' (Update); AND this is the first biometric update for this resident; NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (the applicant has a wrong face capture); AND the number of whitelisted candidates that don't face-match is exactly 0; AND the number of face-matching false positive candidates from a different parent is exactly 0; AND the number of face-matching True Duplicate candidates from a different parent is exactly 0; AND the number of face-matching cannot-determine candidates from a different parent is exactly 0; AND the number of face-matching anomalous candidates from a different parent is exactly 0; AND there is more than 0 unique candidate(s); AND there is more than 0 candidate(s) with a different parent; AND there is more than 0 non-face-matching anomalous candidate(s) from a different parent. Candidates that are SUSPENDED: NOT_DEMO_MATCH_CANDIDATES_FROM_DIFFERENT_PARENT, DEMO_MATCH_FP_CANDIDATES_FROM_DIFFERENT_PARENT, DEMO_MATCH_CANNOT_DETERMINE_CANDIDATES_FROM_DIFFERENT_PARENT. ",
+        "condition_description": "the enrolment type is 'UPDATE' (Update); AND this is the first biometric update for this resident; NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (the applicant has a wrong face capture); AND the number of whitelisted candidates that don't face-match is exactly 0; AND the number of face-matching false positive candidates from a different parent is exactly 0; AND the number of face-matching True Duplicate candidates from a different parent is exactly 0; AND the number of face-matching cannot-determine candidates from a different parent is exactly 0; AND the number of face-matching anomalous candidates from a different parent is exactly 0; AND there is more than 0 unique candidate(s); AND there is more than 0 candidate(s) with a different parent; AND there is more than 0 non-face-matching anomalous candidate(s) from a different parent"
+      },
+      {
+        "rule_id": "cre-9da382b2",
+        "reject_reason_code": "RESIDENT_MAN_DEDUPE_REJECT_NON_DEMO_TD_DIFF_PARENT",
+        "module": "MDD_POLICY_BATCH_1",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_1. Reject reason code: RESIDENT_MAN_DEDUPE_REJECT_NON_DEMO_TD_DIFF_PARENT. This rule fires when the enrolment type is 'UPDATE' (Update); AND this is the first biometric update for this resident; NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (the applicant has a wrong face capture); AND the number of whitelisted candidates that don't face-match is exactly 0; AND the number of face-matching false positive candidates from a different parent is exactly 0; AND the number of face-matching True Duplicate candidates from a different parent is exactly 0; AND the number of face-matching cannot-determine candidates from a different parent is exactly 0; AND the number of face-matching anomalous candidates from a different parent is exactly 0; AND there is more than 0 unique candidate(s); AND there is more than 0 candidate(s) with a different parent; AND there is more than 0 non-face-matching True Duplicate candidate(s) from a different parent. The APPLICANT is REJECTED (the enrolment/update is denied). Candidates that are SUSPENDED: APPLICANT, NOT_DEMO_MATCH_CANDIDATES_FROM_DIFFERENT_PARENT, DEMO_MATCH_FP_CANDIDATES_FROM_DIFFERENT_PARENT, DEMO_MATCH_CANNOT_DETERMINE_CANDIDATES_FROM_DIFFERENT_PARENT. ",
+        "condition_description": "the enrolment type is 'UPDATE' (Update); AND this is the first biometric update for this resident; NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (the applicant has a wrong face capture); AND the number of whitelisted candidates that don't face-match is exactly 0; AND the number of face-matching false positive candidates from a different parent is exactly 0; AND the number of face-matching True Duplicate candidates from a different parent is exactly 0; AND the number of face-matching cannot-determine candidates from a different parent is exactly 0; AND the number of face-matching anomalous candidates from a different parent is exactly 0; AND there is more than 0 unique candidate(s); AND there is more than 0 candidate(s) with a different parent; AND there is more than 0 non-face-matching True Duplicate candidate(s) from a different parent"
+      },
+      {
+        "rule_id": "cre-9e842fe9",
+        "reject_reason_code": "(CRE_REJECT_APPLICANT)",
+        "module": "MDD_POLICY_BATCH_2",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_2. This rule fires when the applicant is whitelisted (previously reviewed and approved); AND there is more than 0 whitelisted candidate(s) that don't face-match. The APPLICANT is REJECTED (the enrolment/update is denied). Candidates that are SUSPENDED: WHITELISTED_CANDIDATES_WITH_AADHAAR. ",
+        "condition_description": "the applicant is whitelisted (previously reviewed and approved); AND there is more than 0 whitelisted candidate(s) that don't face-match"
+      },
+      {
+        "rule_id": "cre-a9eb256a",
+        "reject_reason_code": "(CRE_REJECT_APPLICANT)",
+        "module": "MDD_POLICY_BATCH_2",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_2. This rule fires when NOT (the applicant is whitelisted (previously reviewed and approved)); AND there is more than 0 whitelisted candidate(s). The APPLICANT is REJECTED (the enrolment/update is denied). ",
+        "condition_description": "NOT (the applicant is whitelisted (previously reviewed and approved)); AND there is more than 0 whitelisted candidate(s)"
+      },
+      {
+        "rule_id": "cre-b0756de1",
+        "reject_reason_code": "RESIDENT_MAN_DEDUPE_REJECT_DEMO_TD",
+        "module": "MDD_POLICY_BATCH_1",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_1. Reject reason code: RESIDENT_MAN_DEDUPE_REJECT_DEMO_TD. This rule fires when the enrolment type is 'ENROLMENT' (New Enrolment); AND NOT (the applicant is whitelisted (previously reviewed and approved)); all candidates have matching face match (the applicant face photo matched the candidate face); NOT (at least one candidate could not be determined (neither TD nor FP)); all candidates are True Duplicates; AND the number of unique candidates with Aadhaar is exactly 1; AND the maximum ABIS match score is above 70; AND the number of unique candidates is at most 20; AND the number of whitelisted candidates is at most 0. The APPLICANT is REJECTED (the enrolment/update is denied). Candidates without Aadhaar are also REJECTED. ",
+        "condition_description": "the enrolment type is 'ENROLMENT' (New Enrolment); AND NOT (the applicant is whitelisted (previously reviewed and approved)); all candidates have matching face match (the applicant face photo matched the candidate face); NOT (at least one candidate could not be determined (neither TD nor FP)); all candidates are True Duplicates; AND the number of unique candidates with Aadhaar is exactly 1; AND the maximum ABIS match score is above 70; AND the number of unique candidates is at most 20; AND the number of whitelisted candidates is at most 0"
+      },
+      {
+        "rule_id": "cre-b21fd83d",
+        "reject_reason_code": "RESIDENT_MAN_DEDUPE_REJECT_DEMO_NONNRC_NOAADHAAR",
+        "module": "MDD_POLICY_BATCH_1",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_1. Reject reason code: RESIDENT_MAN_DEDUPE_REJECT_DEMO_NONNRC_NOAADHAAR. This rule fires when the enrolment type is 'ENROLMENT' (New Enrolment); AND NOT (the applicant is whitelisted (previously reviewed and approved)); all candidates have matching face match (the applicant face photo matched the candidate face); AND there is more than 0 unique candidate(s) with Aadhaar; AND there is more than 0 non-NRC candidate(s) without Aadhaar; AND the number of unique candidates is at most 20. The APPLICANT is REJECTED (the enrolment/update is denied). ",
+        "condition_description": "the enrolment type is 'ENROLMENT' (New Enrolment); AND NOT (the applicant is whitelisted (previously reviewed and approved)); all candidates have matching face match (the applicant face photo matched the candidate face); AND there is more than 0 unique candidate(s) with Aadhaar; AND there is more than 0 non-NRC candidate(s) without Aadhaar; AND the number of unique candidates is at most 20"
+      },
+      {
+        "rule_id": "cre-b618338f",
+        "reject_reason_code": "RESIDENT_MAN_DEDUPE_REJECT_CND_SAME_PARENT",
+        "module": "MDD_POLICY_BATCH_1",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_1. Reject reason code: RESIDENT_MAN_DEDUPE_REJECT_CND_SAME_PARENT. This rule fires when the enrolment type is 'UPDATE' (Update); AND NOT (this is the first biometric update for this resident); NOT (the applicant is whitelisted (previously reviewed and approved)); at least one cannot-determine candidate is from the same parent; NOT (all candidates from the same parent are True Duplicates); AND the number of whitelisted candidates that don't face-match is exactly 0; AND there is more than 0 unique candidate(s). The APPLICANT is REJECTED (the enrolment/update is denied). Candidates that are SUSPENDED: DEMO_MATCH_TRUE_DUPLICATE_CANDIDATES_WITH_AADHAAR_WITH_DIFFERENT_PARENT, DEMO_MATCH_ANOMALOUS_CANDIDATES_WITH_AADHAAR_WITH_DIFFERENT_PARENT. ",
+        "condition_description": "the enrolment type is 'UPDATE' (Update); AND NOT (this is the first biometric update for this resident); NOT (the applicant is whitelisted (previously reviewed and approved)); at least one cannot-determine candidate is from the same parent; NOT (all candidates from the same parent are True Duplicates); AND the number of whitelisted candidates that don't face-match is exactly 0; AND there is more than 0 unique candidate(s)"
+      },
+      {
+        "rule_id": "cre-b927eea0",
+        "reject_reason_code": "RESIDENT_MAN_DEDUPE_REJECT_NO_CANDIDATE",
+        "module": "MDD_POLICY_BATCH_1",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_1. Reject reason code: RESIDENT_MAN_DEDUPE_REJECT_NO_CANDIDATE. This rule fires when the enrolment type is 'UPDATE' (Update); AND NOT (this is the first biometric update for this resident); AND the number of unique candidates is exactly 0. The APPLICANT is REJECTED (the enrolment/update is denied). ",
+        "condition_description": "the enrolment type is 'UPDATE' (Update); AND NOT (this is the first biometric update for this resident); AND the number of unique candidates is exactly 0"
+      },
+      {
+        "rule_id": "cre-be2575b6",
+        "reject_reason_code": "RESIDENT_MAN_DEDUPE_REJECT_ONE_ANOMALOUS",
+        "module": "MDD_POLICY_BATCH_1",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_1. Reject reason code: RESIDENT_MAN_DEDUPE_REJECT_ONE_ANOMALOUS. This rule fires when the enrolment type is 'ENROLMENT' (New Enrolment); AND NOT (the applicant is whitelisted (previously reviewed and approved)); only one match is anomalous; NOT (at least one candidate is a True Duplicate (confirmed same person)); NOT (at least one candidate could not be determined (neither TD nor FP)); NOT (at least one candidate is a True Duplicate or anomalous and non-NRC); AND the maximum ABIS match score is above 70; AND there is more than 0 unique candidate(s); AND the number of unique candidates is at most 20; AND the number of whitelisted candidates is at most 0; AND the number of face-matching candidates is at most 0. The APPLICANT is REJECTED (the enrolment/update is denied). Candidates that are SUSPENDED: CANDIDATES_WITH_AADHAAR. ",
+        "condition_description": "the enrolment type is 'ENROLMENT' (New Enrolment); AND NOT (the applicant is whitelisted (previously reviewed and approved)); only one match is anomalous; NOT (at least one candidate is a True Duplicate (confirmed same person)); NOT (at least one candidate could not be determined (neither TD nor FP)); NOT (at least one candidate is a True Duplicate or anomalous and non-NRC); AND the maximum ABIS match score is above 70; AND there is more than 0 unique candidate(s); AND the number of unique candidates is at most 20; AND the number of whitelisted candidates is at most 0; AND the number of face-matching candidates is at most 0"
+      },
+      {
+        "rule_id": "cre-cb5dddd2",
+        "reject_reason_code": "RESIDENT_MAN_DEDUPE_REJECT_NO_DEMO",
+        "module": "MDD_POLICY_BATCH_1",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_1. Reject reason code: RESIDENT_MAN_DEDUPE_REJECT_NO_DEMO. This rule fires when the enrolment type is 'UPDATE' (Update); AND NOT (this is the first biometric update for this resident); NOT (the applicant is whitelisted (previously reviewed and approved)); AND there is more than 0 whitelisted candidate(s) that don't face-match. The APPLICANT is REJECTED (the enrolment/update is denied). ",
+        "condition_description": "the enrolment type is 'UPDATE' (Update); AND NOT (this is the first biometric update for this resident); NOT (the applicant is whitelisted (previously reviewed and approved)); AND there is more than 0 whitelisted candidate(s) that don't face-match"
+      },
+      {
+        "rule_id": "cre-cf086ba6",
+        "reject_reason_code": "RESIDENT_MAN_DEDUPE_REJECT_DEMO",
+        "module": "MDD_POLICY_BATCH_1",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_1. Reject reason code: RESIDENT_MAN_DEDUPE_REJECT_DEMO. This rule fires when the enrolment type is 'ENROLMENT' (New Enrolment); AND NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (all candidates are false positives (different people with similar biometrics)); all candidates have matching face match (the applicant face photo matched the candidate face); NOT (at least one candidate is a True Duplicate (confirmed same person)); NOT (at least one candidate could not be determined (neither TD nor FP)); NOT (all candidates are True Duplicates); AND the number of whitelisted candidates is exactly 0; AND the maximum ABIS match score is above 70; AND there is more than 0 unique candidate(s). The APPLICANT is REJECTED (the enrolment/update is denied). Candidates without Aadhaar are also REJECTED. Candidates that are SUSPENDED: CANDIDATES_WITH_AADHAAR_LEAVING_OLDEST. ",
+        "condition_description": "the enrolment type is 'ENROLMENT' (New Enrolment); AND NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (all candidates are false positives (different people with similar biometrics)); all candidates have matching face match (the applicant face photo matched the candidate face); NOT (at least one candidate is a True Duplicate (confirmed same person)); NOT (at least one candidate could not be determined (neither TD nor FP)); NOT (all candidates are True Duplicates); AND the number of whitelisted candidates is exactly 0; AND the maximum ABIS match score is above 70; AND there is more than 0 unique candidate(s)"
+      },
+      {
+        "rule_id": "cre-da9a9f11",
+        "reject_reason_code": "RESIDENT_MAN_DEDUPE_REJECT_NO_DEMO_ANOMALOUS_SAME_PARENT",
+        "module": "MDD_POLICY_BATCH_1",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_1. Reject reason code: RESIDENT_MAN_DEDUPE_REJECT_NO_DEMO_ANOMALOUS_SAME_PARENT. This rule fires when the enrolment type is 'UPDATE' (Update); AND NOT (this is the first biometric update for this resident); NOT (the applicant is whitelisted (previously reviewed and approved)); at least one non-face-matching anomalous candidate is from the same parent; NOT (at least one face-matching True Duplicate is from the same parent (family)); NOT (all candidates from the same parent are True Duplicates); AND the number of whitelisted candidates that don't face-match is exactly 0; AND there is more than 0 unique candidate(s). The APPLICANT is REJECTED (the enrolment/update is denied). Candidates that are SUSPENDED: DEMO_MATCH_TRUE_DUPLICATE_CANDIDATES_WITH_AADHAAR_WITH_DIFFERENT_PARENT, DEMO_MATCH_ANOMALOUS_CANDIDATES_WITH_AADHAAR_WITH_DIFFERENT_PARENT. ",
+        "condition_description": "the enrolment type is 'UPDATE' (Update); AND NOT (this is the first biometric update for this resident); NOT (the applicant is whitelisted (previously reviewed and approved)); at least one non-face-matching anomalous candidate is from the same parent; NOT (at least one face-matching True Duplicate is from the same parent (family)); NOT (all candidates from the same parent are True Duplicates); AND the number of whitelisted candidates that don't face-match is exactly 0; AND there is more than 0 unique candidate(s)"
+      },
+      {
+        "rule_id": "cre-e31766d9",
+        "reject_reason_code": "(CRE_REJECT_APPLICANT)",
+        "module": "MDD_POLICY_BATCH_2",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_2. This rule fires when NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (the applicant has a wrong biometric capture); NOT (at least one candidate has inconsistent biometrics); NOT (at least one candidate has a wrong capture); NOT (at least one candidate is a True Duplicate (confirmed same person)); AND the number of face-duplicate candidates is exactly 0; AND there is more than 0 anomalous match(es). The APPLICANT is REJECTED (the enrolment/update is denied). Candidates without Aadhaar are also REJECTED. Candidates that are SUSPENDED: CANDIDATES_WITH_AADHAAR. ",
+        "condition_description": "NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (the applicant has a wrong biometric capture); NOT (at least one candidate has inconsistent biometrics); NOT (at least one candidate has a wrong capture); NOT (at least one candidate is a True Duplicate (confirmed same person)); AND the number of face-duplicate candidates is exactly 0; AND there is more than 0 anomalous match(es)"
+      },
+      {
+        "rule_id": "cre-e3a7e63f",
+        "reject_reason_code": "RESIDENT_MAN_DEDUPE_REJECT_WRONG_FACE_CAPTURE",
+        "module": "MDD_POLICY_BATCH_1",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_1. Reject reason code: RESIDENT_MAN_DEDUPE_REJECT_WRONG_FACE_CAPTURE. This rule fires when the enrolment type is 'UPDATE' (Update); AND NOT (the applicant is whitelisted (previously reviewed and approved)); the applicant has a wrong face capture; at least one candidate has a wrong face capture; AND the number of whitelisted candidates that don't face-match is exactly 0; AND there is more than 0 unique candidate(s). The APPLICANT is REJECTED (the enrolment/update is denied). Candidates that are SUSPENDED: DEMO_MATCH_TRUE_DUPLICATE_CANDIDATES_WITH_AADHAAR_WITH_DIFFERENT_PARENT, DEMO_MATCH_ANOMALOUS_CANDIDATES_WITH_AADHAAR_WITH_DIFFERENT_PARENT. ",
+        "condition_description": "the enrolment type is 'UPDATE' (Update); AND NOT (the applicant is whitelisted (previously reviewed and approved)); the applicant has a wrong face capture; at least one candidate has a wrong face capture; AND the number of whitelisted candidates that don't face-match is exactly 0; AND there is more than 0 unique candidate(s)"
+      },
+      {
+        "rule_id": "cre-e611c593",
+        "reject_reason_code": "(CRE_REJECT_APPLICANT)",
+        "module": "MDD_POLICY_BATCH_2",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_2. This rule fires when NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (the applicant has a wrong biometric capture); NOT (at least one candidate has inconsistent biometrics); NOT (at least one candidate has a wrong capture); NOT (at least one candidate is a True Duplicate (confirmed same person)); at least one candidate is anomalous and non-NRC; AND the number of anomalous matches is exactly 1; AND the number of face-duplicate candidates is exactly 0. The APPLICANT is REJECTED (the enrolment/update is denied). Candidates without Aadhaar are also REJECTED. Candidates that are SUSPENDED: CANDIDATES_WITH_AADHAAR. ",
+        "condition_description": "NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (the applicant has a wrong biometric capture); NOT (at least one candidate has inconsistent biometrics); NOT (at least one candidate has a wrong capture); NOT (at least one candidate is a True Duplicate (confirmed same person)); at least one candidate is anomalous and non-NRC; AND the number of anomalous matches is exactly 1; AND the number of face-duplicate candidates is exactly 0"
+      },
+      {
+        "rule_id": "cre-e66289de",
+        "reject_reason_code": "RESIDENT_MAN_DEDUPE_REJECT_WRONG_FACE_CAPTURE",
+        "module": "MDD_POLICY_BATCH_1",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_1. Reject reason code: RESIDENT_MAN_DEDUPE_REJECT_WRONG_FACE_CAPTURE. This rule fires when the enrolment type is 'UPDATE' (Update); AND NOT (the applicant is whitelisted (previously reviewed and approved)); the applicant has a wrong face capture; AND the number of whitelisted candidates that don't face-match is exactly 0; AND there is more than 0 unique candidate(s). The APPLICANT is REJECTED (the enrolment/update is denied). ",
+        "condition_description": "the enrolment type is 'UPDATE' (Update); AND NOT (the applicant is whitelisted (previously reviewed and approved)); the applicant has a wrong face capture; AND the number of whitelisted candidates that don't face-match is exactly 0; AND there is more than 0 unique candidate(s)"
+      },
+      {
+        "rule_id": "cre-e870e186",
+        "reject_reason_code": "RESIDENT_MAN_DEDUPE_REJECT_NO_DEMO_DIFF_PARENT",
+        "module": "MDD_POLICY_BATCH_1",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_1. Reject reason code: RESIDENT_MAN_DEDUPE_REJECT_NO_DEMO_DIFF_PARENT. This rule fires when the enrolment type is 'UPDATE' (Update); AND this is the first biometric update for this resident; NOT (the applicant is whitelisted (previously reviewed and approved)); AND the number of face-matching candidates is exactly 0; AND the number of whitelisted candidates that don't face-match is exactly 0; AND the number of unique candidates with Aadhaar is exactly 0; AND there is more than 0 candidate(s) with a different parent. The APPLICANT is REJECTED (the enrolment/update is denied). ",
+        "condition_description": "the enrolment type is 'UPDATE' (Update); AND this is the first biometric update for this resident; NOT (the applicant is whitelisted (previously reviewed and approved)); AND the number of face-matching candidates is exactly 0; AND the number of whitelisted candidates that don't face-match is exactly 0; AND the number of unique candidates with Aadhaar is exactly 0; AND there is more than 0 candidate(s) with a different parent"
+      },
+      {
+        "rule_id": "cre-ee43980f",
+        "reject_reason_code": "RESIDENT_MAN_DEDUPE_REJECT_UNIQUE_CANDIDATE_LIMIT_EXCEEDED",
+        "module": "MDD_POLICY_BATCH_1",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_1. Reject reason code: RESIDENT_MAN_DEDUPE_REJECT_UNIQUE_CANDIDATE_LIMIT_EXCEEDED. This rule fires when the enrolment type is 'ENROLMENT' (New Enrolment); AND NOT (the applicant is whitelisted (previously reviewed and approved)); AND there is more than 20 unique candidate(s). The APPLICANT is REJECTED (the enrolment/update is denied). Candidates without Aadhaar are also REJECTED. Candidates that are SUSPENDED: CANDIDATES_WITH_AADHAAR. ",
+        "condition_description": "the enrolment type is 'ENROLMENT' (New Enrolment); AND NOT (the applicant is whitelisted (previously reviewed and approved)); AND there is more than 20 unique candidate(s)"
+      },
+      {
+        "rule_id": "cre-fa87353c",
+        "reject_reason_code": "RESIDENT_MAN_DEDUPE_REJECT_NO_TD_SAME_PARENT",
+        "module": "MDD_POLICY_BATCH_1",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_1. Reject reason code: RESIDENT_MAN_DEDUPE_REJECT_NO_TD_SAME_PARENT. This rule fires when the enrolment type is 'UPDATE' (Update); AND NOT (this is the first biometric update for this resident); NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (at least one face-matching anomalous candidate is from the same parent); AND the number of whitelisted candidates that don't face-match is exactly 0; AND the number of True Duplicate candidates from the same parent is exactly 0; AND there is more than 0 unique candidate(s). The APPLICANT is REJECTED (the enrolment/update is denied). Candidates that are SUSPENDED: DEMO_MATCH_TRUE_DUPLICATE_CANDIDATES_WITH_AADHAAR_WITH_DIFFERENT_PARENT, DEMO_MATCH_ANOMALOUS_CANDIDATES_WITH_AADHAAR_WITH_DIFFERENT_PARENT. ",
+        "condition_description": "the enrolment type is 'UPDATE' (Update); AND NOT (this is the first biometric update for this resident); NOT (the applicant is whitelisted (previously reviewed and approved)); NOT (at least one face-matching anomalous candidate is from the same parent); AND the number of whitelisted candidates that don't face-match is exactly 0; AND the number of True Duplicate candidates from the same parent is exactly 0; AND there is more than 0 unique candidate(s)"
+      },
+      {
+        "rule_id": "cre-fe76cb18",
+        "reject_reason_code": "RESIDENT_MAN_DEDUPE_REJECT_UNIQUE_CANDIDATE_LIMIT_EXCEEDED",
+        "module": "MDD_POLICY_BATCH_1",
+        "description": "CRE rejection rule in MDD_POLICY_BATCH_1. Reject reason code: RESIDENT_MAN_DEDUPE_REJECT_UNIQUE_CANDIDATE_LIMIT_EXCEEDED. This rule fires when the enrolment type is 'UPDATE' (Update); AND NOT (the applicant is whitelisted (previously reviewed and approved)); AND there is more than 20 unique candidate(s). The APPLICANT is REJECTED (the enrolment/update is denied). ",
+        "condition_description": "the enrolment type is 'UPDATE' (Update); AND NOT (the applicant is whitelisted (previously reviewed and approved)); AND there is more than 20 unique candidate(s)"
+      }
+    ]
+  }
+}

@@ -112,7 +112,7 @@ sequenceDiagram
         
         M->>I: Dispatch payload + logs + rule for Investigation
         
-        alt USE_OPENCODE_HARNESS=true
+        alt USE_OPENCODE_HARNESS_REJECTION=true
             M->>FS: Write context.json + supported_logs.txt to local casebook dir
             M->>OC: run_task_json(RejectionInvestigator template)
             Note over OC: Agent reads context files + docs_cache/ corpus<br/>via Glob/Grep/Read tools, writes investigation.json
@@ -123,7 +123,7 @@ sequenceDiagram
         
         M->>R: Dispatch findings for Validation
         
-        alt USE_OPENCODE_HARNESS=true
+        alt USE_OPENCODE_HARNESS_REJECTION=true
             M->>FS: Write investigation_text.txt to local casebook dir
             M->>OC: run_task_json(RejectionReviewer template)
             OC-->>M: Return verdict JSON (APPROVED/REJECTED)
@@ -457,7 +457,18 @@ stateDiagram-v2
         common rejection is unsupported citations, so the
         retry must keep the evidence.
 
-        When USE_OPENCODE_HARNESS=true (and not a retry):
+        When REJECTION_REASON_CODE_DOCS_ENABLED=true, the node
+        first looks up the reason-code documentation for this
+        packet (section 3.2.2) and stores it in graph state as
+        reason_code_doc, so retries, the Reviewer and Synthesis
+        all reuse the SAME document. Both prompts are then built
+        by core/rejection_context.py: documentation and rule
+        first, logs last, task restated after them, and only the
+        logs trimmed if REJECTION_PROMPT_MAX_CHARS binds. With
+        the switch off the prompts are byte-for-byte the older
+        ones. investigator_path records harness or direct.
+
+        When USE_OPENCODE_HARNESS_REJECTION=true (and not a retry):
         writes context.json + supported_logs.txt to the local
         casebook dir, then calls opencode_runner.run_task_json
         with the RejectionInvestigator harness prompt template.
@@ -484,7 +495,15 @@ stateDiagram-v2
         the Investigator prompt without a human typing
         "promote".
 
-        When USE_OPENCODE_HARNESS=true: rewrites context.json +
+        REJECTION_REVIEWER_EVIDENCE defaults to TRUE, so the
+        direct Reviewer now receives the same evidence the
+        Investigator had - rule, enrolment type, payload, logs,
+        and the stored document - instead of the investigation
+        text alone. It could not otherwise verify the citation
+        it most often rejects for. Setting it false restores the
+        older prompt exactly. reviewer_path records the path.
+
+        When USE_OPENCODE_HARNESS_DLT / _REJECTION=true: rewrites context.json +
         supported_logs.txt from graph state and writes
         investigation_text.txt to the local casebook dir (so it
         never depends on the Investigator's pass leaving the
@@ -739,6 +758,10 @@ agentic-resident-crm/
 │   ├── test_dlt_bitbucket.py       # C4: source adapter against recorded responses, no network
 │   ├── test_dlt_code_check.py      # C5: the four verdicts and all three asymmetries
 │   ├── test_dlt_parked.py          # C7: parking, release, expiry, and the cap
+│   ├── test_reason_code_docs.py    # Reason-code store: lookup, rendering, validator, CLI
+│   ├── test_rejection_context.py   # The direct lane's prompt builders and the size limit
+│   ├── test_rejection_docs_pipeline.py # The graph with documentation on, and with it off
+│   ├── fixtures/reason_code_docs/  # A small valid store the pipeline tests look up in
 │   └── fixtures/dlt/                # Recorded DLT corpus fixtures (CSV + JSON)
 ├── src/
 │   ├── main_api.py                 # FastAPI entry point (uvicorn, port 8000)
@@ -752,6 +775,8 @@ agentic-resident-crm/
 │   │   └── dlt_routes.py           # DLT endpoints (/fetch-dlt-logs, /analyze-dlt)
 │   ├── core/
 │   │   ├── agent_orchestrator.py   # LangGraph StateGraph build + LLM provisioning
+│   │   ├── rejection_context.py    # The direct lane's three prompts, in a fixed order, under
+│   │   │                           #   REJECTION_PROMPT_MAX_CHARS (logs trimmed, nothing else)
 │   │   └── checkpointer.py         # Checkpointer backend: sqlite (default), postgres, or mysql
 │   ├── dlt/                        # Dead-letter topic analysis (parallel flow; see DLT_PLAN.md)
 │   │   ├── headers.py              # Spring DLT header contract, hex epoch decoding
@@ -799,6 +824,10 @@ agentic-resident-crm/
 │   │                                     #   cannot live in AGENTS.md, which every flow loads
 │   │           ├── rejection.md          # Rejection flow: evidence, enrolment types, glossary
 │   │           └── dlt.md                # DLT flow: stack trace first, per-code findings
+│   ├── reason_code_docs/           # What the direct Investigator reasons from (section 3.2.2)
+│   │   ├── README.md               # The file format, the lookup, and the validator's rules
+│   │   └── services/               # One JSON file per service, keyed by reason code
+│   │       └── enu-biometric.json  #   ENU biometric stage: 98 codes + 58 CRE policy rules
 │   ├── runbooks/
 │   │   ├── draft/                  # LLM-generated runbook drafts (pending human review)
 │   │   └── final/                  # Human-approved runbook templates (served online)
@@ -812,6 +841,7 @@ agentic-resident-crm/
 │   │   ├── approve_replays.py      # CLI: approve queued packet replays
 │   │   ├── promote_rules.py        # CLI: promote + git-commit learned rules
 │   │   ├── record_outcome.py       # CLI: attach a ground-truth verdict to a completed investigation
+│   │   ├── check_reason_code_docs.py # CLI: validate the reason-code document store (CI gate)
 │   │   ├── check_drift.py          # CLI: rules.csv schema drift detector
 │   │   ├── build_catalog.py        # CLI: Stage 0 offline template catalog builder
 │   │   ├── eval_harness.py         # CLI: Stage 6 evaluation harness for pipeline accuracy
@@ -857,6 +887,8 @@ agentic-resident-crm/
 │   └── utils/
 │       ├── env.py                  # Environment variable configuration
 │       ├── paths.py                # Centralized path constants (CHECKPOINT_DB_PATH, etc.)
+│       ├── reason_code_docs.py     # The reason-code store: lookup (never raises), rendering,
+│       │                           #   provenance, and the validator (section 3.2.2)
 │       ├── config_validator.py     # Fail-fast boot-time configuration validation
 │       ├── logging_config.py       # structlog JSON logging setup
 │       ├── kafkaConsumer.py        # Background topic polling + bounded worker pool (CONSUMER_ROLE=fast|slow|dlt|dlt_analysis)
@@ -932,15 +964,44 @@ tiers are now load-bearing rather than one being constructed and discarded.
 whichever key the *selected* provider (`USE_HF` / `MOCK_LLM_WITH_MISTRAL` /
 default OpenAI-compatible) actually reads, not a hardcoded `OPENAI_API_KEY`.
 
-### 3.2.1 opencode Harness (`USE_OPENCODE_HARNESS`)
+### 3.2.1 opencode Harness (`USE_OPENCODE_HARNESS_REJECTION`, `USE_OPENCODE_HARNESS_DLT`)
 
-When `USE_OPENCODE_HARNESS=true`, the Investigator and Reviewer nodes in both
-the rejection and DLT lanes bypass the direct `ChatOpenAI` path and instead run
-through the **opencode harness** (`src/utils/opencode_runner.py`). This gives
-the agent a full tool environment -- `Glob`, `Grep`, `Read`, `Write` -- so it
-can independently explore the DROA-generated service documentation corpus
+When a lane's harness switch is true, that lane's Investigator and Reviewer
+nodes bypass the direct `ChatOpenAI` path and instead run through the
+**opencode harness** (`src/utils/opencode_runner.py`). This gives the agent a
+full tool environment -- `Glob`, `Grep`, `Read`, `Write` -- so it can
+independently explore the DROA-generated service documentation corpus
 (`docs_cache/`) and cross-reference log evidence against the actual service
 architecture.
+
+**The switch is per lane.** `USE_OPENCODE_HARNESS_REJECTION` and
+`USE_OPENCODE_HARNESS_DLT` are read through
+`opencode_runner.lane_enabled(<lane>)`, which each lane's orchestrator calls
+about its own lane and nothing else. A lane whose own switch holds a non-empty
+value uses it; otherwise the lane inherits the older single switch
+`USE_OPENCODE_HARNESS`, so a deployment that only ever set that variable
+behaves exactly as it did before. A value counts as on when, stripped of
+surrounding whitespace and lowercased, it is `true`.
+
+The split exists because the two lanes are moving apart: the rejection lane
+runs on the direct path with curated reason-code documentation (section 3.2.2)
+while the DLT lane keeps the harness. The target production shape is therefore
+`USE_OPENCODE_HARNESS_REJECTION=false` with `USE_OPENCODE_HARNESS_DLT=true`.
+
+`opencode_runner.is_enabled()` is now the **any-lane** question -- "is a server
+needed at all?" -- and it is what gates the process-wide machinery: the corpus
+download and `opencode serve` start-up in `main_api.py` lifespan, the `/ready`
+503s in `routes.py`, `start.py`'s wait on `/ready`, and the provider config
+`entrypoint.sh` writes. So with the DLT lane alone on opencode the server still
+starts, the corpus still downloads, and `/ready` still waits for both; that is
+expected, not a leftover.
+
+`entrypoint.sh` resolves the same three variables in its `harness-lanes`
+block, and `tests/test_opencode_harness.py` executes that block and compares
+its answer with `lane_enabled()` for every switch combination -- the two sides
+of that language boundary had already drifted once, and a disagreement is
+invisible at run time because every harness failure falls back to the direct
+LLM.
 
 **Architecture:**
 - A single `opencode serve` process runs for the API's lifetime, started in
@@ -1007,7 +1068,7 @@ task that burned twenty calls and a task that burned two produced the same
 single log line, and the harness path recorded no metrics at all --
 `metrics.record_llm_usage()` reads `usage_metadata` off a LangChain response,
 and a harness task has no response object, it returns a file on disk. With
-`USE_OPENCODE_HARNESS=true` the Investigator and Reviewer nodes therefore
+a lane is on the harness its Investigator and Reviewer nodes therefore
 reported zero calls and zero tokens while doing all of the work.
 
 `--format json` turns stdout into one JSON object per line. `_Trace` in
@@ -1080,7 +1141,7 @@ In a container `entrypoint.sh` writes that file from the runtime environment
 -- reading `LLM_BASE_URL_COMPLEX` and `LLM_API_KEY_COMPLEX`, the same
 variables `llm_utils.py` reads -- before exec'ing `start.py`, because the LLM
 endpoint comes from a ConfigMap at run time and cannot be baked into the
-image. It writes nothing at all unless `USE_OPENCODE_HARNESS=true`.
+image. It writes nothing at all unless some lane uses the harness.
 
 > **`OPENCODE_MODEL`'s default is shared across the language boundary.**
 > The first path segment is the *provider name*: `entrypoint.sh` uses it as
@@ -1098,15 +1159,71 @@ image. It writes nothing at all unless `USE_OPENCODE_HARNESS=true`.
 the Synthesis node (future work), and the DLT Synthesis node (future work)
 continue to use the direct LLM path regardless of the harness toggle.
 
+### 3.2.2 Reason-code documentation (`REJECTION_REASON_CODE_DOCS_ENABLED`)
+
+With `USE_OPENCODE_HARNESS_REJECTION=false` the rejection Investigator can no
+longer explore the DROA corpus for itself: the direct path has no tools. It is
+handed curated documentation for the packet's own reason code instead, chosen
+by a **lookup in Python rather than by an agent** -- one LLM call, a bounded
+prompt, and a recorded hash of exactly what the model was shown.
+
+**The store** (`src/reason_code_docs/`, overridable with
+`REASON_CODE_DOCS_DIR`) is one JSON file per service under `services/`, in the
+shape the service teams generate from their own source. `enu-biometric.json`
+is the first. Each file carries two kinds of entry, keyed by reason code:
+
+- `codes[]` -- what a code *means*: numeric code, category, whether the
+  failure is retryable, and prose traced through the service source.
+- `rules.rules[]` -- what *fires* a code: the CRE rule engine condition, and
+  what happens to the applicant and the candidates as a result.
+
+Because both are keyed by reason code, the mapping is intrinsic and there is
+no index file to keep in step with the documents. Enrolment type is intrinsic
+too: a rule whose `condition_description` names `'ENROLMENT'` documents the E
+family, one naming `'UPDATE'` documents U, and one naming neither fires for
+every type and is always included.
+
+**The lookup** (`src/utils/reason_code_docs.py::lookup`) takes the packet's
+first non-empty `errorReasonCode` and its raw `packetMetaData.enrolmentType`,
+normalises the type to a family (`N`/`E`/`ENROLMENT`/`ENROLLMENT` to `E`,
+`U`/`UPDATE` to `U`, another type code as-is, anything else to nothing),
+collects every entry any service publishes for that code, and renders the ones
+that apply. It returns one of five outcomes -- `hit`, `miss`, `error`,
+`no_reason_code`, `disabled` -- and **never raises**: a documentation problem
+costs one packet its document, never the packet. Every block in the rendered
+text is headed `[Source: services/<file>.json, <kind> <ref>]`, so a claim in
+an investigation is traceable to the entry it came from, and the text is
+hashed into the casebook while the text itself never is.
+
+A code documented only for `U` is deliberately a miss for an enrolment packet,
+rather than being answered with rules that cannot have fired.
+
+**Validation** (`src/tools/check_reason_code_docs.py`, and
+`main_api.validate_reason_code_docs()` at boot when the switch is on) checks
+the file shape, that a rule's `description` contains its
+`condition_description` verbatim (the renderer splits the outcome off there),
+the 16000-character cap per rendered document, and the content rules -- no
+UUIDs, dates or long digit runs, and none of `runbook_validator`'s injection
+markers, since this text goes into a prompt. Errors exit the process at boot,
+following `validate_config`'s convention; warnings are logged. A reason code
+that cannot match a payload value, such as the generated
+`(CRE_REJECT_APPLICANT)`, is a warning and is skipped: it is real data, not a
+typo, and failing a deploy over it would mean the file could never ship.
+
+The files ship inside the image. `reason_code_docs.s3_prefix()` and
+`download_service_docs()` reserve the path for hosting them in S3 later;
+nothing downloads today, and `docs_loader.py` is the working implementation to
+copy when it does.
+
 ### 3.3 Core Pipeline (Deterministic StateGraph)
 Instead of relying on an unpredictable LLM to orchestrate the subagents, the system uses a highly robust, strictly deterministic Python `StateGraph` (via `langgraph`) in `src/core/agent_orchestrator.py`. This ensures the exact sequential execution of every step.
 
 1. **Log Fetcher Node**: Cache-first (section 3.11). Reads `fetched_logs.txt` from `CasebookStorage` -- persisted by `POST /fetch-logs` before `/analyze-rejection` ever invokes the graph -- and uses it directly if present, with no live fetch. Only when that artifact is absent (a direct `/process-rejection` call, `local_run.py`, or any caller that invokes the graph without going through `/fetch-logs` first) does it fall back to fetching live: if `ENABLE_LOG_FETCHING=true`, `fetch_and_persist_logs` triggers the same log-reduction pipeline (`fetch_logs_for`) to pull relevant Kibana/Kubernetes traces using the `eventId` and persists the result for next time.
 2. **Runbook Lookup Node**: Checks `RUNBOOK_MODE` (off/serve/shadow). If `serve`, it looks up a final runbook by `(reason_code, enrolment_type)` in `src/runbooks/final/`, verifies the DB rule fingerprint hasn't changed, and short-circuits the graph directly to `END` with the pre-built resolution (no LLM calls). In `shadow` mode, it records the runbook match but lets the agents run normally; `synthesis_node` later compares the two results and logs any divergence. If `off` (the default) or no runbook matches, it falls through to the Investigator.
-3. **Investigator Node**: A React agent constructed with an **empty tool list**. All external lookups are performed deterministically in Python before the call: `lookup_rule_by_reason_code` is invoked by the node itself, the result is filtered by `enrolmentType`, and the rule text is injected into the prompt. If the rule lookup fails or returns nothing, it falls back to `get_error_description` (from `tool_registry.py`) to inject hardcoded error definitions (e.g., for `RESIDENT_BIOMETRIC_UPDATE_IDENTIFY_FAILURE`). This removes a whole class of tool-call hallucination and redundant DB round-trips. The prompt is projected down to only the fields the Investigator needs (`eventId`, `packetMetaData`, `packetExecutionSummary`, `flowMetaData.stage`) rather than the full raw Kafka message, and on a retry it sends only the delta -- the prior investigation plus the Reviewer's feedback -- instead of resending the full payload/logs/rule context again. When `USE_OPENCODE_HARNESS=true`, the node writes `context.json` and `supported_logs.txt` to the local casebook directory, renders the `RejectionInvestigator` harness prompt template, and calls `opencode_runner.run_task_json()` -- giving the agent Glob/Grep/Read access to the `docs_cache/` DROA corpus. It falls back to the direct LLM path on harness failure (section 3.2.1).
-4. **Reviewer Node**: A distinct React agent, built once at graph-construction time (not per review) and bound to the `simple` LLM tier, that acts as a strict QC validator holding one tool (`add_learning_rule`). The tool no longer closes over the current `event_id`/investigation text per call -- it reads them from a pair of `contextvars.ContextVar`s that `reviewer_node` sets before each invocation, since each packet already runs on its own dedicated thread. When `USE_OPENCODE_HARNESS=true`, the node rewrites `context.json`/`supported_logs.txt` from graph state (the same `_write_harness_case_files` the Investigator uses), writes `investigation_text.txt`, and renders the `RejectionReviewer` harness prompt template, giving the reviewer agent the same corpus access to verify the investigator's claims against service documentation. The harness reviewer has no tools, so a rejection returns its proposed rule as an optional `learning_rule` object in its JSON, which is passed to the same `queue_learning_rule` function behind `add_learning_rule` -- one validated path to `pending_rules.jsonl` either way. All file writes sit inside the harness `try`, so a missing or unwritable case directory falls back to the direct LLM like any other harness failure.
+3. **Investigator Node**: A React agent constructed with an **empty tool list**. All external lookups are performed deterministically in Python before the call: `lookup_rule_by_reason_code` is invoked by the node itself, the result is filtered by `enrolmentType`, and the rule text is injected into the prompt. If the rule lookup fails or returns nothing, it falls back to `get_error_description` (from `tool_registry.py`) to inject hardcoded error definitions (e.g., for `RESIDENT_BIOMETRIC_UPDATE_IDENTIFY_FAILURE`). This removes a whole class of tool-call hallucination and redundant DB round-trips. The prompt is projected down to only the fields the Investigator needs (`eventId`, `packetMetaData`, `packetExecutionSummary`, `flowMetaData.stage`) rather than the full raw Kafka message, and on a retry it sends only the delta -- the prior investigation plus the Reviewer's feedback -- instead of resending the full payload/logs/rule context again. When `REJECTION_REASON_CODE_DOCS_ENABLED=true` the node additionally resolves the reason-code documentation for this packet (section 3.2.2) before anything else, stores it in graph state as `reason_code_doc` so every later node reuses the same version, counts the outcome on `reason_code_doc_lookups_total`, and builds both its prompts through `core/rejection_context.py` -- documentation and rule first, logs last, task restated after them, and only the logs trimmed when `REJECTION_PROMPT_MAX_CHARS` binds. With that switch off the prompts are byte-for-byte the ones described above. Either way it returns `investigator_path` (`harness` or `direct`), because a harness task that fails falls back silently and a comparison of the two paths would otherwise score the wrong one. When `USE_OPENCODE_HARNESS_REJECTION=true`, the node writes `context.json` and `supported_logs.txt` to the local casebook directory, renders the `RejectionInvestigator` harness prompt template, and calls `opencode_runner.run_task_json()` -- giving the agent Glob/Grep/Read access to the `docs_cache/` DROA corpus. It falls back to the direct LLM path on harness failure (section 3.2.1).
+4. **Reviewer Node**: A distinct React agent, built once at graph-construction time (not per review) and bound to the `simple` LLM tier, that acts as a strict QC validator holding one tool (`add_learning_rule`). The tool no longer closes over the current `event_id`/investigation text per call -- it reads them from a pair of `contextvars.ContextVar`s that `reviewer_node` sets before each invocation, since each packet already runs on its own dedicated thread. `REJECTION_REVIEWER_EVIDENCE` defaults to **true**, so on the direct path it is now given the same evidence the Investigator had -- the rule, the enrolment type, the projected payload, the logs, and the stored document -- through `build_review_prompt`, rather than the investigation text alone. It could not otherwise check the citation it most often rejects for, while `ReviewerAgent.md` asked it to do exactly that; setting the variable to false restores the older prompt character for character. It returns `reviewer_path` alongside its verdict. When `USE_OPENCODE_HARNESS_REJECTION=true`, the node rewrites `context.json`/`supported_logs.txt` from graph state (the same `_write_harness_case_files` the Investigator uses), writes `investigation_text.txt`, and renders the `RejectionReviewer` harness prompt template, giving the reviewer agent the same corpus access to verify the investigator's claims against service documentation. The harness reviewer has no tools, so a rejection returns its proposed rule as an optional `learning_rule` object in its JSON, which is passed to the same `queue_learning_rule` function behind `add_learning_rule` -- one validated path to `pending_rules.jsonl` either way. All file writes sit inside the harness `try`, so a missing or unwritable case directory falls back to the direct LLM like any other harness failure.
 5. **Conditional Router & Loop Guard**: A pure Python control edge that checks the Reviewer's output via `is_reviewer_approved()`: the (markdown/whitespace-stripped) feedback must *start with* the literal token `APPROVED`, not merely contain it -- this closes the "NOT APPROVED"/"DISAPPROVED" false-positive that a substring match would produce. Otherwise it increments `retry_count`; once `retry_count >= MAX_INVESTIGATION_RETRIES` it routes to the `escalate` node (preventing infinite LLM loops), else it loops back to the Investigator Node. A fresh (non-resumed) invocation always starts `retry_count` at 0, so a redelivered packet can never resume a stale checkpoint with the retry budget already exhausted.
-6. **Synthesis Node**: The final agent that takes the approved, heavily vetted technical diagnosis and translates it into a human-readable JSON `Casebook`. It holds the `queue_for_replay` tool. In shadow mode, it also compares its output to the runbook's pre-built resolution and logs a warning on any `action` divergence.
+6. **Synthesis Node**: The final agent that takes the approved, heavily vetted technical diagnosis and translates it into a human-readable JSON `Casebook`. It holds the `queue_for_replay` tool. In shadow mode, it also compares its output to the runbook's pre-built resolution and logs a warning on any `action` divergence. When `REJECTION_SYNTHESIS_DOC_GUIDANCE=true` **and** the stored document both hit and carries `resolution_guidance`, the prompt gains a `### Resolution guidance from the reason code documentation` section holding those `- action: X | resident_action: Y | when: Z` lines; the validator has already checked the values against `ACTIONS` and `RESIDENT_ACTIONS`, so the model is never offered an action the contract would then reject. It has its own switch, **off by default**, so its effect on the chosen action can be measured apart from everything else the documentation changes. The repair prompt is untouched.
 7. **Log Processor**: After the graph completes, `routes.py` structures the final casebook's `packet_status.rejection_data.rejection_logs` field into an object containing `path` and `gaps`. `path` records the **relative** name of the artifact that already holds the trace, so the evidence travels with the casebook and resolves identically on local disk and on S3. That name comes from the graph's `logs_artifact` state field: `fetch_logs_node` sets it to `"fetched_logs.txt"` and `filter_logs_node` overwrites it with `"filtered_logs.txt"` once that artifact is successfully written (on a failed write the pointer stays on `fetched_logs.txt`, which exists and holds a superset, rather than naming a key nothing wrote). A checkpoint resumed from state serialised before the field existed falls back to `"fetched_logs.txt"`. There is no size threshold and no truncation: whatever was fetched is persisted whole. When no logs were obtained (or `ENABLE_LOG_FETCHING=false`), `path` is the literal string `"No logs found"` and `gaps` is `null`.
 
    > **Nothing is written here.** This step used to `save_artifact(event_id, "supported_logs.txt", ...)` from the final graph state. That state is only ever the content of `fetched_logs.txt`, or of `filtered_logs.txt` when the LogFilter replaced it, so the write produced a byte-for-byte duplicate of an object already in the store -- and nothing ever read the duplicate back. `reduce_logs` had the same shape: it wrote `reduced_logs.txt` and then returned the identical string, which both production callers persist themselves as `fetched_logs.txt` (`fetch_and_persist_logs` in the rejection lane, `dlt_routes` in the DLT lane). Both writes are gone. A rejected packet's S3 prefix therefore holds `fetched_logs.txt` as the single canonical reduced trace, `raw_logs.txt` as the pre-noise-floor audit copy, and `filtered_logs.txt` only when `ENABLE_LOG_FILTER_AGENT=true` -- five log objects down to three. `reduced_logs.txt` is deliberately still listed in `prune_casesheets.LOG_ARTEFACTS` so cases written before this change are still cleaned up. The field was always a locator rather than the text, so no reader changes. The `gaps` field carries the evidence-gap banner lifted out of the raw trace (matched on `BANNER_HEADER`/`BANNER_FOOTER` from `k8s/gaps.py`) so operators retain the incompleteness warning without inline clutter.
@@ -1125,7 +1242,7 @@ The architecture incorporates several resilience mechanisms to prevent runaway c
 - **Safe Self-Learning & Drift Checks**: The Reviewer's `add_learning_rule` tool stages suggestions to `src/prompts/pending_rules.jsonl` using `filelock`. A human runs `src/tools/promote_rules.py` (which includes top-level locking and git-status safety checks) to approve and Git-commit the rules; only promoted entries are removed from the pending file, so skipped/errored/concurrently-appended entries survive. Additionally, `src/tools/check_drift.py` detects database schema/policy drift, and distinguishes a genuinely changed schema from a malformed single-column CSV export.
 - **External Call Resilience**: `tenacity` handles exponential backoff retries, and `pybreaker` provides circuit breakers for database, Elasticsearch, LLM, Kubernetes, and Bitbucket calls (`db_breaker`, `es_breaker`, `llm_breaker`, `k8s_breaker`, `bitbucket_breaker` -- all `fail_max=3`, `reset_timeout=60`). Every one is sampled onto the `breaker_state` gauge at scrape time rather than on transition, so a breaker that reset on a timeout doesn't leave a stale "open" reading behind. The two newest are read-only paths whose failure must only ever *degrade* a result: a tripped `k8s_breaker` makes the running image version unknown, and a tripped `bitbucket_breaker` makes a replay-precheck verdict `UNKNOWN` -- neither raises into the analysis lane.
 - **Storage Abstraction & Schema Versioning**: The `CasebookStorage` interface implements retried atomic `.tmp` writes (to safely handle concurrent readers/AV scanners holding the file on Windows) and enforces a `"schema_version"` field on every saved casebook for backwards compatibility.
-- **Structured Logging & Health Checks**: `agent_orchestrator.py`, `tool_registry.py`, `kafkaConsumer.py`, `dlq_publisher.py`, `analysis_queue_publisher.py`, `s3_uploader.py` and the entire `log_pipeline/` package log through the same `structlog` logger as `routes.py` (bound to `event_id` where available) rather than bare `print()`. Verbosity is set by `LOG_LEVEL`. The operator CLIs still print to stdout deliberately -- they are interactive tools, not services. The FastAPI server provides `/health` and `/ready`. `/health` reports this process's own `status`/`draining`/`in_flight`/`capacity`, plus a heartbeat block for each of the four consumer roles (`fast_consumer`, `slow_consumer`, `dlt_consumer`, `dlt_analysis_consumer`) and a top-level `last_heartbeat`/`consumer_alive` alias for the fast consumer that predates the split. A heartbeat file that is absent reads as `null`, not `false` -- "unknown", not "dead" -- because a split-pod deployment has no local heartbeat file for any consumer, and the DLT roles are off by default; each consumer answers its own liveness on `CONSUMER_HEALTH_PORT` / `SLOW_CONSUMER_HEALTH_PORT` / `DLT_HEALTH_PORT` / `DLT_ANALYSIS_HEALTH_PORT` instead. `/ready` verifies checkpoint store connectivity and Kafka producer reachability (cached for `PRODUCER_HEALTH_TTL_SECONDS`, default 30s). When `USE_OPENCODE_HARNESS=true`, `/ready` additionally waits for the DROA corpus download (`docs_loader.corpus_available()`) and the opencode server (`opencode_runner.server_ready()`), returning 503 with "Downloading documentation corpus" or "Starting opencode server" respectively until both are ready -- so consumers do not forward packets before the harness can serve them. `validate_config()` provides fail-fast configuration validation at boot.
+- **Structured Logging & Health Checks**: `agent_orchestrator.py`, `tool_registry.py`, `kafkaConsumer.py`, `dlq_publisher.py`, `analysis_queue_publisher.py`, `s3_uploader.py` and the entire `log_pipeline/` package log through the same `structlog` logger as `routes.py` (bound to `event_id` where available) rather than bare `print()`. Verbosity is set by `LOG_LEVEL`. The operator CLIs still print to stdout deliberately -- they are interactive tools, not services. The FastAPI server provides `/health` and `/ready`. `/health` reports this process's own `status`/`draining`/`in_flight`/`capacity`, plus a heartbeat block for each of the four consumer roles (`fast_consumer`, `slow_consumer`, `dlt_consumer`, `dlt_analysis_consumer`) and a top-level `last_heartbeat`/`consumer_alive` alias for the fast consumer that predates the split. A heartbeat file that is absent reads as `null`, not `false` -- "unknown", not "dead" -- because a split-pod deployment has no local heartbeat file for any consumer, and the DLT roles are off by default; each consumer answers its own liveness on `CONSUMER_HEALTH_PORT` / `SLOW_CONSUMER_HEALTH_PORT` / `DLT_HEALTH_PORT` / `DLT_ANALYSIS_HEALTH_PORT` instead. `/ready` verifies checkpoint store connectivity and Kafka producer reachability (cached for `PRODUCER_HEALTH_TTL_SECONDS`, default 30s). When any lane uses the harness, `/ready` additionally waits for the DROA corpus download (`docs_loader.corpus_available()`) and the opencode server (`opencode_runner.server_ready()`), returning 503 with "Downloading documentation corpus" or "Starting opencode server" respectively until both are ready -- so consumers do not forward packets before the harness can serve them. `validate_config()` provides fail-fast configuration validation at boot.
 - **Agent Caching**: Investigator, Synthesis, and Reviewer React agents are all created once at graph construction time and reused across invocations, avoiding per-packet (and, for the Reviewer, per-retry) LLM handshake overhead.
 - **Local Casebook Cleanup**: Every `save_terminal()` call site -- success, timeout, DLQ, shutdown straggler, consumer-side timeout, and both DLT lanes -- is followed by `cleanup_casebook_dir()`, which removes the local `casebook_{id}/` working directory. Under `CASEBOOK_STORAGE_BACKEND=s3` this is safe: the terminal casebook is already in S3, and the dedupe check (`storage.exists(..., terminal_only=True)`) reads it from there, not from local disk. **Under the default `local` backend it is not safe, and this is an open defect.** `LocalFilesystemCasebookStorage` writes `casebook.json` and `status.json` into `LOCAL_CASESHEETS_DIR/casebook_{id}/` -- the same directory the cleanup deletes -- so a completed casebook is removed as soon as it is written, and the dedupe check that reads it back finds nothing. Anything that reads casebooks afterwards (`accuracy_report`, `dlt_report`, the outcome CLIs) sees an empty store on a local deployment. A background reaper daemon (started in `main_api.py` lifespan) scans `LOCAL_CASESHEETS_DIR` every `CASEBOOK_REAPER_INTERVAL_SECONDS` (default 300s) and removes directories whose mtime is older than `CASEBOOK_LOCAL_TTL_SECONDS` (default 3600s), catching those left by crashes, OOM kills, or any path where the immediate cleanup did not run. It matches **only entries named `casebook_*`**, which is load-bearing rather than incidental: `dlt_cases/`, `dlt_groups/`, `dlt_parked_replays/` and `pending_replays/` sit in the same directory under a local storage backend and are durable state -- a parked replay legitimately waits weeks for a deploy (section 4.4.1), and an unscoped TTL sweep would delete it. Neither layer ever raises: a cleanup failure must not turn a successful case into a failed one. `src/utils/case_cleanup.py`.
 - **Non-Blocking Request Handling**: `/process-rejection` and `/analyze-rejection` are both `async def`; `agent.invoke()` runs on a dedicated `ThreadPoolExecutor` sized to `MAX_CONCURRENT_INVESTIGATIONS`, separate from Starlette's own sync-dispatch threadpool. A multi-minute investigation therefore can't starve `/health`, `/ready`, `/fetch-logs`, or the sync auth/rate-limit dependencies of a worker slot. `/fetch-logs` is deliberately plain `def`, not `async def` -- its bounded I/O runs on Starlette's own threadpool, the same one `/health`/`/ready` use, since it never needs the dedicated executor a multi-minute LLM call does.
@@ -1137,7 +1254,7 @@ The intelligence of the system relies on a multi-agent hierarchy. Both the Inves
 - **Dynamic Context Injection**: The Python orchestrator dynamically intercepts and filters database rules (e.g., checking the `enrolmentType` from the payload) before injecting the exact correct rule into the agent's prompt to avoid LLM hallucinations.
 - **RejectionManager (not an LLM)**: The conductor is the compiled `StateGraph` itself, not an agent. Routing is plain Python, so the sequence of steps cannot be altered by a model.
 - **LogFilterAgent**: (Optional). Because logs are fetched from Kubernetes using a sliding window (e.g., 5 lines before, 20 lines after a match), the resulting block often contains log lines and errors from highly concurrent, unrelated packets. If `ENABLE_LOG_FILTER_AGENT=true`, this agent reads the block and cleanly deletes any errors belonging to other `eventId`s or `refId`s before the investigation begins, writing its output to a `filtered_logs.txt` artifact for local debugging before uploading to S3.
-- **InvestigatorAgent**: The detective. It correlates error codes (`reasonCode`) with the internal business rule (`ruleId`) that the orchestrator pre-fetched for it, cross-references the reduced Elasticsearch trace, and determines the technical failure. It holds no tools of its own. It is explicitly hardened against "Context Confusion," meaning it is strictly instructed to verify the `eventId` of any ERROR log before trusting it, preventing cross-packet hallucinations when the LogFilterAgent is disabled. When the opencode harness is enabled (`USE_OPENCODE_HARNESS=true`), this agent instead runs as an opencode task with full Glob/Grep/Read/Write access to the DROA service documentation corpus in `docs_cache/`, enabling it to cross-reference log evidence against the actual microservice architecture, module-level docs, and Kafka dataflow chains (section 3.2.1).
+- **InvestigatorAgent**: The detective. It correlates error codes (`reasonCode`) with the internal business rule (`ruleId`) that the orchestrator pre-fetched for it, cross-references the reduced Elasticsearch trace, and determines the technical failure. It holds no tools of its own. It is explicitly hardened against "Context Confusion," meaning it is strictly instructed to verify the `eventId` of any ERROR log before trusting it, preventing cross-packet hallucinations when the LogFilterAgent is disabled. When the rejection lane is on the harness (`USE_OPENCODE_HARNESS_REJECTION=true`), this agent instead runs as an opencode task with full Glob/Grep/Read/Write access to the DROA service documentation corpus in `docs_cache/`, enabling it to cross-reference log evidence against the actual microservice architecture, module-level docs, and Kafka dataflow chains (section 3.2.1).
 - **ReviewerAgent**: The auditor. It checks the Investigator's homework to eliminate hallucinations. When the opencode harness is enabled, it independently verifies the Investigator's claims against the same documentation corpus and the case evidence files (`supported_logs.txt`, `context.json`), rather than relying solely on the text passed to it in the prompt.
 - **SynthesisAgent**: The resolution writer. Once the investigation is validated, this agent synthesizes the findings into plain English, categorizes the remediation steps into strict enums (e.g., `NEW_PACKET`, `REPLAY`), and generates the analytical JSON block.
 
@@ -1176,7 +1293,7 @@ Outputs are stored in `local_casesheets/casebook_<event_id>/`. This directory co
 - `outcome.json`: The operator's ground-truth verdict, written long after the packet is terminal (section 4.1). Exempt from pruning (`prune_casesheets.PRESERVED_ON_PRUNE`).
 
 > **Three log objects, not five.** `reduced_logs.txt` and `supported_logs.txt` are no longer written. Each was a byte-for-byte duplicate of `fetched_logs.txt` that nothing read back: `reduce_logs` saved the reduced text and then *returned* the same string, which its callers persist as `fetched_logs.txt`, and the terminal casebook step saved the final graph state, which is that same text (or `filtered_logs.txt`'s, when the LogFilter replaced it). `rejection_logs.path` was always a locator rather than the text, so it now simply names the artifact that already exists -- see section 3.7 step 7. `reduced_logs.txt` remains in `prune_casesheets.LOG_ARTEFACTS` so cases written before the change are still cleaned up.
-- Harness working files when `USE_OPENCODE_HARNESS=true`: `context.json`, `investigation.json`, `investigation_text.txt`, `review.json` in the rejection lane; `dlt_evidence.txt`, `dlt_failure.json`, `dlt_investigation.json`, `dlt_investigation_text.txt`, `dlt_review.json` in the DLT lane.
+- Harness working files when a lane is on the harness: `context.json`, `investigation.json`, `investigation_text.txt`, `review.json` in the rejection lane; `dlt_evidence.txt`, `dlt_failure.json`, `dlt_investigation.json`, `dlt_investigation_text.txt`, `dlt_review.json` in the DLT lane.
 - `*.lock` / `*.tmp`: `filelock` and atomic-write scratch files.
 
 > **The harness writes to local disk directly, not through `CasebookStorage`.**
@@ -1253,6 +1370,9 @@ To ensure zero hallucinations, `routes.py` deterministically extracts static met
 - **packet_status** (`status`, `service`, `sub_service`, `last_updated`, `is_in_process`, `rejection_data`)
 - **resolution** (`source`, `synthesis`, `action`, `resident_action`, `confidence`, `abstained` -- `source` is `"agent"` for LLM-generated or `"runbook:<id>@v<version>"` for runbook-served results)
   - `resolution.provenance.prompt_fingerprint`: the SHA256 over every agent system prompt, **every harness template in `src/prompts/harness/` and the `rules/` files they inline**, `agent_policy_context.md`, and the root `AGENTS.md` (`compute_prompt_fingerprint`). This is what lets an accuracy movement be attributed to a prompt change rather than merely correlated with one.
+  - `resolution.provenance.reason_code_doc`: which documentation this packet was reasoned from -- the outcome, the requested and matched enrolment types, the source refs, and the SHA256 of the exact rendered text the model was shown. The text itself is **never** written to a casebook or a log line: it is large, identical for every packet with this reason code, and the digest already identifies the version. It is recorded per packet rather than folded into `prompt_fingerprint` so that a document edit and a prompt edit stay distinguishable. `null` for a packet a runbook answered, which never reaches the Investigator.
+  - `resolution.provenance.investigator_path` / `reviewer_path`: `harness`, `direct`, or `null`. A harness task that fails falls back to the direct LLM silently, so without these a comparison of the two paths would be scoring runs that were not on the path they claim.
+  - `outcome.json` denormalises `reason_code_doc_outcome`, `reason_code_doc_sha256` and `investigator_path` beside `prompt_fingerprint`, for the same reason the other fields are denormalised there: accuracy has to be groupable without re-reading every casebook.
   - `resolution.shadow`: present only in `RUNBOOK_MODE=shadow`, carrying what the runbook would have decided.
   - On a contract breach the status is `FAILED_SYNTHESIS_PARSE` and `resolution` additionally carries `parse_error` and a 2000-char `raw_output`, with `action` set explicitly to `MANUAL_REVIEW` rather than left null.
 - **resolution_outcome** (optional; written by `POST /outcome/{event_id}`, not by the pipeline) -- the operator's ground-truth verdict (`CORRECT`/`INCORRECT`/`PARTIAL`), which is what `accuracy_report` scores against.
@@ -1390,7 +1510,7 @@ as a completed fetch, never re-attempted.
 **Local development:** `start.py` spawns all three processes (API,
 `fast_consumer.py`, `slow_consumer.py`); no special per-child environment is
 needed since each consumer sets its own `CONSUMER_ROLE`. When
-`USE_OPENCODE_HARNESS=true`, `start.py` waits for the `/ready` endpoint to
+any lane uses the harness, `start.py` waits for the `/ready` endpoint to
 return 200 (or a non-corpus/non-opencode 503) before starting consumers, so
 the corpus download and opencode server boot complete first. See section 4.
 
@@ -1449,7 +1569,7 @@ versa. Section 4.4 covers what actually runs in each.
    `src/dlt_analysis_consumer.py` (DLT queue -> `/analyze-dlt`). See section
    3.11 for the fetch/analyze split and section 4.4 for the DLT lane.*
 
-   *When `USE_OPENCODE_HARNESS=true`, the startup sequence is: API binds ->
+   *When any lane uses the harness, the startup sequence is: API binds ->
    background thread downloads the DROA corpus from S3 to `docs_cache/` and
    starts `opencode serve` -> `/ready` returns 503 with "Downloading
    documentation corpus" then "Starting opencode server" -> once both are
@@ -1565,7 +1685,7 @@ It shares this system's log pipeline, storage abstraction, consumer
 scaffolding and confidence policy. It shares neither `MessagePayload`, the
 rejection casebook schema, `rules.csv`, nor the runbook key space. The DLT
 Investigator and Reviewer nodes also support the opencode harness
-(`USE_OPENCODE_HARNESS=true`, section 3.2.1) -- same harness prompt templates
+(`USE_OPENCODE_HARNESS_DLT=true`, section 3.2.1) -- same harness prompt templates
 in `src/prompts/harness/` (`DltInvestigator.md`, `DltReviewer.md`), same
 `docs_cache/` corpus access, same fallback to direct LLM.
 
@@ -1930,6 +2050,52 @@ first means group state is not accumulating.
 
 This section records where the running code diverges from the design intent above.
 It is maintained deliberately so the document stays a truthful source of truth.
+
+**Update 2026-09-24:** The rejection lane can now run without opencode
+(`REASON_CODE_DOCS_PLAN.md`, Phases 1-8). Five changes:
+
+1. **The harness switch is per lane** (section 3.2.1).
+   `USE_OPENCODE_HARNESS_REJECTION` and `USE_OPENCODE_HARNESS_DLT`, each
+   inheriting the older `USE_OPENCODE_HARNESS` when unset, so existing
+   deployments are unaffected. `is_enabled()` now answers "does any lane need
+   the server?" and `lane_enabled(<lane>)` answers "does this node take the
+   harness path?". `entrypoint.sh` resolves the same three variables in a
+   marked block that a test executes and compares against Python.
+2. **A reason-code document store** (section 3.2.2), one JSON file per service
+   under `src/reason_code_docs/services/`. `enu-biometric.json` is the first:
+   98 codes and 58 CRE policy rules. A lookup in Python selects the material
+   for a packet's reason code and enrolment type; it never raises, and every
+   outcome is counted.
+3. **The direct prompts are built in one place** (`core/rejection_context.py`),
+   in a fixed order and under `REJECTION_PROMPT_MAX_CHARS`, which trims the
+   logs and nothing else.
+4. **The direct Reviewer sees the evidence**, on by default
+   (`REJECTION_REVIEWER_EVIDENCE`). It previously received the investigation
+   text alone while its own prompt asked it to check that text against the
+   payload and the gaps banner -- so its most common rejection was one it had
+   no way to verify.
+5. **Provenance records which document and which path**, per packet, with the
+   document's SHA256 and never its text.
+
+Deviations from the plan as written, all forced by the documents being
+generated per service rather than authored per code:
+
+| Plan | Implemented | Why |
+|---|---|---|
+| D2/D3: markdown documents under `docs/` plus a hand-written `index.json` | per-service JSON files under `services/`, no index | The service files are keyed by reason code already, so the mapping is intrinsic; a separate index would be a second source of truth to keep in step. |
+| D4/D5: one index entry per (code, type), chosen whole | entries are collected per code and filtered by type, with type-agnostic material always included | A CRE rule that names no enrolment type fires for every type, so excluding it from a typed document would withhold a rule that did fire. |
+| 5.2 error 2: a reason-code key failing `REASON_CODE_PATTERN` is an error | it is a **warning**, and the entry is skipped | `(CRE_REJECT_APPLICANT)` is real generated data -- 17 rules whose reject reason code the generator could not resolve. It can never match a payload value, and failing the boot check over it would mean the file could never ship. |
+| 5.5: hand-written `Evidence to look for in logs`, `Without logs` and `Resolution guidance` sections | omitted; `resolution_guidance` is an optional structured field a maintainer adds | The generated files carry no such material, and writing those sections from nothing would be invention. `InvestigatorAgent.md` is worded for a documentation section that may not have them. |
+
+Not implemented, and deliberately so: Phase 9 (evaluation and rollout) is the
+owner's. Its precondition was re-verified while doing this work and still
+holds: under `CASEBOOK_STORAGE_BACKEND=local`,
+`LocalFilesystemCasebookStorage` writes into `LOCAL_CASESHEETS_DIR/casebook_{id}/`
+and `cleanup_casebook_dir()` deletes exactly that directory, so a finished
+casebook is removed as it is saved (already recorded as an open defect under
+**Local Casebook Cleanup** in section 3.4). A comparison run that reads its
+results back from casebooks therefore needs either that fix or an S3 backend.
+Nothing in this change touches it.
 
 **Update 2026-09-18:** Document audited against the code at `192ca2f`. No
 code changed; the corrections below are all places this document had drifted.

@@ -8,12 +8,26 @@
 # that gap: it reads the env vars and writes the config file before start.py
 # runs.
 #
-# Only runs when USE_OPENCODE_HARNESS=true. Otherwise start.py is called
-# directly — no config file, no opencode server, no overhead.
+# Only runs when some lane uses the harness. The lanes are
+# USE_OPENCODE_HARNESS_REJECTION and USE_OPENCODE_HARNESS_DLT, each falling
+# back to the older single switch USE_OPENCODE_HARNESS when its own value is
+# empty -- exactly what opencode_runner.lane_enabled() does, and
+# tests/test_opencode_harness.py runs the block below and compares the two.
+# With no lane on, start.py is called directly — no config file, no opencode
+# server, no overhead.
 
 set -e
 
-if [ "${USE_OPENCODE_HARNESS}" = "true" ]; then
+# BEGIN harness-lanes
+norm() { printf '%s' "$1" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]'; }
+HARNESS_LEGACY="$(norm "${USE_OPENCODE_HARNESS:-}")"
+HARNESS_REJECTION="$(norm "${USE_OPENCODE_HARNESS_REJECTION:-}")"
+HARNESS_DLT="$(norm "${USE_OPENCODE_HARNESS_DLT:-}")"
+[ -n "$HARNESS_REJECTION" ] || HARNESS_REJECTION="$HARNESS_LEGACY"
+[ -n "$HARNESS_DLT" ] || HARNESS_DLT="$HARNESS_LEGACY"
+# END harness-lanes
+
+if [ "$HARNESS_REJECTION" = "true" ] || [ "$HARNESS_DLT" = "true" ]; then
     CONFIG_DIR="${HOME}/.config/opencode"
     mkdir -p "$CONFIG_DIR"
 

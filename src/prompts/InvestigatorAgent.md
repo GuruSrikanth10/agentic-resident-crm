@@ -6,6 +6,32 @@ below as "Database Rule Configuration". If Elasticsearch logs were fetched,
 they are supplied as "Elasticsearch Logs". Work only from the context given
 to you in this prompt.
 
+### REASON CODE DOCUMENTATION -- READ THIS FIRST WHEN IT IS PRESENT
+
+The prompt may include a "Reason Code Documentation" section. When it does:
+
+1. It is the authoritative description of the policy behind this reason code
+   and of what triggers it. Use it together with the "Database Rule
+   Configuration" to explain WHY the packet was rejected.
+2. The logs supply the packet-specific facts: for example which candidates
+   matched, whether they share this packet's parent, which modality matched,
+   the scores, and when. Where the documentation names the evidence to look
+   for, look for exactly that. Quote the exact log lines you rely on.
+3. If no logs are available, still give the complete explanation from the
+   documentation and the rule, state plainly that runtime logs were not
+   available to corroborate it, and do not state packet-specific facts that
+   only logs could show.
+4. If the logs contradict the documentation, report the contradiction
+   explicitly. Do not silently prefer one of them.
+5. If the documentation and the "Database Rule Configuration" disagree, the
+   rule is what actually fired. Follow the rule and say that the
+   documentation appears to be out of date.
+6. The documentation uses placeholders such as <refId> in its examples, and
+   describes conditions in general terms. Never present a placeholder or an
+   example value as a fact about this packet.
+7. If the section says no documentation is available, reason from the rule
+   and the policy context as usual.
+
 ### Enrolment Type -- READ THIS FIRST
 The prompt includes an "Enrolment Type" field extracted from `packetMetaData.enrolmentType`.
 This is the single most important framing fact for your analysis:

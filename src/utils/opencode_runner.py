@@ -9,8 +9,10 @@ shared across all concurrent packets. Each task is a fresh `opencode run
 The contract: "run this prompt against this directory; the agent writes
 its output to a file on disk; the runner reads it back."
 
-Feature-flagged via USE_OPENCODE_HARNESS. When false, all nodes use the
-existing direct ChatOpenAI path.
+Feature-flagged per lane: USE_OPENCODE_HARNESS_REJECTION and
+USE_OPENCODE_HARNESS_DLT, each falling back to the single older switch
+USE_OPENCODE_HARNESS when its own value is unset. A lane whose switch is off
+uses the existing direct ChatOpenAI path.
 """
 import contextlib
 import json
@@ -31,6 +33,16 @@ _ANSI = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
 ENV_BINARY = "OPENCODE_BINARY"
 ENV_MODEL = "OPENCODE_MODEL"
 ENV_DISABLE = "USE_OPENCODE_HARNESS"
+
+#: The per-lane switches. Each lane can run on the harness independently, so
+#: the rejection lane can move to the direct path with reason-code
+#: documentation while the DLT lane stays on opencode. A lane with no value of
+#: its own inherits ENV_DISABLE, so a deployment that sets only the old switch
+#: behaves exactly as it did before.
+ENV_LANES = {
+    "rejection": "USE_OPENCODE_HARNESS_REJECTION",
+    "dlt": "USE_OPENCODE_HARNESS_DLT",
+}
 
 #: The model every task requests when OPENCODE_MODEL is unset.
 #:
@@ -56,8 +68,46 @@ class OpencodeUnavailable(Exception):
     """Raised when the harness cannot run."""
 
 
+def _switched_on(raw: Optional[str]) -> bool:
+    """One reading of a harness switch, shared with entrypoint.sh.
+
+    Surrounding whitespace is stripped before the comparison. The shell side
+    (the `harness-lanes` block in entrypoint.sh) normalises the same way, and
+    tests/test_opencode_harness.py runs that block and compares it with this
+    function -- a value that turns the Python side on and leaves the shell
+    side off writes no provider config and fails every task.
+    """
+    return str(raw or "").strip().lower() == "true"
+
+
+def lane_enabled(lane: str) -> bool:
+    """Whether `lane` ("rejection" or "dlt") runs on the opencode harness.
+
+    The lane's own switch wins whenever it holds a non-empty value; otherwise
+    the lane inherits ENV_DISABLE, which is unset by default and therefore off.
+    """
+    try:
+        variable = ENV_LANES[lane]
+    except KeyError:
+        raise ValueError(
+            f"Unknown harness lane {lane!r}; expected one of {sorted(ENV_LANES)}."
+        ) from None
+
+    own = os.environ.get(variable, "")
+    if own.strip():
+        return _switched_on(own)
+    return _switched_on(os.environ.get(ENV_DISABLE))
+
+
 def is_enabled() -> bool:
-    return os.environ.get(ENV_DISABLE, "false").lower() == "true"
+    """True when ANY lane uses the harness, i.e. the server is needed.
+
+    This is the condition for downloading the corpus, starting
+    `opencode serve`, gating /ready on both, and writing the provider config.
+    It is NOT the condition for a given node taking the harness path -- that
+    is `lane_enabled(<lane>)`.
+    """
+    return any(lane_enabled(lane) for lane in ENV_LANES)
 
 
 def _binary() -> Optional[str]:
@@ -332,7 +382,10 @@ def run_task(prompt: str, output_path: str,
     Raises OpencodeUnavailable on failure.
     """
     if not is_enabled():
-        raise OpencodeUnavailable(f"{ENV_DISABLE} is not set to true.")
+        raise OpencodeUnavailable(
+            "no lane uses the opencode harness: set "
+            + " or ".join(sorted(ENV_LANES.values()))
+            + f" (or {ENV_DISABLE}) to true.")
 
     binary = _binary()
     if not binary:

@@ -91,6 +91,25 @@ ISOLATED_ENV_VARS = (
     "DLT_REUSE_ENABLED",
     "DLT_REGISTRY_PATH",
     "LOG_SNAPSHOT_REUSE",
+    # The opencode harness, per lane. A lane switch left over in the parent
+    # shell would silently route a node through a harness the test never
+    # intended, or hide the fallback to the older single switch.
+    "USE_OPENCODE_HARNESS",
+    "USE_OPENCODE_HARNESS_REJECTION",
+    "USE_OPENCODE_HARNESS_DLT",
+    # Reason-code documentation. The switch selects a branch, and the two
+    # paths select which store is read -- a stray value in either would make
+    # the Investigator's prompt depend on the developer's machine.
+    "REJECTION_REASON_CODE_DOCS_ENABLED",
+    "REASON_CODE_DOCS_DIR",
+    "REASON_CODE_DOCS_S3_PREFIX",
+    # A cap rather than a tunable: below a document's length it switches
+    # truncation on, so a stray value changes which branch runs.
+    "REASON_CODE_DOC_MAX_CHARS",
+    # Likewise a cap: below the logs' length it switches trimming on.
+    "REJECTION_PROMPT_MAX_CHARS",
+    "REJECTION_REVIEWER_EVIDENCE",
+    "REJECTION_SYNTHESIS_DOC_GUIDANCE",
     # LLM provider selection.
     "USE_HF",
     "MOCK_LLM_WITH_MISTRAL",

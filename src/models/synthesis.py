@@ -181,6 +181,30 @@ def logs_silent_ceiling() -> float:
     return _ceiling_env("SYNTHESIS_LOGS_SILENT_CEILING", DEFAULT_LOGS_SILENT_CEILING)
 
 
+def classify_logs(logs: Optional[str]) -> str:
+    """What the log slot in graph state actually holds.
+
+    Three states, and the difference between the last two matters:
+
+      unavailable  we never looked -- fetching disabled, or the fetch failed.
+      silent       we looked and the log source had nothing for this packet.
+      present      there is a trace, gaps banner or not.
+
+    Public because the confidence policy is no longer the only reader: the
+    rejection prompt builder needs the same three-way split, to tell the model
+    that no logs are available rather than sending it an empty section or the
+    bare sentinel `Log fetching disabled.` and hoping it infers the rest.
+    Keeping one classifier means the prompt and the confidence ceiling can
+    never disagree about what the evidence was.
+    """
+    text = (logs or "").strip()
+    if not text or text == _LOGS_DISABLED:
+        return "unavailable"
+    if _NO_LOGS_FOUND in text:
+        return "silent"
+    return "present"
+
+
 def _confidence_ceilings(logs: Optional[str]) -> list:
     """Every (ceiling, why) that the evidence behind a resolution imposes."""
     from src.log_pipeline.sources.k8s.gaps import BANNER_HEADER
@@ -190,10 +214,11 @@ def _confidence_ceilings(logs: Optional[str]) -> list:
     if BANNER_HEADER in text:
         ceilings.append((gap_confidence_ceiling(),
                          "the trace carries evidence gaps"))
-    if not text or text == _LOGS_DISABLED:
+    kind = classify_logs(logs)
+    if kind == "unavailable":
         ceilings.append((logs_unavailable_ceiling(),
                          "no logs were fetched, so nothing corroborated the rule"))
-    elif _NO_LOGS_FOUND in text:
+    elif kind == "silent":
         ceilings.append((logs_silent_ceiling(),
                          "the log source had no lines for this packet, so "
                          "nothing corroborated the rule"))

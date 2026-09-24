@@ -31,7 +31,7 @@ To understand a rejection, you must first understand what a successful packet lo
 ---
 
 ## 2. How to Interpret Rejections
-When a packet fails, it triggers a `reject_reason_code` based on JSON rule conditions. Use the `lookup_rule_by_reason_code` tool to fetch the exact conditions that failed, and reverse-engineer the violation.
+When a packet fails, it triggers a `reject_reason_code` based on JSON rule conditions. The orchestrator supplies the exact conditions as the "Database Rule Configuration"; reverse-engineer the violation from them.
 
 **Common Deviations from Success:**
 - `isAllCandidatesAreTrueDuplicates: true` -> (For Enrolment) The applicant's biometrics perfectly matched an existing resident. They are a true duplicate.

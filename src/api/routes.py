@@ -506,7 +506,7 @@ def readiness_check():
     except Exception as e:
         logger.error("Readiness check failed on the checkpoint store", backend=backend, error=f"{type(e).__name__}: {e}")
 
-    # When the opencode harness is enabled, the API is not ready until the
+    # When ANY lane uses the opencode harness, the API is not ready until the
     # documentation corpus has been downloaded to disk. Without this, the
     # consumers start forwarding packets before the agent can read the docs.
     from src.utils.opencode_runner import is_enabled as harness_enabled
@@ -971,8 +971,21 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
 
     # Which prompts produced this. Lets an accuracy movement be attributed to
     # a prompt change instead of merely correlated with one (G23).
+    #
+    # The document is recorded per packet rather than folded into
+    # prompt_fingerprint, so a document edit and a prompt edit stay
+    # distinguishable (D14). `reason_code_docs.provenance` strips the text:
+    # it is large, identical for every packet with this reason code, and the
+    # sha256 already identifies the version the model was shown. The three
+    # are None for a packet a runbook answered, which never reaches the
+    # Investigator at all.
+    from src.utils import reason_code_docs
     casebook_data["resolution"]["provenance"] = {
         "prompt_fingerprint": prompt_fingerprint(),
+        "reason_code_doc": reason_code_docs.provenance(
+            result.get("reason_code_doc")),
+        "investigator_path": result.get("investigator_path"),
+        "reviewer_path": result.get("reviewer_path"),
     }
 
     # Guard against overwriting a terminal status another actor already

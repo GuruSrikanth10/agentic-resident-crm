@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "title": "Fixture service - reason codes",
+  "description": "A small valid store for the tests. Not a real service.",
+  "service": "fixture-service",
+  "total_codes": 2,
+  "codes": [
+    {
+      "numeric_code": 9001,
+      "reason_code": "FIXTURE_ANY_CODE",
+      "description": "A code entry applies to every enrolment type, so it is the ANY material for this reason code. Raised when the fixture service cannot reconcile the packet against its own records.",
+      "category": "Technical",
+      "is_retryable": true,
+      "resolution_guidance": [
+        {
+          "action": "REPLAY",
+          "resident_action": "PENDING",
+          "when": "the downstream service has recovered"
+        }
+      ]
+    },
+    {
+      "numeric_code": 9002,
+      "reason_code": "FIXTURE_TYPED_CODE",
+      "description": "A code entry that sits alongside typed rules, so an E packet and a U packet each get this plus their own rule.",
+      "category": "Business",
+      "is_retryable": false
+    }
+  ],
+  "rules": {
+    "description": "Fixture policy rules.",
+    "total_rules": 3,
+    "rules": [
+      {
+        "rule_id": "fx-enrolment",
+        "reject_reason_code": "FIXTURE_TYPED_CODE",
+        "module": "FIXTURE_BATCH_1",
+        "description": "Fixture rejection rule in FIXTURE_BATCH_1. This rule fires when the enrolment type is 'ENROLMENT' (New Enrolment); AND there is more than 0 unique candidate(s). The APPLICANT is REJECTED.",
+        "condition_description": "the enrolment type is 'ENROLMENT' (New Enrolment); AND there is more than 0 unique candidate(s)"
+      },
+      {
+        "rule_id": "fx-update",
+        "reject_reason_code": "FIXTURE_TYPED_CODE",
+        "module": "FIXTURE_BATCH_1",
+        "description": "Fixture rejection rule in FIXTURE_BATCH_1. This rule fires when the enrolment type is 'UPDATE' (Update); AND the applicant matched a different parent. The APPLICANT is REJECTED.",
+        "condition_description": "the enrolment type is 'UPDATE' (Update); AND the applicant matched a different parent"
+      },
+      {
+        "rule_id": "fx-untyped",
+        "reject_reason_code": "FIXTURE_RULES_ONLY_CODE",
+        "module": "FIXTURE_BATCH_2",
+        "description": "Fixture rejection rule in FIXTURE_BATCH_2. This rule fires when the applicant face photo failed the capture quality check. The APPLICANT is REJECTED.",
+        "condition_description": "the applicant face photo failed the capture quality check"
+      }
+    ]
+  }
+}

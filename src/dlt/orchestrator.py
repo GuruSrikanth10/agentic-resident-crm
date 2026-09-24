@@ -180,9 +180,9 @@ def _build_dlt_agent():
         feedback = state.get("reviewer_feedback", "")
         is_retry = bool(feedback) and not is_approved(feedback)
 
-        # Check if the opencode harness is enabled
-        from src.utils.opencode_runner import is_enabled as harness_enabled
-        use_harness = harness_enabled() and not is_retry
+        # Check if the DLT lane runs on the opencode harness (per lane).
+        from src.utils.opencode_runner import lane_enabled
+        use_harness = lane_enabled("dlt") and not is_retry
 
         if use_harness:
             from src.utils import opencode_runner, docs_loader
@@ -250,9 +250,9 @@ def _build_dlt_agent():
 
         investigation = state.get("investigation", "")
 
-        # Check if the opencode harness is enabled
-        from src.utils.opencode_runner import is_enabled as harness_enabled
-        use_harness = harness_enabled()
+        # Check if the DLT lane runs on the opencode harness (per lane).
+        from src.utils.opencode_runner import lane_enabled
+        use_harness = lane_enabled("dlt")
 
         if use_harness:
             from src.utils import opencode_runner

@@ -1,7 +1,12 @@
 # Rejection Lane Without opencode -- Reason-Code Documentation Plan
 
 - **Date:** 2026-09-22
-- **Status:** Proposed. Nothing in this plan is implemented yet.
+- **Status:** Phases 1-8 implemented on 2026-09-24. Phase 0 (baseline) was
+  run; Phase 9 (evaluation and rollout) is the owner's and is not started.
+  The documents turned out to be generated per service rather than authored
+  per reason code, so D2, D3, D5 and parts of 5.2 and 5.5 were implemented
+  differently; the deviations are listed in `ARCHITECTURE.md` section 5
+  under **Update 2026-09-24**, and section 3.2.2 describes what was built.
 - **Scope:** the rejection lane. The DLT lane keeps the opencode harness; the
   only DLT change is that its switch gets its own name (Phase 1).
 - **Audience:** the agent or engineer implementing this, one phase at a time.

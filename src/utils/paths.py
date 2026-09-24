@@ -45,6 +45,21 @@ LOCAL_CASESHEETS_DIR = Path(
 )
 
 
+# The reason-code documentation store: one JSON file per service under
+# `services/`, read by `utils/reason_code_docs.py`. Overridable so a
+# deployment can mount the files from elsewhere (a volume, or a directory
+# populated from S3) without a code change; the default ships inside the
+# image through the same `COPY src /app/src` as the rest of the package.
+# An empty value falls back rather than resolving to Path("."): `.env.example`
+# ships the key blank so operators see it exists, and Path("") is the working
+# directory, which would silently make the store depend on where the process
+# was started from.
+REASON_CODE_DOCS_DIR = Path(
+    os.environ.get("REASON_CODE_DOCS_DIR", "").strip()
+    or REPO_ROOT / "src" / "reason_code_docs"
+)
+
+
 def casebook_dir(event_id: str) -> Path:
     """Directory holding one event's casebook and log artifacts.
 

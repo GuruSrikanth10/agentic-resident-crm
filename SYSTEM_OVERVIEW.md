@@ -772,7 +772,9 @@ makes a disputed conclusion investigable.
 
 ## 7. The tool-using harness
 
-There are two ways an agent in this system can run, and they are switchable.
+There are two ways an agent in this system can run, and they are switchable
+**per lane**: the rejection lane and the DLT lane each have their own switch,
+so one can run direct while the other runs on the harness.
 
 **Direct.** The prompt carries everything: the evidence, the rule, the
 payload projection. The model answers in one turn. Cheap, fast, and entirely
@@ -813,6 +815,24 @@ Reviewers run on the harness too, and this is the more interesting half: the
 reviewing agent independently verifies the investigator's claims against the
 same corpus and the same evidence files, rather than judging the investigation
 on the strength of its own prose.
+
+**Direct with documentation.** The rejection lane has a third mode, and it is
+where that lane is heading. Exploring the corpus is expensive: several model
+round-trips per packet, and an answer whose quality depends on what the agent
+thought to search for. For a rejection the relevant material is narrow and
+knowable in advance -- a packet carries a reason code, and each service
+publishes what its reason codes mean and which policy rules raise them. So
+instead of an agent searching, a lookup in Python selects the documentation for
+that code and that enrolment type, and hands it to the investigator in one
+call. The reviewer is given the same text and the same evidence, so it can
+check the investigation rather than only read it.
+
+This trades the harness's open-endedness for speed, a bounded prompt, and an
+audit trail: each casebook records a hash of the exact documentation the model
+was shown, so a change in accuracy can be attributed to a document edit rather
+than merely coinciding with one. Where no documentation exists for a code, the
+investigator is told so plainly and reasons from the business rule as before --
+a gap in the library degrades one answer, never the packet.
 
 ---
 

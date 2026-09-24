@@ -653,3 +653,169 @@ def test_every_harness_call_site_labels_its_node():
             )
             found.add(node.value)
     assert found == expected
+
+
+# ---------------------------------------------------------------------------
+# One switch per lane, and the shell must reach the same answer.
+# ---------------------------------------------------------------------------
+#
+# The rejection lane moves off opencode (REASON_CODE_DOCS_PLAN.md) while the
+# DLT lane stays on it, so a single global switch can no longer express the
+# deployment. A lane's own switch wins when it holds a non-empty value;
+# otherwise the lane inherits the older single switch. Whitespace around a
+# value is now ignored on both sides of the language boundary -- it was not
+# before, and `USE_OPENCODE_HARNESS=" true "` turned nothing on anywhere.
+
+#: (legacy value, lane value, expected). `None` means the variable is unset.
+_LANE_CASES = (
+    (None, None, False),
+    (None, "", False),
+    (None, "true", True),
+    (None, "TRUE", True),
+    (None, " true ", True),
+    (None, "false", False),
+    ("true", None, True),
+    ("true", "", True),
+    ("true", "true", True),
+    ("true", "TRUE", True),
+    ("true", " true ", True),
+    ("true", "false", False),
+    ("false", None, False),
+    ("false", "", False),
+    ("false", "true", True),
+    ("false", "TRUE", True),
+    ("false", " true ", True),
+    ("false", "false", False),
+    (" TRUE ", None, True),
+)
+
+
+def _set_switches(monkeypatch, legacy, rejection, dlt):
+    for name, value in ((opencode_runner.ENV_DISABLE, legacy),
+                        (opencode_runner.ENV_LANES["rejection"], rejection),
+                        (opencode_runner.ENV_LANES["dlt"], dlt)):
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+
+
+@pytest.mark.parametrize("legacy,lane,expected", _LANE_CASES)
+@pytest.mark.parametrize("lane_name", sorted(opencode_runner.ENV_LANES))
+def test_a_lane_switch_wins_over_the_legacy_one(monkeypatch, lane_name,
+                                                legacy, lane, expected):
+    other = next(n for n in opencode_runner.ENV_LANES if n != lane_name)
+    values = {lane_name: lane, other: None}
+    _set_switches(monkeypatch, legacy, values["rejection"], values["dlt"])
+    assert opencode_runner.lane_enabled(lane_name) is expected
+
+
+def test_the_other_lane_is_unaffected(monkeypatch):
+    """The point of the split: one lane off while the other stays on."""
+    _set_switches(monkeypatch, None, "false", "true")
+    assert opencode_runner.lane_enabled("rejection") is False
+    assert opencode_runner.lane_enabled("dlt") is True
+
+
+@pytest.mark.parametrize("rejection,dlt,expected", [
+    (None, None, False),
+    ("false", "false", False),
+    ("true", "false", True),
+    ("false", "true", True),
+    ("true", "true", True),
+])
+def test_is_enabled_means_some_lane_needs_the_server(monkeypatch, rejection,
+                                                     dlt, expected):
+    _set_switches(monkeypatch, None, rejection, dlt)
+    assert opencode_runner.is_enabled() is expected
+
+
+def test_an_unknown_lane_is_a_programming_error():
+    with pytest.raises(ValueError):
+        opencode_runner.lane_enabled("other")
+
+
+def test_each_orchestrator_asks_only_about_its_own_lane():
+    """A node reading `is_enabled()` takes the harness path whenever the OTHER
+    lane is on opencode -- which is exactly the target production shape."""
+    expected = {
+        REPO_ROOT / "src" / "core" / "agent_orchestrator.py": "rejection",
+        REPO_ROOT / "src" / "dlt" / "orchestrator.py": "dlt",
+    }
+    for path, lane in expected.items():
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        lanes_asked, calls_is_enabled = set(), False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                if node.func.id == "lane_enabled":
+                    assert node.args and isinstance(node.args[0], ast.Constant), (
+                        f"{path.name}:{node.lineno} calls lane_enabled() "
+                        "without a literal lane name.")
+                    lanes_asked.add(node.args[0].value)
+                elif node.func.id in ("is_enabled", "harness_enabled"):
+                    calls_is_enabled = True
+            if isinstance(node, ast.ImportFrom) and node.module and \
+                    node.module.endswith("opencode_runner"):
+                for alias in node.names:
+                    assert alias.name != "is_enabled", (
+                        f"{path.name}:{node.lineno} imports is_enabled; a node "
+                        f"must ask lane_enabled({lane!r}) about its own lane.")
+        assert lanes_asked == {lane}, f"{path.name} asks about {lanes_asked}"
+        assert not calls_is_enabled, f"{path.name} still calls is_enabled()"
+
+
+# ---------------------------------------------------------------------------
+# entrypoint.sh resolves the lanes exactly as Python does.
+# ---------------------------------------------------------------------------
+
+def _harness_lanes_block() -> str:
+    text = ENTRYPOINT.read_text(encoding="utf-8")
+    match = re.search(r"# BEGIN harness-lanes\n(.*?)# END harness-lanes",
+                      text, flags=re.DOTALL)
+    assert match, "entrypoint.sh no longer marks the harness-lanes block"
+    return match.group(1)
+
+
+def test_entrypoint_is_syntactically_valid():
+    import shutil
+    import subprocess
+
+    bash = shutil.which("bash")
+    if not bash:
+        pytest.skip("bash is not available")
+    assert subprocess.run([bash, "-n", str(ENTRYPOINT)]).returncode == 0
+
+
+@pytest.mark.parametrize("legacy,lane,expected", _LANE_CASES)
+def test_the_shell_and_python_agree_on_every_switch_value(monkeypatch, legacy,
+                                                          lane, expected):
+    """The shell writes the provider config and Python asks for the model.
+    A value the two read differently means a config for a provider nothing
+    requests: every task fails and every node degrades to the direct LLM."""
+    import os
+    import shutil
+    import subprocess
+
+    bash = shutil.which("bash")
+    if not bash:
+        pytest.skip("bash is not available")
+
+    # The rejection lane carries the case; the DLT lane is left to inherit,
+    # so one run covers both a set and an unset lane switch.
+    _set_switches(monkeypatch, legacy, lane, None)
+    script = _harness_lanes_block() + '\necho "$HARNESS_REJECTION|$HARNESS_DLT"'
+    completed = subprocess.run([bash, "-c", script], capture_output=True,
+                               text=True, env=dict(os.environ))
+    assert completed.returncode == 0, completed.stderr
+    shell_rejection, shell_dlt = completed.stdout.strip().split("|")
+
+    assert (shell_rejection == "true") is expected
+    assert (shell_rejection == "true") is opencode_runner.lane_enabled("rejection")
+    assert (shell_dlt == "true") is opencode_runner.lane_enabled("dlt")
+
+
+def test_env_example_ships_both_lane_switches_off():
+    """A lane on without the binary leaves /ready waiting for a server that
+    never starts."""
+    for variable in opencode_runner.ENV_LANES.values():
+        assert _env_example_value(variable) == "false"

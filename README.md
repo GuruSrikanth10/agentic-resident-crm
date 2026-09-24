@@ -671,6 +671,10 @@ agentic-resident-crm/
 │   ├── test_dlt_bitbucket.py       # C4: source adapter against recorded responses, no network
 │   ├── test_dlt_code_check.py      # C5: the four verdicts and all three asymmetries
 │   ├── test_dlt_parked.py          # C7: parking, release, expiry, and the cap
+│   ├── test_reason_code_docs.py    # Reason-code store: lookup, rendering, validator, CLI
+│   ├── test_rejection_context.py   # The direct lane's prompt builders and the size limit
+│   ├── test_rejection_docs_pipeline.py # The graph with documentation on, and with it off
+│   ├── fixtures/reason_code_docs/  # A small valid store the pipeline tests look up in
 │   └── fixtures/dlt/                # Recorded DLT corpus fixtures (CSV + JSON)
 ├── src/
 │   ├── main_api.py                 # FastAPI entry point (uvicorn, port 8000)
@@ -683,6 +687,8 @@ agentic-resident-crm/
 │   │   └── dlt_routes.py           # DLT endpoints (/fetch-dlt-logs, /analyze-dlt)
 │   ├── core/
 │   │   ├── agent_orchestrator.py   # LangGraph StateGraph build + LLM provisioning
+│   │   ├── rejection_context.py    # The direct lane's three prompts, in a fixed order, under
+│   │   │                           #   REJECTION_PROMPT_MAX_CHARS (logs trimmed, nothing else)
 │   │   └── checkpointer.py         # Checkpointer backend: sqlite (default) or postgres
 │   ├── dlt/                        # Dead-letter topic analysis (parallel flow; see DLT_PLAN.md)
 │   │   ├── headers.py              # Spring DLT header contract, hex epoch decoding
@@ -720,6 +726,10 @@ agentic-resident-crm/
 │   │   ├── DltInvestigatorAgent.md # DLT investigator: trace vs logs, and what it may not invent
 │   │   ├── DltReviewerAgent.md     # DLT reviewer: approval rule
 │   │   └── DltSynthesisAgent.md    # DLT finding output contract
+│   ├── reason_code_docs/           # What the direct Investigator reasons from
+│   │   ├── README.md               # The file format, the lookup, and the validator's rules
+│   │   └── services/               # One JSON file per service, keyed by reason code
+│   │       └── enu-biometric.json  #   ENU biometric stage: 98 codes + 58 CRE policy rules
 │   ├── runbooks/
 │   │   ├── draft/                  # LLM-generated runbook drafts (pending human review)
 │   │   └── final/                  # Human-approved runbook templates (served online)
@@ -733,6 +743,7 @@ agentic-resident-crm/
 │   │   ├── approve_replays.py      # CLI: approve queued packet replays
 │   │   ├── promote_rules.py        # CLI: promote + git-commit learned rules
 │   │   ├── record_outcome.py       # CLI: attach a ground-truth verdict to a completed investigation
+│   │   ├── check_reason_code_docs.py # CLI: validate the reason-code document store (CI gate)
 │   │   ├── check_drift.py          # CLI: rules.csv schema drift detector
 │   │   ├── build_catalog.py        # CLI: Stage 0 offline template catalog builder
 │   │   ├── eval_harness.py         # CLI: Stage 6 evaluation harness for pipeline accuracy
@@ -777,6 +788,8 @@ agentic-resident-crm/
 │   └── utils/
 │       ├── env.py                  # Environment variable configuration
 │       ├── paths.py                # Centralized path constants (CHECKPOINT_DB_PATH, etc.)
+│       ├── reason_code_docs.py     # The reason-code store: lookup (never raises), rendering,
+│       │                           #   provenance, and the validator
 │       ├── config_validator.py     # Fail-fast boot-time configuration validation
 │       ├── logging_config.py       # structlog JSON logging setup
 │       ├── kafkaConsumer.py        # Background topic polling + bounded worker pool (CONSUMER_ROLE=fast|slow|dlt|dlt_analysis)

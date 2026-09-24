@@ -40,6 +40,16 @@ def outcome_path(event_id: str):
     return casebook_dir(event_id) / OUTCOME_FILENAME
 
 
+def _provenance_doc(resolution: dict) -> dict:
+    """The casebook's reason-code document record, or an empty dict.
+
+    Three levels can be absent at once: a casebook from before provenance
+    existed, one from before the documents existed, and a packet a runbook
+    answered, which never reached the Investigator.
+    """
+    return ((resolution.get("provenance") or {}).get("reason_code_doc")) or {}
+
+
 def record_outcome(event_id: str, verdict: str, verified_by: str,
                    notes: str = "", corrected_action: Optional[str] = None) -> dict:
     """Attach an operator verdict to a completed investigation.
@@ -94,6 +104,15 @@ def record_outcome(event_id: str, verdict: str, verified_by: str,
         "shadow_agreed": (resolution.get("shadow") or {}).get("agreed"),
         # Which prompts produced the verdict being judged (G23).
         "prompt_fingerprint": (resolution.get("provenance") or {}).get("prompt_fingerprint"),
+        # Which documentation, and which path. Denormalised beside the
+        # fingerprint for the same reason: accuracy has to be attributable to
+        # the thing that changed. `reason_code_doc_outcome` in particular
+        # separates the packets that were reasoned from a document from the
+        # ones that missed, which is the comparison that says whether the
+        # documents are worth writing.
+        "reason_code_doc_outcome": _provenance_doc(resolution).get("outcome"),
+        "reason_code_doc_sha256": _provenance_doc(resolution).get("sha256"),
+        "investigator_path": (resolution.get("provenance") or {}).get("investigator_path"),
     }
 
     # The storage layer already writes atomically under a lock (local) or via
