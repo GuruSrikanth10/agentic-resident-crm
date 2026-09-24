@@ -729,10 +729,27 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
             max_age = int(os.environ.get("MAX_IN_PROGRESS_AGE_SECONDS", 1800))
             is_stale = (time.time() - started_at) > max_age
 
-            if is_stale and not has_active_checkpoint:
-                pre_invoke_log.info("Stale IN_PROGRESS with no active checkpoint; reprocessing from scratch", max_age_seconds=max_age)
+            if is_stale:
+                # Take the packet over, whether or not a checkpoint survived
+                # the dead run. The invoke below is what decides how: with an
+                # active checkpoint it resumes from where that run stopped,
+                # and without one it starts fresh.
+                #
+                # Staleness used to be checked only alongside `not
+                # has_active_checkpoint`, so a run that died having
+                # checkpointed fell into the branch below and was reported as
+                # "already processing" forever. Nothing else would ever pick
+                # it up: the checkpoint that proved work had been done was the
+                # very thing that made the packet unrecoverable.
+                pre_invoke_log.info(
+                    "Stale IN_PROGRESS; taking the packet over",
+                    max_age_seconds=max_age, resuming=has_active_checkpoint)
             elif has_active_checkpoint:
-                pre_invoke_log.info("Active checkpoint found; resuming the existing run")
+                # Another invocation holds this thread_id and has checkpointed.
+                # Invoking now would run two graphs against one checkpoint row.
+                pre_invoke_log.info(
+                    "Another run holds this thread_id and has checkpointed; "
+                    "skipping duplicate invocation")
                 return {"status": "already_processing_resumed", "event_id": event_id}
             else:
                 # Not stale, and no active checkpoint: a run is in flight but
@@ -740,6 +757,15 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
                 # instead of falling through to a full duplicate reprocess.
                 pre_invoke_log.info("IN_PROGRESS and not stale; skipping duplicate invocation")
                 return {"status": "already_processing", "event_id": event_id}
+
+    # Note how the branch above interacts with the claim below, because the
+    # two disagree on purpose. `MAX_IN_PROGRESS_AGE_SECONDS` (default 1800) is
+    # SHORTER than a full `AGENT_INVOKE_TIMEOUT_SECONDS`, so a run that is
+    # merely slow can look stale here; the claim's TTL is twice the invoke
+    # budget and will refuse the takeover. That is the safe way round -- the
+    # claim is the authority on whether a run is still alive, and this check
+    # is a cheap pre-filter in front of it. A packet that predates the claim
+    # store has no claim at all, so it is recovered immediately.
 
     # Claim the packet before writing the stub. Everything above this line is
     # a read-then-decide, which five concurrent deliveries all passed on

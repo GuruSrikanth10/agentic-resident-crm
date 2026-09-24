@@ -134,6 +134,29 @@ TEST_ENV_DEFAULTS = {
 }
 
 
+@pytest.fixture(autouse=True)
+def isolated_packet_claims(tmp_path_factory, monkeypatch):
+    """Give every test its own duplicate-invocation claim store.
+
+    The claim `/analyze-rejection` takes reaches storage through
+    `get_scoped_storage`, not through the `get_casebook_storage` name the test
+    fixtures patch per module -- so without this it writes into the real
+    `local_casesheets/packet_claims/` and the claims survive the run. The
+    symptom is nasty: a test that exercises the analyze path passes the first
+    time and fails every time after, because its event id is now held by a
+    claim left behind by the previous run.
+
+    Function-scoped and autouse rather than added to each fixture that needs
+    it, so a future test cannot forget.
+    """
+    from src.storage.local import LocalFilesystemCasebookStorage
+    from src.utils import packet_claims
+
+    root = tmp_path_factory.mktemp("packet_claims")
+    store = LocalFilesystemCasebookStorage(base_dir=str(root))
+    monkeypatch.setattr(packet_claims, "get_claim_storage", lambda: store)
+
+
 @pytest.fixture(scope="session", autouse=True)
 def hermetic_env():
     """Clear deployment-shaped configuration and install the test defaults.

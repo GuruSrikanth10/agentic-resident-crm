@@ -358,6 +358,69 @@ def test_analyze_rejection_declines_to_double_invoke_with_an_active_checkpoint(s
     mock_agent.invoke.assert_not_called()
 
 
+def test_analyze_rejection_recovers_a_stale_run_that_left_a_checkpoint(storage,
+                                                                      monkeypatch):
+    """A run that died AFTER checkpointing must still be recoverable.
+
+    Staleness used to be tested only alongside `not has_active_checkpoint`, so
+    this case fell into the "another run holds it" branch and stayed there:
+    the checkpoint proving work had been done was the very thing that made the
+    packet unrecoverable. Nothing else picks a packet up, so it was stuck for
+    good.
+
+    The recovery is a RESUME, not a restart -- `invoke(None)` continues from
+    the stored state instead of paying for the investigation again.
+    """
+    import src.api.routes as routes
+
+    monkeypatch.setenv("MAX_IN_PROGRESS_AGE_SECONDS", "1800")
+    storage.save("ar-stale-checkpoint", {
+        # Started well beyond the staleness window.
+        "packet_metadata": {"eid": "ar-stale-checkpoint",
+                            "started_at": time.time() - 7200},
+        "packet_status": {"status": "IN_PROGRESS"},
+    }, filename="status.json")
+
+    mock_agent = MagicMock()
+    mock_state = MagicMock()
+    mock_state.next = ("investigate",)  # the dead run left a checkpoint
+    mock_agent.get_state.return_value = mock_state
+    mock_agent.invoke.return_value = {"synthesis": "{}"}
+
+    with patch.object(routes, "get_agent", return_value=mock_agent):
+        _run_analyze("ar-stale-checkpoint")
+
+    mock_agent.invoke.assert_called_once()
+    assert mock_agent.invoke.call_args.args[0] is None, (
+        "a surviving checkpoint must be resumed, not thrown away")
+
+
+def test_analyze_rejection_restarts_a_stale_run_with_no_checkpoint(storage,
+                                                                   monkeypatch):
+    """The other half: nothing to resume, so it starts fresh."""
+    import src.api.routes as routes
+
+    monkeypatch.setenv("MAX_IN_PROGRESS_AGE_SECONDS", "1800")
+    storage.save("ar-stale-fresh", {
+        "packet_metadata": {"eid": "ar-stale-fresh",
+                            "started_at": time.time() - 7200},
+        "packet_status": {"status": "IN_PROGRESS"},
+    }, filename="status.json")
+
+    mock_agent = MagicMock()
+    mock_state = MagicMock()
+    mock_state.next = None
+    mock_agent.get_state.return_value = mock_state
+    mock_agent.invoke.return_value = {"synthesis": "{}"}
+
+    with patch.object(routes, "get_agent", return_value=mock_agent):
+        _run_analyze("ar-stale-fresh")
+
+    mock_agent.invoke.assert_called_once()
+    assert mock_agent.invoke.call_args.args[0] is not None
+    assert mock_agent.invoke.call_args.args[0]["retry_count"] == 0
+
+
 # ======================================================================
 # The casebook references log evidence; it never re-writes it.
 # ======================================================================
