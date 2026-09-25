@@ -5,7 +5,7 @@ Read the investigation:
 
 Read the case evidence:
 - local_casesheets/casebook_{{ref_id}}/dlt_failure.json (parsed failure details)
-- local_casesheets/casebook_{{ref_id}}/dlt_evidence.txt (full evidence block, including logs)
+- local_casesheets/casebook_{{ref_id}}/dlt_evidence.txt (full evidence block, including logs and any tool results)
 
 ## Reasoning hierarchy
 

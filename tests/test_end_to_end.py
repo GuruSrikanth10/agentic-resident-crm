@@ -75,7 +75,7 @@ def storage(tmp_path, monkeypatch):
 def _stub_llm(response_text):
     """A graph whose agents all return `response_text`.
 
-    Patched at create_react_agent so the graph, its edges, the retry loop and
+    Patched at build_agent so the graph, its edges, the retry loop and
     the contract validation are all genuinely exercised.
 
     Returns a real AIMessage rather than a MagicMock: synthesis_node puts the
@@ -108,7 +108,7 @@ def test_a_packet_produces_a_valid_casebook(storage, monkeypatch):
         "confidence": 0.9,
     })
 
-    with patch.object(orch, "create_react_agent",
+    with patch.object(orch, "build_agent",
                       side_effect=lambda *a, **k: _stub_llm(synthesis)), \
          patch.object(orch, "get_llm", side_effect=lambda tier: MagicMock()):
         # The Reviewer must approve, so every agent returning the synthesis
@@ -141,7 +141,7 @@ def test_prompt_fingerprint_is_recorded(storage, monkeypatch):
         "synthesis": "ok", "action": "REPLAY", "resident_action": "NEW_PACKET",
     })
 
-    with patch.object(orch, "create_react_agent",
+    with patch.object(orch, "build_agent",
                       side_effect=lambda *a, **k: _stub_llm(synthesis)), \
          patch.object(orch, "get_llm", side_effect=lambda tier: MagicMock()):
         monkeypatch.setattr(orch, "is_reviewer_approved", lambda _f: True)
@@ -158,7 +158,7 @@ def test_prompt_fingerprint_is_recorded(storage, monkeypatch):
 
 def test_unrepairable_synthesis_escalates_rather_than_writing_null(storage, monkeypatch):
     """Two invalid responses in a row must not yield action: null."""
-    with patch.object(orch, "create_react_agent",
+    with patch.object(orch, "build_agent",
                       side_effect=lambda *a, **k: _stub_llm("not json at all")), \
          patch.object(orch, "get_llm", side_effect=lambda tier: MagicMock()):
         monkeypatch.setattr(orch, "is_reviewer_approved", lambda _f: True)
@@ -176,7 +176,7 @@ def test_reviewer_rejection_escalates_after_max_retries(storage, monkeypatch):
     })
     monkeypatch.setenv("MAX_INVESTIGATION_RETRIES", "2")
 
-    with patch.object(orch, "create_react_agent",
+    with patch.object(orch, "build_agent",
                       side_effect=lambda *a, **k: _stub_llm(synthesis)), \
          patch.object(orch, "get_llm", side_effect=lambda tier: MagicMock()):
         # Never approve.
@@ -209,7 +209,7 @@ def test_a_raising_runbook_node_is_caught(storage, monkeypatch):
     def exploding_get_runbook(*_args, **_kwargs):
         raise TypeError("'StructuredTool' object is not callable")
 
-    with patch.object(orch, "create_react_agent",
+    with patch.object(orch, "build_agent",
                       side_effect=lambda *a, **k: _stub_llm(synthesis)), \
          patch.object(orch, "get_llm", side_effect=lambda tier: MagicMock()), \
          patch.object(orch, "get_runbook", side_effect=exploding_get_runbook):
@@ -239,7 +239,7 @@ def test_runbook_hit_short_circuits_the_agents(storage, monkeypatch):
     }
 
     stub = _stub_llm("should never be called")
-    with patch.object(orch, "create_react_agent", side_effect=lambda *a, **k: stub), \
+    with patch.object(orch, "build_agent", side_effect=lambda *a, **k: stub), \
          patch.object(orch, "get_llm", side_effect=lambda tier: MagicMock()), \
          patch.object(orch, "get_runbook", return_value=runbook), \
          patch.object(orch, "lookup_rule_for", return_value=None):
@@ -273,7 +273,7 @@ def test_shadow_divergence_is_persisted(storage, monkeypatch):
         "resident_action": "NEW_PACKET",
     })
 
-    with patch.object(orch, "create_react_agent",
+    with patch.object(orch, "build_agent",
                       side_effect=lambda *a, **k: _stub_llm(synthesis)), \
          patch.object(orch, "get_llm", side_effect=lambda tier: MagicMock()), \
          patch.object(orch, "get_runbook", return_value=runbook), \
@@ -310,7 +310,7 @@ def test_shadow_agreement_is_persisted(storage, monkeypatch):
         "resident_action": "NEW_PACKET",
     })
 
-    with patch.object(orch, "create_react_agent",
+    with patch.object(orch, "build_agent",
                       side_effect=lambda *a, **k: _stub_llm(synthesis)), \
          patch.object(orch, "get_llm", side_effect=lambda tier: MagicMock()), \
          patch.object(orch, "get_runbook", return_value=runbook), \
@@ -331,7 +331,7 @@ def test_a_terminal_packet_is_not_reprocessed(storage, monkeypatch):
     })
     stub = _stub_llm(synthesis)
 
-    with patch.object(orch, "create_react_agent", side_effect=lambda *a, **k: stub), \
+    with patch.object(orch, "build_agent", side_effect=lambda *a, **k: stub), \
          patch.object(orch, "get_llm", side_effect=lambda tier: MagicMock()):
         monkeypatch.setattr(orch, "is_reviewer_approved", lambda _f: True)
         _run("e2e-idempotent")

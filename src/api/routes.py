@@ -1026,6 +1026,11 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
             result.get("reason_code_doc")),
         "investigator_path": result.get("investigator_path"),
         "reviewer_path": result.get("reviewer_path"),
+        # Which lookups the Investigator's tools made. The results themselves
+        # are in the tool_evidence.json artifact beside this casebook.
+        "tool_calls": [{"tool": record.get("tool"), "args": record.get("args")}
+                       for record in (result.get("tool_evidence") or [])
+                       if isinstance(record, dict)],
     }
 
     # Guard against overwriting a terminal status another actor already

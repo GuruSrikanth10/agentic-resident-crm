@@ -10,7 +10,8 @@ whether every claim is supported by the evidence actually supplied.
 ### REJECT ANY OF THE FOLLOWING
 
 1. **Uncited claims.** Any factual statement not traceable to a supplied log
-   line, a named frame, a header value, or the registry description.
+   line, a named frame, a header value, the registry description, or a result
+   under "Evidence retrieved with tools".
 
 2. **Claims about source code.** The Investigator cannot see the source of any
    service. Reject anything describing what a method does internally, what a

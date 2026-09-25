@@ -57,6 +57,10 @@ DATABASE_RULE = "Database Rule Configuration"
 ENROLMENT_TYPE = "Enrolment Type"
 KAFKA_PAYLOAD = "Kafka Payload"
 LOGS = "Elasticsearch Logs"
+#: What the Investigator's tools returned (src/tools/agent_tools). Present only
+#: when a tool was called, so a packet investigated without tools gets
+#: exactly the prompts it got before tools existed.
+TOOL_EVIDENCE = "Evidence retrieved with tools"
 PREVIOUS_ANALYSIS = "Your previous analysis"
 REVIEWER_FEEDBACK = "Reviewer Feedback (You MUST fix your previous analysis)"
 INVESTIGATION = "Investigation to validate"
@@ -290,43 +294,54 @@ def build_investigation_prompt(*, doc_state, db_rule, enrolment_display,
     return _fit(sections, _index_of(sections, LOGS), _logs_body(logs))
 
 
+def _with_tool_evidence(sections, tool_evidence):
+    """Insert the tool evidence after the logs, when there is any."""
+    if not tool_evidence:
+        return sections
+    at = _index_of(sections, LOGS) + 1
+    return sections[:at] + [(TOOL_EVIDENCE, tool_evidence)] + sections[at:]
+
+
 def build_retry_prompt(*, previous_investigation, feedback, doc_state, db_rule,
-                       enrolment_display, logs):
+                       enrolment_display, logs, tool_evidence=None):
     """The Investigator's retry. Returns (prompt, logs_were_trimmed).
 
     No payload, as on the retry path today: it is static and already reflected
     in the prior investigation. The logs are NOT dropped with it -- the
     Reviewer's most common rejection is that the findings are not grounded in
     the evidence, and a retry that asks for better citations with the
-    citations removed cannot comply (G12).
+    citations removed cannot comply (G12). For the same reason the earlier
+    attempts' tool results come with it.
     """
-    sections = _with_documentation([
+    sections = _with_tool_evidence(_with_documentation([
         (DATABASE_RULE, _rule_body(doc_state, db_rule)),
         (ENROLMENT_TYPE, enrolment_display or ""),
         (LOGS, ""),
         (TASK, _TASK_RETRY),
-    ], _documentation_body(doc_state))
+    ], _documentation_body(doc_state)), tool_evidence)
     sections = [(PREVIOUS_ANALYSIS, previous_investigation or ""),
                 (REVIEWER_FEEDBACK, feedback or "")] + sections
     return _fit(sections, _index_of(sections, LOGS), _logs_body(logs))
 
 
 def build_review_prompt(*, investigation, doc_state, db_rule, enrolment_display,
-                        payload_projection, logs):
+                        payload_projection, logs, tool_evidence=None):
     """The Reviewer, with the evidence the Investigator had.
 
     The investigation comes after the evidence, not before it: the Reviewer's
     job is to check the claims against the evidence, and reading the claims
     first is how a reviewer ends up looking for support for them instead.
+    That evidence includes what the Investigator's tools returned, without
+    which a finding that rests on a tool result could only be rejected.
     """
-    sections = _with_documentation([
+    sections = _with_tool_evidence(_with_documentation([
         (DATABASE_RULE, _rule_body(doc_state, db_rule)),
         (ENROLMENT_TYPE, enrolment_display or ""),
         (KAFKA_PAYLOAD, json.dumps(payload_projection)),
         (LOGS, ""),
         (INVESTIGATION, investigation or ""),
         (TASK, _TASK_REVIEW),
-    ], _documentation_body(doc_state))
+    ], _documentation_body(doc_state)), tool_evidence)
     return _fit(sections, _index_of(sections, LOGS), _logs_body(logs))
 
 

@@ -97,7 +97,7 @@ def test_a_runbook_miss_is_counted(monkeypatch):
 
     before = _label_values(metrics.RUNBOOK_LOOKUPS, outcome="miss")
 
-    with patch.object(orch, "create_react_agent", side_effect=lambda *a, **k: MagicMock()), \
+    with patch.object(orch, "build_agent", side_effect=lambda *a, **k: MagicMock()), \
          patch.object(orch, "get_llm", side_effect=lambda tier: MagicMock()), \
          patch.object(orch, "get_runbook", return_value=None):
         node = _runbook_node()
@@ -122,7 +122,7 @@ def test_a_fingerprint_mismatch_is_counted_distinctly(monkeypatch):
                "rule_fingerprint": "sha256:stale",
                "resolution": {"action": "REPLAY"}}
 
-    with patch.object(orch, "create_react_agent", side_effect=lambda *a, **k: MagicMock()), \
+    with patch.object(orch, "build_agent", side_effect=lambda *a, **k: MagicMock()), \
          patch.object(orch, "get_llm", side_effect=lambda tier: MagicMock()), \
          patch.object(orch, "get_runbook", return_value=runbook), \
          patch.object(orch, "lookup_rule_for", return_value=[{"rule": "x"}]):
@@ -148,7 +148,7 @@ def test_a_runbook_error_is_counted(monkeypatch):
     def boom(*_a, **_k):
         raise TypeError("'StructuredTool' object is not callable")
 
-    with patch.object(orch, "create_react_agent", side_effect=lambda *a, **k: MagicMock()), \
+    with patch.object(orch, "build_agent", side_effect=lambda *a, **k: MagicMock()), \
          patch.object(orch, "get_llm", side_effect=lambda tier: MagicMock()), \
          patch.object(orch, "get_runbook", side_effect=boom):
         node = _runbook_node()
@@ -168,7 +168,7 @@ def _runbook_node():
     compiled graph's node table rather than imported directly. Fails loudly if
     langgraph's internals move, instead of silently testing nothing.
     """
-    with patch.object(orch, "create_react_agent", side_effect=lambda *a, **k: MagicMock()), \
+    with patch.object(orch, "build_agent", side_effect=lambda *a, **k: MagicMock()), \
          patch.object(orch, "get_llm", side_effect=lambda tier: MagicMock()):
         agent = orch.get_agent()
 

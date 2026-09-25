@@ -5,11 +5,12 @@ import threading
 import time
 from typing import TypedDict
 from langgraph.graph import StateGraph, START, END
-from langchain_core.messages import HumanMessage, SystemMessage
-from langgraph.prebuilt import create_react_agent
+from langchain_core.messages import HumanMessage
 
 from src.utils import metrics, reason_code_docs
 from src.core import rejection_context
+from src.core.agent_factory import build_agent
+from src.tools import agent_tools
 from src.utils.llm_utils import get_llm
 from src.tools.tool_registry import (
     fetch_and_persist_logs,
@@ -234,7 +235,8 @@ def _project_payload(payload: dict) -> dict:
     }
 
 
-def _write_harness_case_files(case_dir, payload: dict, logs: str, db_rule: str) -> None:
+def _write_harness_case_files(case_dir, payload: dict, logs: str, db_rule: str,
+                              tool_evidence: str = "") -> None:
     """Write the evidence the harness Investigator and Reviewer read from disk.
 
     Written to the LOCAL filesystem directly -- not through the storage
@@ -242,16 +244,49 @@ def _write_harness_case_files(case_dir, payload: dict, logs: str, db_rule: str) 
     under CASEBOOK_STORAGE_BACKEND=s3 the storage layer writes to S3, not to
     disk. Both harness nodes call this, so the Reviewer never depends on the
     Investigator's pass having left the directory in place.
+
+    `tool_evidence` is the rendered record of what the direct Investigator's
+    tools returned. A harness Reviewer can follow a direct Investigator -- a
+    retry always runs direct, and so does a harness failure's fallback -- and
+    without this file it would reject every finding that rests on a tool
+    result as unsupported.
     """
     case_dir.mkdir(parents=True, exist_ok=True)
     if logs and logs != "Log fetching disabled.":
         (case_dir / "supported_logs.txt").write_text(logs, encoding="utf-8")
+    evidence_file = case_dir / TOOL_EVIDENCE_FILE
+    if tool_evidence:
+        evidence_file.write_text(tool_evidence, encoding="utf-8")
+    else:
+        # A file from an earlier pass must not outlive the evidence it held.
+        evidence_file.unlink(missing_ok=True)
     with open(case_dir / "context.json", "w", encoding="utf-8") as f:
         json.dump({
             "payload": _project_payload(payload),
             "enrolment_type": enrolment_type_display(payload),
             "db_rule": db_rule,
         }, f, indent=2, ensure_ascii=False)
+
+
+#: What the Investigator's tools returned: a local file for the harness
+#: Reviewer, and an artifact beside the casebook for whoever audits it.
+TOOL_EVIDENCE_FILE = "tool_evidence.txt"
+TOOL_EVIDENCE_ARTIFACT = "tool_evidence.json"
+
+
+def _persist_tool_evidence(event_id: str, records: list, log) -> None:
+    """Keep the Investigator's tool results beside the casebook.
+
+    Best effort, like the filtered-logs artifact: a failed save loses the
+    audit copy, never the packet. The same records are in graph state.
+    """
+    try:
+        get_casebook_storage().save_artifact(
+            event_id, TOOL_EVIDENCE_ARTIFACT,
+            json.dumps(records, indent=2, ensure_ascii=False, default=str))
+    except Exception as e:
+        log.warning("Failed to persist the tool evidence artifact",
+                    error=f"{type(e).__name__}: {e}")
 
 
 class GraphState(TypedDict):
@@ -289,6 +324,11 @@ class GraphState(TypedDict):
     #: paths would be scoring runs that were not on the path they claim.
     investigator_path: str
     reviewer_path: str
+    #: What the Investigator's tools returned, as agent_tools records
+    #: ({"tool", "args", "result"}), merged across its attempts. The Reviewer
+    #: is given it as evidence -- it sees what the Investigator saw (D8) -- and
+    #: a retry is given it so a lookup is not repeated for nothing.
+    tool_evidence: list
 
 _agent = None
 
@@ -330,7 +370,7 @@ PROMPT_FILES = (
 
 def compute_prompt_fingerprint(base_dir: str) -> str:
     """SHA256 over the agent system prompts, harness templates and rules,
-    the policy, and AGENTS.md.
+    the policy, AGENTS.md, and the tool configuration the agents are given.
 
     Sorted and length-prefixed so the digest cannot be changed by reordering
     or by content shifting across a boundary.
@@ -354,6 +394,18 @@ def compute_prompt_fingerprint(base_dir: str) -> str:
         digest.update(os.path.basename(path).encode("utf-8"))
         digest.update(str(len(body)).encode("utf-8"))
         digest.update(body)
+
+    # What the agents are told on top of those files: each role's tools, their
+    # descriptions and argument schemas, the AVAILABLE TOOLS sections, and the
+    # operating note every agent gets. Switching a toolset on or off changes
+    # what the agents can see, so it moves the fingerprint like a prompt edit.
+    from src.core.agent_factory import OPERATING_MODE
+    for name, body in (("agent_tools", agent_tools.fingerprint_material()),
+                       ("operating_mode", OPERATING_MODE)):
+        encoded = body.encode("utf-8")
+        digest.update(name.encode("utf-8"))
+        digest.update(str(len(encoded)).encode("utf-8"))
+        digest.update(encoded)
 
     return "sha256:" + digest.hexdigest()
 
@@ -547,11 +599,15 @@ def _build_agent():
             return "filter"
         return "investigate"
 
-    # Create agents once during graph construction, not per invocation.
-    investigator_agent = create_react_agent(llm, tools=[])
-    log_filter_agent = create_react_agent(llm, tools=[])
+    # Create agents once during graph construction, not per invocation. Each
+    # is a deep agent (core/agent_factory.py), which also gives it the tools
+    # registered for its role in src/tools/agent_tools. The system prompt is
+    # fixed here, so every node below sends only its user message.
+    investigator_agent = build_agent("investigator", llm, investigator_prompt)
+    log_filter_agent = build_agent("log_filter", llm, log_filter_prompt)
     queue_tool = get_tool_by_name("queue_for_replay")
-    synthesis_agent = create_react_agent(llm, tools=[queue_tool])
+    synthesis_agent = build_agent("synthesis", llm, synthesis_prompt,
+                                  tools=[queue_tool])
 
     from langchain_core.tools import tool
     from datetime import datetime
@@ -617,7 +673,8 @@ def _build_agent():
     # It is NOT on that tier today -- `simple_llm` is bound to "complex" by the
     # deliberate deviation documented at its assignment above. The name is kept
     # so the one-word fix stays a one-word fix.
-    reviewer_agent = create_react_agent(simple_llm, tools=[add_learning_rule])
+    reviewer_agent = build_agent("reviewer", simple_llm, reviewer_prompt,
+                                 tools=[add_learning_rule])
 
     def filter_logs_node(state: GraphState):
         event_id = state.get("payload", {}).get("eventId", "unknown")
@@ -639,7 +696,6 @@ def _build_agent():
         @retry_transient
         def invoke_filter():
             return log_filter_agent.invoke({"messages": [
-                SystemMessage(content=log_filter_prompt),
                 HumanMessage(content=prompt)
             ]})
             
@@ -775,6 +831,10 @@ def _build_agent():
                             error=f"{type(e).__name__}: {e}")
                 # Fall through to the direct LLM path below
 
+        # What this packet's earlier attempts looked up with tools. Empty on
+        # a first pass, and on every pass when no tool was used.
+        prior_tool_evidence = agent_tools.render_evidence(state.get("tool_evidence"))
+
         if reason_code_docs.docs_enabled():
             # Assembled in rejection_context, in a fixed order and under
             # REJECTION_PROMPT_MAX_CHARS. Both branches send the same
@@ -784,7 +844,7 @@ def _build_agent():
                     previous_investigation=investigation, feedback=feedback,
                     doc_state=doc_state, db_rule=db_rule,
                     enrolment_display=enrolment_type_display(payload),
-                    logs=logs)
+                    logs=logs, tool_evidence=prior_tool_evidence)
             else:
                 prompt, log_trimmed = rejection_context.build_investigation_prompt(
                     doc_state=doc_state, db_rule=db_rule,
@@ -814,6 +874,9 @@ def _build_agent():
             )
             if logs and logs != "Log fetching disabled.":
                 prompt += f"Elasticsearch Logs (cite these):\n{logs}\n\n"
+            if prior_tool_evidence:
+                prompt += (f"{rejection_context.TOOL_EVIDENCE} (cite these):\n"
+                           f"{prior_tool_evidence}\n\n")
         else:
             prompt = f"Kafka Payload: {json.dumps(_project_payload(payload))}\n\n"
 
@@ -830,17 +893,26 @@ def _build_agent():
         @llm_breaker
         @retry_transient
         def invoke_investigator():
-            return investigator_agent.invoke({"messages": [
-                SystemMessage(content=investigator_prompt),
-                HumanMessage(content=prompt)
-            ]})
+            # Recorded per attempt: a retried call starts a fresh list, so the
+            # lookups of an attempt that raised never pose as the evidence of
+            # the run that produced the answer.
+            with agent_tools.recording() as calls:
+                result = investigator_agent.invoke({"messages": [
+                    HumanMessage(content=prompt)
+                ]})
+            return result, calls
 
-        res = _counted("investigator", invoke_investigator)
+        res, calls = _counted("investigator", invoke_investigator)
         metrics.record_llm_usage("investigator", res)
         metrics.LLM_CALLS.labels(node="investigator", outcome="ok").inc()
-        log.info("Investigator finished analysis")
+        tool_evidence = agent_tools.merge_evidence(state.get("tool_evidence"), calls)
+        if calls:
+            _persist_tool_evidence(event_id, tool_evidence, log)
+        log.info("Investigator finished analysis",
+                 tool_calls=[call["tool"] for call in calls])
         return {"investigation": res["messages"][-1].content, "db_rule": db_rule,
-                "reason_code_doc": doc_state, "investigator_path": "direct"}
+                "reason_code_doc": doc_state, "investigator_path": "direct",
+                "tool_evidence": tool_evidence}
 
     def reviewer_node(state: GraphState):
         investigation = state.get("investigation", "")
@@ -859,6 +931,10 @@ def _build_agent():
         # to the direct path.
         from src.utils.opencode_runner import lane_enabled
         use_harness = lane_enabled("rejection")
+
+        # What the Investigator's tools returned: evidence the Reviewer must
+        # see to check a finding that rests on it.
+        tool_evidence = agent_tools.render_evidence(state.get("tool_evidence"))
 
         if use_harness:
             from src.utils import opencode_runner
@@ -882,7 +958,8 @@ def _build_agent():
                 # packet.
                 _write_harness_case_files(case_dir, state.get("payload", {}),
                                           state.get("logs", ""),
-                                          state.get("db_rule", ""))
+                                          state.get("db_rule", ""),
+                                          tool_evidence=tool_evidence)
                 (case_dir / "investigation_text.txt").write_text(
                     investigation, encoding="utf-8")
 
@@ -936,7 +1013,7 @@ def _build_agent():
                 db_rule=state.get("db_rule", ""),
                 enrolment_display=enrolment_type_display(payload),
                 payload_projection=_project_payload(payload),
-                logs=state.get("logs"))
+                logs=state.get("logs"), tool_evidence=tool_evidence)
             if log_trimmed:
                 metrics.REJECTION_PROMPT_TRIMS.labels(node="reviewer").inc()
                 log.warning("Trimmed the logs to fit REJECTION_PROMPT_MAX_CHARS",
@@ -948,7 +1025,6 @@ def _build_agent():
         @retry_transient
         def invoke_reviewer():
             return reviewer_agent.invoke({"messages": [
-                SystemMessage(content=reviewer_prompt),
                 HumanMessage(content=prompt)
             ]})
 
@@ -1030,7 +1106,6 @@ def _build_agent():
         @retry_transient
         def invoke_synthesis():
             return synthesis_agent.invoke({"messages": [
-                SystemMessage(content=synthesis_prompt),
                 HumanMessage(content=prompt)
             ]})
 
@@ -1061,7 +1136,6 @@ def _build_agent():
             @retry_transient
             def invoke_repair():
                 return synthesis_agent.invoke({"messages": [
-                    SystemMessage(content=synthesis_prompt),
                     HumanMessage(content=repair_prompt)
                 ]})
 

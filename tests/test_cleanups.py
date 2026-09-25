@@ -42,7 +42,7 @@ def test_escalation_records_the_retry_count(monkeypatch):
     try:
         agent_orchestrator._agent = None
         with patch.object(agent_orchestrator.metrics, "INVESTIGATOR_RETRIES", histogram), \
-             patch.object(agent_orchestrator, "create_react_agent",
+             patch.object(agent_orchestrator, "build_agent",
                           return_value=rejecting_agent), \
              patch.object(agent_orchestrator, "get_checkpointer", return_value=None), \
              patch.object(agent_orchestrator, "fetch_and_persist_logs",

@@ -13,18 +13,27 @@ The prompts are deliberately narrow. With no source access and no database
 access, the Investigator's job is to check the trace against the logs and to
 say clearly what the evidence cannot establish -- not to explain a bug it
 cannot see.
+
+The three agents are deep agents built by `core/agent_factory.py`, which
+gives each the tools registered for its role. No toolset is registered for
+the dlt_* roles: the narrative here is stored per error code and re-served to
+every record with the same failure signature, and a tool that reads one
+packet's data would put that packet's facts into it. Should a tool be
+registered for them, what it returns joins the evidence block below, so the
+Reviewer checks against it like any other evidence.
 """
 import json
 import os
 import threading
 from typing import Optional
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage
 from langgraph.graph import END, START, StateGraph
-from langgraph.prebuilt import create_react_agent
 from typing_extensions import TypedDict
 
+from src.core.agent_factory import build_agent
 from src.dlt.corroborate import Corroboration
+from src.tools import agent_tools
 from src.models.dlt_synthesis import DltFinding
 from src.utils import metrics
 from src.utils.llm_utils import get_llm
@@ -54,6 +63,10 @@ class DltGraphState(TypedDict, total=False):
     retry_count: int
     finding: Optional[dict]
     parse_error: Optional[str]
+    #: What the Investigator's registered tools returned (agent_tools
+    #: records), merged across attempts. Empty while the dlt_* roles have no
+    #: tools, which is the default.
+    tool_evidence: list
 
 
 def is_approved(feedback: str) -> bool:
@@ -122,7 +135,14 @@ def _evidence_block(state: DltGraphState) -> str:
         f"Unexplained exceptions in the logs: "
         f"{', '.join(corroboration.get('unexplained') or []) or 'none'}\n\n"
         f"### Logs\n{logs[:MAX_EVIDENCE_CHARS]}\n"
+        f"{_tool_evidence_block(state)}"
     )
+
+
+def _tool_evidence_block(state: DltGraphState) -> str:
+    """The Investigator's tool results, as a final evidence section, or ""."""
+    rendered = agent_tools.render_evidence(state.get("tool_evidence"))
+    return f"\n### Evidence retrieved with tools\n{rendered}\n" if rendered else ""
 
 
 def _write_harness_case_files(case_dir, state: DltGraphState) -> None:
@@ -168,10 +188,13 @@ def _build_dlt_agent():
     reviewer_prompt = load_prompt("DltReviewerAgent.md")
     synthesis_prompt = load_prompt("DltSynthesisAgent.md")
 
+    # Deep agents, each with the tools registered for its role -- none by
+    # default (see the module docstring). The system prompts are fixed here,
+    # so every node below sends only its user message.
     llm = get_llm("complex")
-    investigator_agent = create_react_agent(llm, tools=[])
-    reviewer_agent = create_react_agent(llm, tools=[])
-    synthesis_agent = create_react_agent(llm, tools=[])
+    investigator_agent = build_agent("dlt_investigator", llm, investigator_prompt)
+    reviewer_agent = build_agent("dlt_reviewer", llm, reviewer_prompt)
+    synthesis_agent = build_agent("dlt_synthesis", llm, synthesis_prompt)
 
     def investigator_node(state: DltGraphState):
         log = logger.bind(case_id=state.get("case_id"))
@@ -234,15 +257,19 @@ def _build_dlt_agent():
         @llm_breaker
         @retry_transient
         def invoke():
-            return investigator_agent.invoke({"messages": [
-                SystemMessage(content=investigator_prompt),
-                HumanMessage(content=prompt),
-            ]})
+            # Recorded per attempt, as in the rejection lane.
+            with agent_tools.recording() as calls:
+                result = investigator_agent.invoke({"messages": [
+                    HumanMessage(content=prompt),
+                ]})
+            return result, calls
 
-        res = invoke()
+        res, calls = invoke()
         metrics.record_llm_usage("dlt_investigator", res)
         metrics.LLM_CALLS.labels(node="dlt_investigator", outcome="ok").inc()
-        return {"investigation": res["messages"][-1].content}
+        return {"investigation": res["messages"][-1].content,
+                "tool_evidence": agent_tools.merge_evidence(
+                    state.get("tool_evidence"), calls)}
 
     def reviewer_node(state: DltGraphState):
         log = logger.bind(case_id=state.get("case_id"))
@@ -306,7 +333,6 @@ def _build_dlt_agent():
         @retry_transient
         def invoke():
             return reviewer_agent.invoke({"messages": [
-                SystemMessage(content=reviewer_prompt),
                 HumanMessage(content=prompt),
             ]})
 
@@ -345,7 +371,6 @@ def _build_dlt_agent():
         @retry_transient
         def invoke():
             return synthesis_agent.invoke({"messages": [
-                SystemMessage(content=synthesis_prompt),
                 HumanMessage(content=prompt),
             ]})
 
@@ -366,7 +391,6 @@ def _build_dlt_agent():
         @retry_transient
         def invoke_repair():
             return synthesis_agent.invoke({"messages": [
-                SystemMessage(content=synthesis_prompt),
                 HumanMessage(content=(
                     f"Your previous reply did not satisfy the contract: {error}\n\n"
                     f"Previous reply:\n{raw}\n\n"

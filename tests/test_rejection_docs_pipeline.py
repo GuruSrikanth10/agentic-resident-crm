@@ -62,7 +62,7 @@ def _node(monkeypatch, name, agent):
 
     monkeypatch.setattr(orch, "_agent", None)
     monkeypatch.setattr(orch, "get_llm", lambda _tier: MagicMock())
-    monkeypatch.setattr(orch, "create_react_agent", lambda *a, **k: agent)
+    monkeypatch.setattr(orch, "build_agent", lambda *a, **k: agent)
     monkeypatch.setattr(orch, "get_checkpointer", lambda: None)
     return orch._build_agent().builder.nodes[name].runnable.func
 

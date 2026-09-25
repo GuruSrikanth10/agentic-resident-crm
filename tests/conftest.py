@@ -114,6 +114,17 @@ ISOLATED_ENV_VARS = (
     # guard for the whole session or make every live claim look abandoned.
     "PACKET_CLAIM_ENABLED",
     "PACKET_CLAIM_TTL_SECONDS",
+    # Agent tools: the process DB toolset's switch and the per-role
+    # selections. Either decides which tools a built agent is offered, and so
+    # what its system prompt says.
+    "PROCESS_DB_ENABLED",
+    "AGENT_TOOLS_INVESTIGATOR",
+    "AGENT_TOOLS_REVIEWER",
+    "AGENT_TOOLS_SYNTHESIS",
+    "AGENT_TOOLS_LOG_FILTER",
+    "AGENT_TOOLS_DLT_INVESTIGATOR",
+    "AGENT_TOOLS_DLT_REVIEWER",
+    "AGENT_TOOLS_DLT_SYNTHESIS",
     # LLM provider selection.
     "USE_HF",
     "MOCK_LLM_WITH_MISTRAL",

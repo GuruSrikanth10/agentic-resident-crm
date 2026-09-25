@@ -6,6 +6,7 @@ Read the investigation:
 Read the case evidence:
 - local_casesheets/casebook_{{event_id}}/context.json (payload, enrolment type, DB rule)
 - local_casesheets/casebook_{{event_id}}/supported_logs.txt (the log trace — may be absent or incomplete)
+- local_casesheets/casebook_{{event_id}}/tool_evidence.txt (what the Investigator's tools returned — present only when it used tools)
 
 ## Reasoning hierarchy
 
@@ -49,6 +50,10 @@ lacking log citations when no logs were available.
    log citations — verify instead that it stated this plainly.
 6. Wrong service identified: verify the investigation attributed the failure
    to the correct service.
+7. Claims grounded in tool results: when tool_evidence.txt exists, a
+   packet-specific fact it supports is grounded, and one it contradicts is
+   wrong. A tool result saying the lookup was switched off or failed read
+   nothing — reject a finding that treats it as "no rows".
 
 ## STEP 4 — Propose a learning rule (only when rejecting)
 

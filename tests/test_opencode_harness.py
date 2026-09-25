@@ -284,7 +284,7 @@ def _rejection_reviewer(monkeypatch, agent):
     monkeypatch.setattr(orch, "_agent", None)
     monkeypatch.setattr(orch, "_prompt_fingerprint", orch._prompt_fingerprint)
     monkeypatch.setattr(orch, "get_llm", lambda _tier: MagicMock())
-    monkeypatch.setattr(orch, "create_react_agent", lambda *a, **k: agent)
+    monkeypatch.setattr(orch, "build_agent", lambda *a, **k: agent)
     monkeypatch.setattr(orch, "get_checkpointer", lambda: None)
     graph = orch._build_agent()
     return graph.builder.nodes["review"].runnable.func
@@ -296,7 +296,7 @@ def _dlt_reviewer(monkeypatch, agent):
 
     monkeypatch.setattr(dlt, "_agent", None)
     monkeypatch.setattr(dlt, "get_llm", lambda _tier: MagicMock())
-    monkeypatch.setattr(dlt, "create_react_agent", lambda *a, **k: agent)
+    monkeypatch.setattr(dlt, "build_agent", lambda *a, **k: agent)
     graph = dlt._build_dlt_agent()
     return graph.builder.nodes["review"].runnable.func
 
