@@ -104,6 +104,14 @@ def validate_config():
         except ValueError:
             pass
 
+    # 4b. The process DB lookups (src/tools/process_db.py) are fully
+    # configured when switched on, so a missing credential fails the boot
+    # rather than every lookup.
+    if get_bool_env("PROCESS_DB_ENABLED", False):
+        for var in ("PROCESS_DB_HOST", "PROCESS_DB_USERNAME", "PROCESS_DB_PASSWORD"):
+            if not os.environ.get(var, "").strip():
+                errors.append(f"PROCESS_DB_ENABLED=true requires {var} to be set.")
+
     # 5. Storage and SQLite checkpointer paths are writable
     try:
         from src.storage.factory import get_casebook_storage

@@ -573,12 +573,21 @@ def _queue_pending_replay(packet_id: str, payload: dict) -> str:
                      error=f"{type(e).__name__}: {e}")
         return f"Failed to queue packet {packet_id}: {e}"
 
+from src.tools.process_db import (  # noqa: E402
+    lookup_bio_helper_cache,
+    lookup_bio_parking_queue,
+    lookup_bio_stage_tracker,
+)
+
 _TOOLS_MAP = {
     "lookup_resident_database": lookup_resident_database,
     "lookup_error_code": lookup_error_code,
     "lookup_rule_by_reason_code": lookup_rule_by_reason_code,
     "fetch_elastic_logs": fetch_elastic_logs,
-    "queue_for_replay": queue_for_replay
+    "queue_for_replay": queue_for_replay,
+    "lookup_bio_stage_tracker": lookup_bio_stage_tracker,
+    "lookup_bio_helper_cache": lookup_bio_helper_cache,
+    "lookup_bio_parking_queue": lookup_bio_parking_queue,
 }
 
 def get_tool_by_name(name: str):

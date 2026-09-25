@@ -7,6 +7,10 @@ from sqlalchemy.exc import OperationalError
 
 # Circuit breaker trips after 3 consecutive failures, resets after 60 seconds
 db_breaker = pybreaker.CircuitBreaker(fail_max=3, reset_timeout=60)
+# The enu-biometric process DB (src/tools/process_db.py) is a different MySQL
+# from the rules DB db_breaker guards; sharing one breaker would let an outage
+# of either refuse lookups against the other.
+process_db_breaker = pybreaker.CircuitBreaker(fail_max=3, reset_timeout=60)
 es_breaker = pybreaker.CircuitBreaker(fail_max=3, reset_timeout=60)
 llm_breaker = pybreaker.CircuitBreaker(fail_max=3, reset_timeout=60)
 # The Kubernetes source retries per-status rather than per-exception-type
