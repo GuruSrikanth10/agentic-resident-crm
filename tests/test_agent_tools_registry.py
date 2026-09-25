@@ -1,19 +1,17 @@
 """
-The agent tool registry (src/tools/agent_tools/__init__.py).
+The tool registry (src/tools/agent_tools/__init__.py) -- the server side.
 
-Covers what a developer relies on when adding a tool: a module dropped into
-the package is discovered and offered to its roles with no other change, a
-toolset switch removes its tools and guidance, AGENT_TOOLS_<ROLE> overrides a
-role's selection, mistakes fail loudly, and every call is recorded as
-evidence for the node that made it.
+What a developer relies on when adding a tool: a module dropped into the
+package is discovered and served with no other change, a toolset switch
+removes its tools from the server, mistakes fail loudly, and a tool's own
+failure becomes a result instead of an exception. Which agent gets which tool
+is the MCP client's business (tests/test_mcp_client.py).
 """
 import json
 import sys
 import textwrap
-from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from langchain_core.runnables.config import ContextThreadPoolExecutor
 
 from src.tools import agent_tools
 from src.tools.agent_tools import Toolset, agent_tool
@@ -36,88 +34,45 @@ def registry_snapshot():
     agent_tools._registry.update(saved)
 
 
-def _names(role):
-    return {tool.name for tool in agent_tools.tools_for(role)}
+def _enabled_names():
+    return {entry.tool.name for entry in agent_tools.enabled_entries()}
 
 
 # ----------------------------------------------------------------------
-# Defaults and the toolset switch
+# What is served
 # ----------------------------------------------------------------------
 
-def test_process_db_tools_are_offered_only_to_the_investigator_when_enabled(monkeypatch):
-    monkeypatch.setenv("PROCESS_DB_ENABLED", "true")
-    assert _names("investigator") == PROCESS_DB_TOOLS
-    for role in agent_tools.AGENT_ROLES:
-        if role != "investigator":
-            assert _names(role) == set(), role
+def test_process_db_tools_are_registered_for_the_investigator():
+    entries = {entry.tool.name: entry for entry in agent_tools.entries()}
+    assert PROCESS_DB_TOOLS <= set(entries)
+    for name in PROCESS_DB_TOOLS:
+        toolset = entries[name].toolset
+        assert toolset.name == "process_db"
+        assert toolset.agents == ("investigator",)
+        assert toolset.read_only is True
 
 
-def test_a_disabled_toolset_offers_nothing_and_adds_no_guidance(monkeypatch):
+def test_a_disabled_toolset_is_not_served(monkeypatch):
     monkeypatch.setenv("PROCESS_DB_ENABLED", "false")
-    assert agent_tools.tools_for("investigator") == []
-    assert agent_tools.prompt_section("investigator") == ""
-
-
-def test_prompt_section_carries_the_rules_and_the_guidance(monkeypatch):
+    assert not (_enabled_names() & PROCESS_DB_TOOLS)
     monkeypatch.setenv("PROCESS_DB_ENABLED", "true")
-    section = agent_tools.prompt_section("investigator")
-    assert section.startswith(agent_tools.TOOLS_HEADING)
-    assert "evidence gap" in section
-    assert "#### process_db" in section
-    assert "get_parking_status" in section
-    assert "None of these tables holds the final approve/reject verdict" in section
+    assert PROCESS_DB_TOOLS <= _enabled_names()
 
 
-def test_tool_order_is_stable(monkeypatch):
+def test_any_enabled_follows_the_switches(monkeypatch):
+    monkeypatch.setenv("PROCESS_DB_ENABLED", "false")
+    assert agent_tools.any_enabled() is False
     monkeypatch.setenv("PROCESS_DB_ENABLED", "true")
-    names = [tool.name for tool in agent_tools.tools_for("investigator")]
+    assert agent_tools.any_enabled() is True
+
+
+def test_entries_are_in_a_stable_order():
+    names = [(entry.toolset.name, entry.tool.name) for entry in agent_tools.entries()]
     assert names == sorted(names)
-    assert names == [tool.name for tool in agent_tools.tools_for("investigator")]
-
-
-# ----------------------------------------------------------------------
-# AGENT_TOOLS_<ROLE>
-# ----------------------------------------------------------------------
-
-def test_override_selects_exact_tools_for_a_role(monkeypatch):
-    monkeypatch.setenv("PROCESS_DB_ENABLED", "true")
-    monkeypatch.setenv("AGENT_TOOLS_REVIEWER", "get_parking_status, get_packet_stage_summary")
-    assert _names("reviewer") == {"get_parking_status", "get_packet_stage_summary"}
-
-
-def test_override_none_removes_every_tool(monkeypatch):
-    monkeypatch.setenv("PROCESS_DB_ENABLED", "true")
-    monkeypatch.setenv("AGENT_TOOLS_INVESTIGATOR", "none")
-    assert _names("investigator") == set()
-
-
-def test_override_cannot_switch_on_a_disabled_toolset(monkeypatch):
-    monkeypatch.setenv("PROCESS_DB_ENABLED", "false")
-    monkeypatch.setenv("AGENT_TOOLS_REVIEWER", "get_parking_status")
-    assert _names("reviewer") == set()
-
-
-def test_override_naming_an_unknown_tool_raises(monkeypatch):
-    monkeypatch.setenv("AGENT_TOOLS_INVESTIGATOR", "get_parking_statuss")
-    with pytest.raises(ValueError, match="unknown tool"):
-        agent_tools.tools_for("investigator")
-
-
-def test_validate_reports_unknown_tools_and_misspelt_roles(monkeypatch):
-    monkeypatch.setenv("AGENT_TOOLS_INVESTIGATOR", "no_such_tool")
-    monkeypatch.setenv("AGENT_TOOLS_INVESTIGATER", "get_parking_status")
-    errors = agent_tools.validate()
-    assert any("no_such_tool" in error for error in errors)
-    assert any("AGENT_TOOLS_INVESTIGATER" in error for error in errors)
 
 
 def test_validate_is_clean_by_default():
     assert agent_tools.validate() == []
-
-
-def test_unknown_role_is_refused():
-    with pytest.raises(ValueError, match="Unknown agent role"):
-        agent_tools.tools_for("investigatr")
 
 
 # ----------------------------------------------------------------------
@@ -131,6 +86,10 @@ def test_toolset_rejects_an_unknown_role():
 
 def test_toolset_accepts_a_single_role_string():
     assert Toolset(name="single", agents="reviewer").agents == ("reviewer",)
+
+
+def test_a_toolset_is_not_read_only_unless_it_says_so():
+    assert Toolset(name="plain", agents=()).read_only is False
 
 
 def test_a_tool_needs_a_docstring(registry_snapshot):
@@ -215,15 +174,16 @@ def test_a_raising_switch_counts_as_disabled(registry_snapshot):
         """Behind a broken switch."""
         return refid
 
-    assert "switched" not in _names("reviewer")
+    assert "switched" in {entry.tool.name for entry in agent_tools.entries()}
+    assert "switched" not in _enabled_names()
 
 
 # ----------------------------------------------------------------------
 # Discovery: dropping a module in is the whole change
 # ----------------------------------------------------------------------
 
-def test_a_module_dropped_into_the_package_is_offered_to_its_role(tmp_path, monkeypatch,
-                                                                   registry_snapshot):
+def test_a_module_dropped_into_the_package_is_registered(tmp_path, monkeypatch,
+                                                         registry_snapshot):
     (tmp_path / "extra_lookup.py").write_text(textwrap.dedent('''
         from src.tools.agent_tools import Toolset, agent_tool
 
@@ -240,8 +200,7 @@ def test_a_module_dropped_into_the_package_is_offered_to_its_role(tmp_path, monk
     monkeypatch.setattr(agent_tools, "__path__", [*agent_tools.__path__, str(tmp_path)])
     monkeypatch.setattr(agent_tools, "_discovered", False)
     try:
-        assert "extra_lookup" in _names("reviewer")
-        assert "Use extra_lookup for extra things." in agent_tools.prompt_section("reviewer")
+        assert "extra_lookup" in _enabled_names()
         assert agent_tools.get_tool("extra_lookup").invoke({"refid": "r9"}) == "extra:r9"
     finally:
         sys.modules.pop("src.tools.agent_tools.extra_lookup", None)
@@ -259,136 +218,14 @@ def test_a_module_that_fails_to_import_fails_discovery_by_name(tmp_path, monkeyp
         sys.modules.pop("src.tools.agent_tools.broken_tool", None)
 
 
-# ----------------------------------------------------------------------
-# Recording
-# ----------------------------------------------------------------------
-
-def test_calls_are_recorded_only_inside_recording(registry_snapshot):
-    toolset = Toolset(name="t_rec", agents=("reviewer",))
-
-    @agent_tool(toolset)
-    def recorded_lookup(refid: str, depth: int = 1) -> str:
-        """Recorded."""
-        return f"{refid}:{depth}"
-
-    tool = agent_tools.get_tool("recorded_lookup")
-    tool.invoke({"refid": "outside"})
-    with agent_tools.recording() as calls:
-        tool.invoke({"refid": "inside", "depth": 2})
-    tool.invoke({"refid": "after"})
-
-    assert calls == [{"tool": "recorded_lookup", "args": {"refid": "inside", "depth": 2},
-                      "result": "inside:2"}]
-
-
-def test_calls_on_worker_threads_land_in_the_callers_record(registry_snapshot):
-    """LangGraph's tool node runs tools on a context-copying executor; a
-    call made there must land in the node's record and no other's."""
-    toolset = Toolset(name="t_threads", agents=("reviewer",))
-
-    @agent_tool(toolset)
-    def threaded_lookup(refid: str) -> str:
-        """Threaded."""
-        return refid
-
-    tool = agent_tools.get_tool("threaded_lookup")
-    with agent_tools.recording() as calls:
-        with ContextThreadPoolExecutor(max_workers=3) as pool:
-            list(pool.map(lambda r: tool.invoke({"refid": r}), ["a", "b", "c"]))
-    assert sorted(call["args"]["refid"] for call in calls) == ["a", "b", "c"]
-
-    def separate_node(refid):
-        with agent_tools.recording() as own:
-            tool.invoke({"refid": refid})
-        return own
-
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        first, second = pool.map(separate_node, ["x", "y"])
-    assert [call["args"]["refid"] for call in first] == ["x"]
-    assert [call["args"]["refid"] for call in second] == ["y"]
-
-
-def test_recorded_results_are_bounded(registry_snapshot):
-    toolset = Toolset(name="t_big", agents=("reviewer",))
-
-    @agent_tool(toolset)
-    def huge(refid: str) -> str:
-        """Huge."""
-        return "x" * (agent_tools.MAX_RECORDED_RESULT_CHARS * 2)
-
-    with agent_tools.recording() as calls:
-        agent_tools.get_tool("huge").invoke({"refid": "r"})
-    assert len(calls[0]["result"]) <= agent_tools.MAX_RECORDED_RESULT_CHARS
-
-
-# ----------------------------------------------------------------------
-# Evidence merging and rendering
-# ----------------------------------------------------------------------
-
-def _rec(tool, refid, result):
-    return {"tool": tool, "args": {"refid": refid}, "result": result}
-
-
-def test_merge_keeps_one_record_per_call_newest_last():
-    merged = agent_tools.merge_evidence(
-        [_rec("a", "1", "old"), _rec("b", "1", "b")],
-        [_rec("a", "1", "new"), _rec("a", "2", "other")])
-    assert [(r["tool"], r["args"]["refid"], r["result"]) for r in merged] == [
-        ("b", "1", "b"), ("a", "1", "new"), ("a", "2", "other")]
-
-
-def test_merge_caps_the_number_of_records():
-    many = [_rec("t", str(i), "r") for i in range(agent_tools.MAX_EVIDENCE_RECORDS + 5)]
-    merged = agent_tools.merge_evidence(None, many)
-    assert len(merged) == agent_tools.MAX_EVIDENCE_RECORDS
-    assert merged[-1]["args"]["refid"] == str(agent_tools.MAX_EVIDENCE_RECORDS + 4)
-
-
-def test_render_is_empty_without_records():
-    assert agent_tools.render_evidence(None) == ""
-    assert agent_tools.render_evidence([]) == ""
-
-
-def test_render_lists_calls_in_order_with_their_arguments():
-    text = agent_tools.render_evidence([_rec("a", "1", "first"), _rec("b", "2", "second")])
-    assert text.index("[1] a {\"refid\": \"1\"}") < text.index("[2] b {\"refid\": \"2\"}")
-    assert "first" in text and "second" in text
-
-
-def test_render_keeps_the_newest_and_says_how_many_it_left_out():
-    records = [_rec("t", str(i), "r" * 100) for i in range(10)]
-    text = agent_tools.render_evidence(records, max_chars=450)
-    assert "left out to fit" in text
-    assert "\"refid\": \"9\"" in text
-    assert "\"refid\": \"0\"" not in text
-
-
-def test_render_budget_falls_back_on_a_bad_setting(monkeypatch):
-    monkeypatch.setenv(agent_tools.ENV_EVIDENCE_MAX_CHARS, "lots")
-    assert agent_tools.evidence_max_chars() == agent_tools.DEFAULT_EVIDENCE_MAX_CHARS
-
-
-# ----------------------------------------------------------------------
-# Fingerprint material
-# ----------------------------------------------------------------------
-
-def test_fingerprint_material_moves_with_the_toolset_switch(monkeypatch):
-    monkeypatch.setenv("PROCESS_DB_ENABLED", "false")
-    off = agent_tools.fingerprint_material()
-    monkeypatch.setenv("PROCESS_DB_ENABLED", "true")
-    on = agent_tools.fingerprint_material()
-    assert off != on
-    assert on == agent_tools.fingerprint_material()
-
-
-def test_cli_lists_and_calls(monkeypatch, capsys):
+def test_cli_lists_and_calls_in_process(monkeypatch, capsys):
     from src.tools.agent_tools.__main__ import main
 
     monkeypatch.setenv("PROCESS_DB_ENABLED", "false")
     assert main(["list"]) == 0
     listed = json.loads(capsys.readouterr().out)
     assert {row["name"] for row in listed} >= PROCESS_DB_TOOLS
-    assert all(row["agents_now"] == [] for row in listed if row["toolset"] == "process_db")
+    assert all(row["enabled"] is False for row in listed if row["toolset"] == "process_db")
 
     assert main(["call", "get_parking_status", '{"refid": "r1"}']) == 0
     assert "switched off" in capsys.readouterr().out

@@ -19,6 +19,10 @@ langgraph==1.1.10
 langgraph-checkpoint==4.0.2
 langgraph-checkpoint-sqlite==3.0.3
 deepagents==0.5.3
+# Model Context Protocol: the agent tool server and its client
+# (src/tools/mcp_server.py, src/tools/mcp_client.py). mcp 2.x -- FastMCP is
+# MCPServer there. Not langchain-mcp-adapters: it pins a newer langchain-core.
+mcp==2.2.0
 
 # --- Messaging ---
 kafka-python==2.3.1

@@ -128,15 +128,41 @@ def _provider_of(model_name: str) -> str:
 
 
 def _harness_config(model_name: str) -> Dict[str, Any]:
-    """opencode's own timeouts for this run, as `OPENCODE_CONFIG_CONTENT`.
+    """What the harness adds to opencode's config, as `OPENCODE_CONFIG_CONTENT`.
 
-    Returns an empty dict to skip overriding the operator's
-    `~/.config/opencode` config. The provider config (baseURL, model
-    names, npm package) is already set there; sending a partial config
-    here replaces it and loses the baseURL, causing 'Request is not
-    supported by this version of OpenCode Server' errors.
+    The agent tool servers (an `mcp` block) and one opencode agent per
+    harness role, each allowed exactly the MCP tools its role gets -- see
+    mcp_client.opencode_config. Empty when no tool server is configured.
+
+    Never a `provider` block. The provider config (baseURL, model names, npm
+    package) lives in `~/.config/opencode` or the project's opencode.json, and
+    a provider block sent here once replaced it and lost the baseURL, causing
+    'Request is not supported by this version of OpenCode Server' errors.
+    Blocks without one are deep-merged with it: verified on opencode 1.18.20
+    with `opencode debug config`, the provider surviving from both the global
+    and the project file.
+
+    A failure to work the blocks out -- a tool list that cannot be read, a
+    selection that names an unknown tool -- leaves the harness without tools
+    rather than without a server: the direct path still has them.
     """
-    return {}
+    try:
+        from src.tools import mcp_client
+        return mcp_client.opencode_config()
+    except Exception as error:
+        logger.error("Could not configure the agent tool servers for opencode; "
+                     "harness tasks run without them",
+                     error=f"{type(error).__name__}: {error}")
+        return {}
+
+
+def _task_agent(node: Optional[str], config: Dict[str, Any]) -> Optional[str]:
+    """The opencode agent a task for `node` runs as, when the config has one."""
+    if not node:
+        return None
+    from src.tools import mcp_client
+    name = mcp_client.opencode_agent(node)
+    return name if name in (config.get("agent") or {}) else None
 
 
 def _permissions() -> Dict[str, Any]:
@@ -167,6 +193,9 @@ class Session:
         self.port = port or 4096
         self.password = secrets.token_urlsafe(24)
         self._process: Optional[subprocess.Popen] = None
+        #: The config this server was started with. An attached task uses it
+        #: too, so a task never asks for an agent its server does not have.
+        self.config: Dict[str, Any] = {}
 
     def __enter__(self) -> "Session":
         binary = _binary()
@@ -180,6 +209,7 @@ class Session:
         env["NO_PROXY"] = f"{env.get('NO_PROXY', '')},127.0.0.1,localhost".lstrip(",")
         env["no_proxy"] = env["NO_PROXY"]
         config = _harness_config(_model())
+        self.config = config
         if config:
             env["OPENCODE_CONFIG_CONTENT"] = json.dumps(config)
 
@@ -283,6 +313,9 @@ class _Trace:
         self.cost = 0.0
         self.last_text = ""
         self.tool_errors: list = []
+        #: Finished tool calls, one per call id, for the caller to keep as
+        #: evidence: {"tool", "input", "output", "status"}.
+        self._calls: Dict[str, Dict[str, Any]] = {}
 
     def add(self, event: Dict[str, Any]) -> None:
         if self.session_id is None:
@@ -314,10 +347,25 @@ class _Trace:
             status = str(state.get("status") or "")
             if status and status not in ("completed", "running", "pending"):
                 self.tool_errors.append(f"{name}: {status}")
+            if status in ("completed", "error"):
+                inputs = state.get("input")
+                output = (state.get("output") if status == "completed"
+                          else f"The tool failed, so nothing was read: {state.get('error')}")
+                key = str(part.get("callID") or part.get("id") or len(self._calls))
+                self._calls[key] = {
+                    "tool": name,
+                    "input": inputs if isinstance(inputs, dict) else {},
+                    "output": "" if output is None else str(output),
+                    "status": status,
+                }
         elif kind == "text":
             text = str(part.get("text") or "").strip()
             if text:
                 self.last_text = text
+
+    @property
+    def tool_calls(self) -> list:
+        return list(self._calls.values())
 
     def summary(self) -> Dict[str, Any]:
         return {
@@ -433,11 +481,20 @@ def run_task(prompt: str, output_path: str,
     # instead of the opencode API response.
     env["NO_PROXY"] = f"{env.get('NO_PROXY', '')},127.0.0.1,localhost".lstrip(",")
     env["no_proxy"] = env["NO_PROXY"]
-    config = _harness_config(_model())
-    if config:
-        env["OPENCODE_CONFIG_CONTENT"] = json.dumps(config)
 
     session = session or current_session()
+    # An attached task runs on its server, so it takes the server's config:
+    # an agent the server was not started with does not exist there.
+    config = session.config if session else _harness_config(_model())
+    if config:
+        env["OPENCODE_CONFIG_CONTENT"] = json.dumps(config)
+    # The role's own opencode agent, which may use only the MCP tools that
+    # role gets. With no tool servers configured there is none, and the task
+    # runs as opencode's default agent exactly as before.
+    agent = _task_agent(node, config)
+    if agent:
+        argv[argv.index("--dir"):argv.index("--dir")] = ["--agent", agent]
+
     if session:
         argv[2:2] = ["--attach", session.url]
         env["OPENCODE_SERVER_PASSWORD"] = session.password
@@ -571,6 +628,9 @@ def run_task(prompt: str, output_path: str,
         "seconds": round(elapsed, 1),
         "model": _model(),
         "trace": trace.summary(),
+        # What its tools returned; the caller keeps the MCP ones as evidence
+        # (mcp_client.evidence_from_harness).
+        "tool_calls": trace.tool_calls,
     }
 
 

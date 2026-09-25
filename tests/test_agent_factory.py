@@ -1,9 +1,11 @@
 """
-core/agent_factory.py -- every agent is a deep agent.
+core/agent_factory.py -- every agent is a deep agent, with its tools over MCP.
 
 These build real deep agents (deepagents.create_deep_agent) around a scripted
-chat model, so the middleware stack, the tool node, the `task` subagent and
-the limits all genuinely run. Only the model's replies are canned.
+chat model, with their tools served by the real tool server over HTTP (the
+`tool_server` fixture), so the middleware stack, the tool node, the MCP round
+trip, the `task` subagent and the limits all genuinely run. Only the model's
+replies are canned.
 """
 import pytest
 from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
@@ -14,7 +16,7 @@ from langchain_core.tools import tool
 
 from src.core import agent_factory
 from src.core.agent_factory import OPERATING_MODE, build_agent
-from src.tools import agent_tools
+from src.tools import agent_tools, mcp_client
 from src.tools.agent_tools import Toolset, agent_tool
 
 
@@ -46,8 +48,8 @@ def calls_tool(name, arguments, call_id):
 
 
 @pytest.fixture
-def probe_tool():
-    """A throwaway registered tool for the reviewer role, removed afterwards."""
+def probe_tool(tool_server):
+    """A throwaway tool for the reviewer role, served over MCP; removed after."""
     agent_tools.discover()
     saved = dict(agent_tools._registry)
     toolset = Toolset(name="factory_probe", agents=("reviewer",),
@@ -58,6 +60,7 @@ def probe_tool():
         """Look a refId up."""
         return f"probe:{refid}"
 
+    tool_server()
     yield "probe_lookup"
     agent_tools._registry.clear()
     agent_tools._registry.update(saved)
@@ -82,16 +85,17 @@ def test_system_prompt_is_the_role_prompt_then_tools_then_operating_mode(probe_t
     assert result["messages"][-1].content == "ok"
     text = system_text(model.requests[0])
     assert text.startswith("ROLE PROMPT")
-    assert text.index("ROLE PROMPT") < text.index(agent_tools.TOOLS_HEADING) \
+    assert text.index("ROLE PROMPT") < text.index(mcp_client.TOOLS_HEADING) \
         < text.index("### OPERATING MODE")
     assert "Probe guidance for the reviewer." in text
+    assert mcp_client.TOOLS_HEADING in text
 
 
 def test_a_role_without_tools_gets_no_tools_section():
     model = ScriptedModel(replies=[AIMessage(content="ok")])
     build_agent("synthesis", model, "ROLE").invoke({"messages": [HumanMessage(content="x")]})
     text = system_text(model.requests[0])
-    assert agent_tools.TOOLS_HEADING not in text
+    assert mcp_client.TOOLS_HEADING not in text
     assert OPERATING_MODE in text
 
 
@@ -100,7 +104,7 @@ def test_registered_tool_calls_run_and_are_recorded(probe_tool):
                                    AIMessage(content="FINAL")])
     agent = build_agent("reviewer", model, "ROLE", tools=[side_effect_tool])
 
-    with agent_tools.recording() as calls:
+    with mcp_client.recording() as calls:
         result = agent.invoke({"messages": [HumanMessage(content="go")]})
 
     assert result["messages"][-1].content == "FINAL"
@@ -117,7 +121,7 @@ def test_the_subagent_gets_registered_tools_only_and_its_calls_are_recorded(prob
     ])
     agent = build_agent("reviewer", model, "ROLE", tools=[side_effect_tool])
 
-    with agent_tools.recording() as calls:
+    with mcp_client.recording() as calls:
         result = agent.invoke({"messages": [HumanMessage(content="go")]})
 
     assert result["messages"][-1].content == "MAIN"
@@ -135,7 +139,7 @@ def test_past_the_tool_limit_calls_are_refused_and_the_model_answers(probe_tool,
                                    AIMessage(content="ANSWER")])
     agent = build_agent("reviewer", model, "ROLE")
 
-    with agent_tools.recording() as calls:
+    with mcp_client.recording() as calls:
         result = agent.invoke({"messages": [HumanMessage(content="go")]})
 
     assert result["messages"][-1].content == "ANSWER"
@@ -164,5 +168,5 @@ def test_an_explicit_tool_may_not_share_a_registered_name(probe_tool):
         """Clashes with the registered probe."""
         return refid
 
-    with pytest.raises(ValueError, match="both passed explicitly and registered"):
+    with pytest.raises(ValueError, match="both passed explicitly and served over MCP"):
         build_agent("reviewer", ScriptedModel(replies=[]), "ROLE", tools=[probe_lookup])

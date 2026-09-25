@@ -3,9 +3,10 @@ Every agent in the pipeline is a deep agent (`deepagents.create_deep_agent`).
 
 One builder for both lanes, so every agent gets the same things:
 
-- the tools registered for its role in `src/tools/agent_tools`, with the
-  system-prompt section describing them, beside any tools the orchestrator
-  passes itself (queue_for_replay, add_learning_rule);
+- the tools its role gets from the MCP tool servers (src/tools/mcp_client.py;
+  src/tools/mcp_config.py says which servers), with the system-prompt section
+  describing them, beside any tools the orchestrator passes itself
+  (queue_for_replay, add_learning_rule);
 - the deep-agent built-ins: planning (write_todos), a scratch filesystem held
   in the run's own state -- nothing is written to disk -- and `task`
   subagents;
@@ -20,8 +21,8 @@ left to the deepagents default, for two reasons. The default copies every
 tool the parent has -- which would hand queue_for_replay and
 add_learning_rule, the two tools with side effects, to a subagent none of the
 prompts mention -- and it gets none of the parent's middleware, so it would
-run without the limits. Here it gets the role's registered tools and limits
-of its own.
+run without the limits. Here it gets the role's MCP tools and limits of its
+own.
 
 The system prompt is fixed when the agent is built, so a node invokes the
 agent with the user message alone: {"messages": [HumanMessage(...)]}.
@@ -36,7 +37,7 @@ from langchain.agents.middleware import (
     ToolCallLimitMiddleware,
 )
 
-from src.tools import agent_tools
+from src.tools import mcp_client
 from src.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -95,7 +96,7 @@ def system_prompt_for(role: str, system_prompt: str) -> str:
     deepagents appends its own base prompt and the built-in tools'
     instructions after this.
     """
-    parts = [(system_prompt or "").rstrip(), agent_tools.prompt_section(role),
+    parts = [(system_prompt or "").rstrip(), mcp_client.prompt_section(role),
              OPERATING_MODE]
     return "\n\n".join(part for part in parts if part)
 
@@ -103,15 +104,15 @@ def system_prompt_for(role: str, system_prompt: str) -> str:
 def build_agent(role: str, model, system_prompt: str, tools: Sequence = ()):
     """Build the deep agent for `role` (one of agent_tools.AGENT_ROLES).
 
-    `tools` are the role's explicit tools; the registered ones are added
-    here. Returns a compiled graph to invoke with {"messages": [...]}.
+    `tools` are the role's explicit tools; its MCP tools are added here.
+    Returns a compiled graph to invoke with {"messages": [...]}.
     """
-    registered = agent_tools.tools_for(role)
+    registered = mcp_client.tools_for(role)
     explicit = list(tools)
     clash = sorted({tool.name for tool in explicit} & {tool.name for tool in registered})
     if clash:
         raise ValueError(f"Tool name(s) {clash} are both passed explicitly and "
-                         f"registered for role {role!r}.")
+                         f"served over MCP for role {role!r}.")
 
     general_purpose = {
         **GENERAL_PURPOSE_SUBAGENT,
@@ -128,7 +129,7 @@ def build_agent(role: str, model, system_prompt: str, tools: Sequence = ()):
     )
     logger.info("Agent built", role=role,
                 explicit_tools=[tool.name for tool in explicit],
-                registered_tools=[tool.name for tool in registered],
+                mcp_tools=[tool.name for tool in registered],
                 max_tool_calls=max_tool_calls(),
                 max_model_calls=max_model_calls())
     return agent

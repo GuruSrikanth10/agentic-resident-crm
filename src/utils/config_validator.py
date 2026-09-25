@@ -112,12 +112,15 @@ def validate_config():
             if not os.environ.get(var, "").strip():
                 errors.append(f"PROCESS_DB_ENABLED=true requires {var} to be set.")
 
-    # 4c. Every agent tool module imports, and every AGENT_TOOLS_<ROLE>
-    # selection names a real role and real tools. Checked here because the
-    # agents are built lazily: a broken tool module or a typo in a selection
-    # would otherwise surface as every packet failing, not as a failed boot.
-    from src.tools import agent_tools
+    # 4c. Every agent tool module imports, the MCP tool server settings parse,
+    # and every AGENT_TOOLS_<ROLE> variable names a real role. Checked here
+    # because the agents are built lazily: a broken tool module or a typo in a
+    # setting would otherwise surface as every packet failing, not as a failed
+    # boot. (The tool names a selection lists are checked against the servers'
+    # listings when the first agent is built; the servers are not up yet.)
+    from src.tools import agent_tools, mcp_client
     errors.extend(agent_tools.validate())
+    errors.extend(mcp_client.validate())
 
     # 5. Storage and SQLite checkpointer paths are writable
     try:

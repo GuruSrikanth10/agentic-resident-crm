@@ -104,6 +104,8 @@ PROCESS_DB = Toolset(
     agents=("investigator",),
     guidance=GUIDANCE,
     enabled=is_enabled,
+    # Every statement is a SELECT on a READ ONLY session.
+    read_only=True,
 )
 
 

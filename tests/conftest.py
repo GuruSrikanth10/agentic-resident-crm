@@ -114,10 +114,16 @@ ISOLATED_ENV_VARS = (
     # guard for the whole session or make every live claim look abandoned.
     "PACKET_CLAIM_ENABLED",
     "PACKET_CLAIM_TTL_SECONDS",
-    # Agent tools: the process DB toolset's switch and the per-role
-    # selections. Either decides which tools a built agent is offered, and so
-    # what its system prompt says.
+    # Agent tools: the process DB toolset's switch, the MCP tool servers the
+    # agents use (and whether the API runs its own), and the per-role
+    # selections. Each decides which tools a built agent is offered, and so
+    # what its system prompt says; AGENT_MCP_SERVE also decides whether a
+    # tool server process is started at all.
     "PROCESS_DB_ENABLED",
+    "AGENT_MCP_SERVE",
+    "AGENT_MCP_SERVERS",
+    "AGENT_MCP_HOST",
+    "AGENT_MCP_PORT",
     "AGENT_TOOLS_INVESTIGATOR",
     "AGENT_TOOLS_REVIEWER",
     "AGENT_TOOLS_SYNTHESIS",
@@ -142,6 +148,8 @@ TEST_ENV_DEFAULTS = {
     "USE_MOCK_DB": "true",
     "CASEBOOK_STORAGE_BACKEND": "local",
     "CHECKPOINT_BACKEND": "sqlite",
+    # No tool server process unless a test starts one (tests/mcp_fixtures.py).
+    "AGENT_MCP_SERVE": "false",
 }
 
 
@@ -184,3 +192,58 @@ def hermetic_env():
         os.environ.setdefault(name, value)
 
     yield
+
+
+@pytest.fixture(autouse=True)
+def fresh_tool_catalog():
+    """Each test lists the tool servers it configures, not an earlier test's."""
+    from src.tools import mcp_client
+
+    mcp_client.reset()
+    yield
+    mcp_client.reset()
+
+
+@pytest.fixture
+def tool_server(monkeypatch):
+    """Start the real agent tool server over HTTP, in this process.
+
+    Yields a function: call it -- after registering any probe tools, since the
+    server serves what is registered when it starts -- to start a server on a
+    free loopback port and point AGENT_MCP_SERVERS at it. It returns the URL.
+    In-process so a test can patch what the tools read (a SQLite engine for
+    the process DB) and so every server stops with the test.
+    """
+    import json
+    import socket
+    import threading
+    import time
+
+    import uvicorn
+
+    from src.tools.mcp_server import build_app
+
+    started = []
+
+    def start(name: str = "agent_tools") -> str:
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        server = uvicorn.Server(uvicorn.Config(build_app("127.0.0.1"), host="127.0.0.1",
+                                               port=port, log_level="warning", ws="none"))
+        thread = threading.Thread(target=server.run, daemon=True)
+        thread.start()
+        deadline = time.monotonic() + 10
+        while not server.started:
+            if time.monotonic() > deadline or not thread.is_alive():
+                raise RuntimeError("the test tool server did not start")
+            time.sleep(0.02)
+        started.append((server, thread))
+        url = f"http://127.0.0.1:{port}/mcp"
+        monkeypatch.setenv("AGENT_MCP_SERVERS", json.dumps({name: {"url": url}}))
+        return url
+
+    yield start
+    for server, thread in started:
+        server.should_exit = True
+        thread.join(timeout=10)

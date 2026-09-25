@@ -507,6 +507,14 @@ def readiness_check():
     except Exception as e:
         logger.error("Readiness check failed on the checkpoint store", backend=backend, error=f"{type(e).__name__}: {e}")
 
+    # The bundled agent tool server, when this process runs one (main_api's
+    # lifespan). Every agent reaches its tools over MCP; a graph built while
+    # the server is still starting would be built without them.
+    from src.tools import mcp_server
+    tool_server = mcp_server.local_server()
+    if tool_server is not None and not tool_server.healthy():
+        raise HTTPException(status_code=503, detail="Starting agent tool server")
+
     # When ANY lane uses the opencode harness, the API is not ready until the
     # documentation corpus has been downloaded to disk. Without this, the
     # consumers start forwarding packets before the agent can read the docs.

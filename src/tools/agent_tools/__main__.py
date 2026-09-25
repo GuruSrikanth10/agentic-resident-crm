@@ -1,36 +1,33 @@
 """
-Operator CLI for the agent tools.
+Operator CLI for the tools registered in this package, in-process.
 
     python3 -m src.tools.agent_tools list
-    python3 -m src.tools.agent_tools prompt investigator
     python3 -m src.tools.agent_tools call get_packet_stage_summary '{"refid": "<refId>"}'
 
-`list` shows every registered tool, whether its toolset is switched on, and
-which roles get it now (after AGENT_TOOLS_<ROLE> overrides). `prompt` prints
-the AVAILABLE TOOLS section a role's system prompt receives. `call` runs one
-tool exactly as an agent would -- same argument validation, same output --
-which is how to check a new tool against a real system before an agent uses
-it. Touches nothing in the packet path.
+`list` shows every registered tool, its toolset, whether that toolset is
+switched on, and the roles it names. `call` runs one tool in this process --
+same argument validation, same output as the server -- which is the quickest
+way to develop a tool against a real system. No MCP server is involved; to
+see what the agents actually get through MCP, use
+`python3 -m src.tools.mcp_client`.
 
 Exit codes:
     0  done
-    1  could not run (unknown tool or role, arguments that do not validate)
+    1  could not run (unknown tool, arguments that do not validate)
 """
 import argparse
 import json
 import sys
 
-from src.tools.agent_tools import AGENT_ROLES, describe, get_tool, prompt_section
+from src.tools.agent_tools import describe, get_tool
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="python3 -m src.tools.agent_tools",
-                                     description="Inspect and run the agent tools.")
+                                     description="Inspect and run the registered tools in-process.")
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("list", help="every registered tool and who gets it")
-    prompt = commands.add_parser("prompt", help="the tools section of a role's prompt")
-    prompt.add_argument("role", choices=AGENT_ROLES)
-    call = commands.add_parser("call", help="run one tool as an agent would")
+    commands.add_parser("list", help="every registered tool")
+    call = commands.add_parser("call", help="run one tool in-process")
     call.add_argument("tool")
     call.add_argument("arguments", nargs="?", default="{}",
                       help='a JSON object, e.g. \'{"refid": "..."}\'')
@@ -40,10 +37,6 @@ def main(argv=None) -> int:
         if args.command == "list":
             print(json.dumps(describe(), indent=2))
             return 0
-        if args.command == "prompt":
-            print(prompt_section(args.role) or f"(no tools for {args.role})")
-            return 0
-
         tool = get_tool(args.tool)
         arguments = json.loads(args.arguments)
         if not isinstance(arguments, dict):

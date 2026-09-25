@@ -15,11 +15,11 @@ say clearly what the evidence cannot establish -- not to explain a bug it
 cannot see.
 
 The three agents are deep agents built by `core/agent_factory.py`, which
-gives each the tools registered for its role. No toolset is registered for
-the dlt_* roles: the narrative here is stored per error code and re-served to
-every record with the same failure signature, and a tool that reads one
-packet's data would put that packet's facts into it. Should a tool be
-registered for them, what it returns joins the evidence block below, so the
+gives each the tools its role gets from the MCP tool servers. No tool is
+meant for the dlt_* roles: the narrative here is stored per error code and
+re-served to every record with the same failure signature, and a tool that
+reads one packet's data would put that packet's facts into it. Should a tool
+be given to them, what it returns joins the evidence block below, so the
 Reviewer checks against it like any other evidence.
 """
 import json
@@ -33,7 +33,7 @@ from typing_extensions import TypedDict
 
 from src.core.agent_factory import build_agent
 from src.dlt.corroborate import Corroboration
-from src.tools import agent_tools
+from src.tools import mcp_client
 from src.models.dlt_synthesis import DltFinding
 from src.utils import metrics
 from src.utils.llm_utils import get_llm
@@ -43,6 +43,9 @@ from src.utils.resilience import llm_breaker, retry_transient
 logger = get_logger(__name__)
 
 _agent = None
+
+#: The tool catalog `_agent` was built from; see agent_orchestrator's.
+_agent_catalog = None
 
 #: Guards the lazy build. `/analyze-dlt` is a sync endpoint dispatched on
 #: Starlette's threadpool, so two concurrent DLT cases can already reach the
@@ -63,7 +66,7 @@ class DltGraphState(TypedDict, total=False):
     retry_count: int
     finding: Optional[dict]
     parse_error: Optional[str]
-    #: What the Investigator's registered tools returned (agent_tools
+    #: What the Investigator's MCP tools returned (mcp_client
     #: records), merged across attempts. Empty while the dlt_* roles have no
     #: tools, which is the default.
     tool_evidence: list
@@ -141,7 +144,7 @@ def _evidence_block(state: DltGraphState) -> str:
 
 def _tool_evidence_block(state: DltGraphState) -> str:
     """The Investigator's tool results, as a final evidence section, or ""."""
-    rendered = agent_tools.render_evidence(state.get("tool_evidence"))
+    rendered = mcp_client.render_evidence(state.get("tool_evidence"))
     return f"\n### Evidence retrieved with tools\n{rendered}\n" if rendered else ""
 
 
@@ -163,20 +166,21 @@ def _write_harness_case_files(case_dir, state: DltGraphState) -> None:
 def get_dlt_agent():
     """Build (and cache) the DLT analysis graph."""
     global _agent
-    if _agent is not None:
+    if _agent is not None and not mcp_client.is_stale(_agent_catalog):
         return _agent
 
     with _agent_lock:
-        if _agent is not None:
+        if _agent is not None and not mcp_client.is_stale(_agent_catalog):
             return _agent
         return _build_dlt_agent()
 
 
 def _build_dlt_agent():
     """Construct the graph. Caller must hold `_agent_lock`."""
-    global _agent
+    global _agent, _agent_catalog
 
     logger.info("Building the DLT agent graph")
+    _agent_catalog = mcp_client.current_catalog()
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     prompts_dir = os.path.join(base_dir, "prompts")
 
@@ -188,8 +192,8 @@ def _build_dlt_agent():
     reviewer_prompt = load_prompt("DltReviewerAgent.md")
     synthesis_prompt = load_prompt("DltSynthesisAgent.md")
 
-    # Deep agents, each with the tools registered for its role -- none by
-    # default (see the module docstring). The system prompts are fixed here,
+    # Deep agents, each with the MCP tools its role gets -- none by default
+    # (see the module docstring). The system prompts are fixed here,
     # so every node below sends only its user message.
     llm = get_llm("complex")
     investigator_agent = build_agent("dlt_investigator", llm, investigator_prompt)
@@ -231,6 +235,9 @@ def _build_dlt_agent():
                 ref_id=ref_id,
                 output_path=output_path,
             )
+            tools_section = mcp_client.prompt_section("dlt_investigator", opencode=True)
+            if tools_section:
+                harness_prompt = f"{harness_prompt.rstrip()}\n\n{tools_section}\n"
 
             try:
                 result = opencode_runner.run_task_json(
@@ -242,7 +249,10 @@ def _build_dlt_agent():
                 log.info("DLT investigator finished (opencode harness)",
                          elapsed=result.get("seconds"),
                          **(result.get("trace") or {}))
-                return {"investigation": investigation}
+                calls = mcp_client.evidence_from_harness(result.get("tool_calls"))
+                return {"investigation": investigation,
+                        "tool_evidence": mcp_client.merge_evidence(
+                            state.get("tool_evidence"), calls)}
             except Exception as e:
                 log.warning("opencode harness failed for DLT investigator; falling back to direct LLM",
                             error=f"{type(e).__name__}: {e}")
@@ -258,7 +268,7 @@ def _build_dlt_agent():
         @retry_transient
         def invoke():
             # Recorded per attempt, as in the rejection lane.
-            with agent_tools.recording() as calls:
+            with mcp_client.recording() as calls:
                 result = investigator_agent.invoke({"messages": [
                     HumanMessage(content=prompt),
                 ]})
@@ -268,7 +278,7 @@ def _build_dlt_agent():
         metrics.record_llm_usage("dlt_investigator", res)
         metrics.LLM_CALLS.labels(node="dlt_investigator", outcome="ok").inc()
         return {"investigation": res["messages"][-1].content,
-                "tool_evidence": agent_tools.merge_evidence(
+                "tool_evidence": mcp_client.merge_evidence(
                     state.get("tool_evidence"), calls)}
 
     def reviewer_node(state: DltGraphState):
@@ -295,6 +305,10 @@ def _build_dlt_agent():
                 ref_id=ref_id,
                 output_path=output_path,
             )
+            tools_section = mcp_client.prompt_section("dlt_reviewer", opencode=True)
+            if tools_section:
+                reviewer_harness_prompt = (f"{reviewer_harness_prompt.rstrip()}"
+                                           f"\n\n{tools_section}\n")
 
             try:
                 # Inside the try, and the evidence rewritten rather than
@@ -463,5 +477,6 @@ def investigate(ref_id: str, failure: dict, corroboration: Corroboration,
 
 def reset_agent_cache() -> None:
     """Drop the cached graph. For tests."""
-    global _agent
+    global _agent, _agent_catalog
     _agent = None
+    _agent_catalog = None

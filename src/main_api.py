@@ -114,6 +114,13 @@ async def lifespan(app: FastAPI):
         threading.Thread(target=s3_storage.probe_configured_endpoint,
                          name="s3-cas-probe", daemon=True).start()
 
+    # The bundled agent tool server (src/tools/mcp_server.py), when this
+    # deployment serves its own tools. Every agent reaches its tools over MCP,
+    # so it starts first: a child process, supervised and restarted if it
+    # dies, and /ready waits for it. Starting it returns at once.
+    from src.tools import mcp_server
+    tool_server = mcp_server.start_local_server()
+
     # Start the opencode harness in a background thread so the API binds
     # its port immediately. The corpus download and `opencode serve` cold
     # boot take 15-30s; doing them in the lifespan blocked the API from
@@ -131,6 +138,12 @@ async def lifespan(app: FastAPI):
         def _start_harness():
             try:
                 docs_loader.download_corpus()
+                # opencode connects to its MCP servers once, as it starts: a
+                # tool server that is not up yet would leave every harness task
+                # without tools until the next restart.
+                if tool_server is not None and not tool_server.wait_healthy(120):
+                    print("Agent tool server is not healthy after 120s; starting "
+                          "opencode anyway, and its tasks will lack the tools.")
                 global _opencode_session
                 _opencode_session = opencode_runner.session_scope()
                 _opencode_session.__enter__()
@@ -152,6 +165,9 @@ async def lifespan(app: FastAPI):
         session = opencode_runner.current_session()
         if session:
             session.__exit__(None, None, None)
+
+    # Last: the drain above may still have been calling tools.
+    mcp_server.stop_local_server()
 
 app = FastAPI(
     title="Agentic Resident CRM API",

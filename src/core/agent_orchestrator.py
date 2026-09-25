@@ -10,7 +10,7 @@ from langchain_core.messages import HumanMessage
 from src.utils import metrics, reason_code_docs
 from src.core import rejection_context
 from src.core.agent_factory import build_agent
-from src.tools import agent_tools
+from src.tools import mcp_client
 from src.utils.llm_utils import get_llm
 from src.tools.tool_registry import (
     fetch_and_persist_logs,
@@ -274,6 +274,17 @@ TOOL_EVIDENCE_FILE = "tool_evidence.txt"
 TOOL_EVIDENCE_ARTIFACT = "tool_evidence.json"
 
 
+def _with_tools_section(prompt: str, role: str) -> str:
+    """A harness prompt with `role`'s AVAILABLE TOOLS section appended.
+
+    The same section a deep agent's system prompt gets, with the tools named
+    as opencode names them; nothing is appended for a role with no tools, so
+    the prompt is then exactly the template.
+    """
+    section = mcp_client.prompt_section(role, opencode=True)
+    return f"{prompt.rstrip()}\n\n{section}\n" if section else prompt
+
+
 def _persist_tool_evidence(event_id: str, records: list, log) -> None:
     """Keep the Investigator's tool results beside the casebook.
 
@@ -324,13 +335,20 @@ class GraphState(TypedDict):
     #: paths would be scoring runs that were not on the path they claim.
     investigator_path: str
     reviewer_path: str
-    #: What the Investigator's tools returned, as agent_tools records
-    #: ({"tool", "args", "result"}), merged across its attempts. The Reviewer
+    #: What the Investigator's tools returned, as mcp_client records
+    #: ({"tool", "args", "result"}), merged across its attempts -- direct and
+    #: harness attempts alike. The Reviewer
     #: is given it as evidence -- it sees what the Investigator saw (D8) -- and
     #: a retry is given it so a lookup is not repeated for nothing.
     tool_evidence: list
 
 _agent = None
+
+#: The tool catalog `_agent` was built from. When it was incomplete -- a tool
+#: server could not be listed -- `get_agent` rebuilds the graph once the
+#: catalog is due to be fetched again, so an outage at startup costs the
+#: packets that met it their tools, not every packet until a restart.
+_agent_catalog = None
 
 #: Guards the lazy build below. Two concurrent first-callers each built a full
 #: graph -- two LLM clients, four react agents, and two `get_checkpointer()`
@@ -400,7 +418,7 @@ def compute_prompt_fingerprint(base_dir: str) -> str:
     # operating note every agent gets. Switching a toolset on or off changes
     # what the agents can see, so it moves the fingerprint like a prompt edit.
     from src.core.agent_factory import OPERATING_MODE
-    for name, body in (("agent_tools", agent_tools.fingerprint_material()),
+    for name, body in (("agent_tools", mcp_client.fingerprint_material()),
                        ("operating_mode", OPERATING_MODE)):
         encoded = body.encode("utf-8")
         digest.update(name.encode("utf-8"))
@@ -417,24 +435,27 @@ def prompt_fingerprint() -> str:
 def get_agent():
     global _agent, _prompt_fingerprint
 
-    # Fast path without the lock: once built, `_agent` never changes, and an
-    # unsynchronised read of an already-published reference is safe.
-    if _agent is not None:
+    # Fast path without the lock: a built graph is only ever replaced, never
+    # mutated, and an unsynchronised read of a published reference is safe.
+    if _agent is not None and not mcp_client.is_stale(_agent_catalog):
         logger.info("Returning the cached agent graph")
         return _agent
 
     with _agent_lock:
         # Re-check: another thread may have built it while we waited.
-        if _agent is not None:
+        if _agent is not None and not mcp_client.is_stale(_agent_catalog):
             return _agent
         return _build_agent()
 
 
 def _build_agent():
     """Construct the graph. Caller must hold `_agent_lock`."""
-    global _agent, _prompt_fingerprint
+    global _agent, _prompt_fingerprint, _agent_catalog
 
     logger.info("Building the agent graph")
+    # Fetched before anything reads it, so the fingerprint and all four
+    # agents describe the same tools.
+    _agent_catalog = mcp_client.current_catalog()
     base_dir = os.path.dirname(os.path.dirname(__file__))
     _prompt_fingerprint = compute_prompt_fingerprint(base_dir)
     logger.info("Prompt fingerprint computed", prompt_fingerprint=_prompt_fingerprint)
@@ -601,7 +622,7 @@ def _build_agent():
 
     # Create agents once during graph construction, not per invocation. Each
     # is a deep agent (core/agent_factory.py), which also gives it the tools
-    # registered for its role in src/tools/agent_tools. The system prompt is
+    # its role gets from the MCP tool servers. The system prompt is
     # fixed here, so every node below sends only its user message.
     investigator_agent = build_agent("investigator", llm, investigator_prompt)
     log_filter_agent = build_agent("log_filter", llm, log_filter_prompt)
@@ -796,12 +817,12 @@ def _build_agent():
             output_path = str(case_dir / "investigation.json")
 
             from src.utils.prompt_loader import render as render_prompt
-            harness_prompt = render_prompt(
+            harness_prompt = _with_tools_section(render_prompt(
                 "RejectionInvestigator",
                 event_id=event_id,
                 etype_display=etype_display,
                 output_path=output_path,
-            )
+            ), "investigator")
 
             try:
                 # No `timeout=` here: opencode_runner._task_timeout() is the
@@ -819,13 +840,21 @@ def _build_agent():
                 log.info("Investigator finished (opencode harness)",
                          elapsed=result.get("seconds"),
                          **(result.get("trace") or {}))
+                # Its MCP tool calls are evidence exactly as the direct path's
+                # are: read off the task's event stream, since they happened
+                # inside opencode.
+                calls = mcp_client.evidence_from_harness(result.get("tool_calls"))
+                tool_evidence = mcp_client.merge_evidence(state.get("tool_evidence"), calls)
+                if calls:
+                    _persist_tool_evidence(event_id, tool_evidence, log)
                 # The harness is deliberately NOT given the documents (D13):
                 # it explores the corpus itself, and leaving its prompt alone
                 # keeps the two paths comparable. The state is carried anyway
                 # so the Reviewer and the casebook see the same shape on both.
                 return {"investigation": investigation, "db_rule": db_rule,
                         "reason_code_doc": doc_state,
-                        "investigator_path": "harness"}
+                        "investigator_path": "harness",
+                        "tool_evidence": tool_evidence}
             except Exception as e:
                 log.warning("opencode harness failed; falling back to direct LLM",
                             error=f"{type(e).__name__}: {e}")
@@ -833,7 +862,7 @@ def _build_agent():
 
         # What this packet's earlier attempts looked up with tools. Empty on
         # a first pass, and on every pass when no tool was used.
-        prior_tool_evidence = agent_tools.render_evidence(state.get("tool_evidence"))
+        prior_tool_evidence = mcp_client.render_evidence(state.get("tool_evidence"))
 
         if reason_code_docs.docs_enabled():
             # Assembled in rejection_context, in a fixed order and under
@@ -896,7 +925,7 @@ def _build_agent():
             # Recorded per attempt: a retried call starts a fresh list, so the
             # lookups of an attempt that raised never pose as the evidence of
             # the run that produced the answer.
-            with agent_tools.recording() as calls:
+            with mcp_client.recording() as calls:
                 result = investigator_agent.invoke({"messages": [
                     HumanMessage(content=prompt)
                 ]})
@@ -905,7 +934,7 @@ def _build_agent():
         res, calls = _counted("investigator", invoke_investigator)
         metrics.record_llm_usage("investigator", res)
         metrics.LLM_CALLS.labels(node="investigator", outcome="ok").inc()
-        tool_evidence = agent_tools.merge_evidence(state.get("tool_evidence"), calls)
+        tool_evidence = mcp_client.merge_evidence(state.get("tool_evidence"), calls)
         if calls:
             _persist_tool_evidence(event_id, tool_evidence, log)
         log.info("Investigator finished analysis",
@@ -934,7 +963,7 @@ def _build_agent():
 
         # What the Investigator's tools returned: evidence the Reviewer must
         # see to check a finding that rests on it.
-        tool_evidence = agent_tools.render_evidence(state.get("tool_evidence"))
+        tool_evidence = mcp_client.render_evidence(state.get("tool_evidence"))
 
         if use_harness:
             from src.utils import opencode_runner
@@ -944,11 +973,11 @@ def _build_agent():
             output_path = str(case_dir / "review.json")
 
             from src.utils.prompt_loader import render as render_prompt
-            harness_prompt = render_prompt(
+            harness_prompt = _with_tools_section(render_prompt(
                 "RejectionReviewer",
                 event_id=event_id,
                 output_path=output_path,
-            )
+            ), "reviewer")
 
             try:
                 # Inside the try, and the evidence rewritten rather than

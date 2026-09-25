@@ -4,8 +4,9 @@ the Reviewer (direct and harness), a retry, the casebook's provenance and the
 prompt fingerprint -- and a packet investigated without tools gets exactly
 the prompts it got before tools existed.
 
-The agents are stubs whose `invoke` calls a registered tool the way a deep
-agent's tool node would, inside the node's recording.
+The agents are stubs whose `invoke` calls a tool over MCP -- served by the
+real tool server (the `tool_server` fixture) -- the way a deep agent's tool
+node would, inside the node's recording.
 """
 import asyncio
 import json
@@ -17,41 +18,47 @@ from langchain_core.messages import AIMessage
 import src.core.agent_orchestrator as orch
 import src.dlt.orchestrator as dlt
 from src.core import rejection_context
-from src.tools import agent_tools
+from src.tools import agent_tools, mcp_client
 from src.tools.agent_tools import Toolset, agent_tool
 
 REFID = "3f2b9c1e-0d4a-4a8e-9b1f-6c7d8e9f0a1b"
 
 
 @pytest.fixture
-def probe():
-    """A registered tool, removed afterwards. Returns its name."""
+def probe(tool_server):
+    """A tool served over MCP to the investigator roles, removed afterwards.
+    Returns its name."""
     agent_tools.discover()
     saved = dict(agent_tools._registry)
-    toolset = Toolset(name="evidence_probe", agents=("investigator",))
+    toolset = Toolset(name="evidence_probe", agents=("investigator", "dlt_investigator"))
 
     @agent_tool(toolset)
     def evidence_probe(refid: str) -> str:
         """Probe."""
         return json.dumps({"refid": refid, "parked_now": False})
 
+    tool_server()
     yield "evidence_probe"
     agent_tools._registry.clear()
     agent_tools._registry.update(saved)
 
 
 class ToolUsingAgent:
-    """Calls `tool_name` once per invoke, then answers; keeps its prompts."""
+    """Calls `tool_name` over MCP once per invoke, then answers; keeps its
+    prompts."""
 
-    def __init__(self, tool_name=None, reply="the findings"):
+    def __init__(self, tool_name=None, reply="the findings", role="investigator"):
         self.tool_name = tool_name
         self.reply = reply
+        self.role = role
         self.prompts = []
 
     def invoke(self, request):
         self.prompts.append(request["messages"][-1].content)
         if self.tool_name:
-            agent_tools.get_tool(self.tool_name).invoke({"refid": REFID})
+            tool = next(tool for tool in mcp_client.tools_for(self.role)
+                        if tool.name == self.tool_name)
+            tool.invoke({"refid": REFID})
         return {"messages": [AIMessage(content=self.reply)]}
 
 
@@ -210,16 +217,14 @@ def test_casebook_provenance_lists_the_tool_calls(monkeypatch):
         _cleanup_casebook(event_id)
 
 
-def test_prompt_fingerprint_moves_with_the_tool_configuration(monkeypatch):
+def test_prompt_fingerprint_moves_with_the_tools_served(monkeypatch, probe):
     import os
 
     base_dir = os.path.dirname(os.path.dirname(orch.__file__))
-    monkeypatch.setenv("PROCESS_DB_ENABLED", "false")
-    off = orch.compute_prompt_fingerprint(base_dir)
-    monkeypatch.setenv("PROCESS_DB_ENABLED", "true")
-    on = orch.compute_prompt_fingerprint(base_dir)
-    assert off != on
-    assert on == orch.compute_prompt_fingerprint(base_dir)
+    served = orch.compute_prompt_fingerprint(base_dir)
+    assert served == orch.compute_prompt_fingerprint(base_dir)
+    monkeypatch.delenv("AGENT_MCP_SERVERS")
+    assert orch.compute_prompt_fingerprint(base_dir) != served
 
 
 def test_the_agents_are_built_with_their_roles_and_explicit_tools(monkeypatch):
@@ -267,7 +272,7 @@ def test_dlt_evidence_block_carries_tool_results_to_the_reviewer(monkeypatch):
 
 
 def test_dlt_investigator_records_tool_calls(monkeypatch, probe):
-    node = dlt_node(monkeypatch, "investigate", ToolUsingAgent(probe))
+    node = dlt_node(monkeypatch, "investigate", ToolUsingAgent(probe, role="dlt_investigator"))
     out = node(dict(DLT_STATE))
     assert out["tool_evidence"] == [RECORD]
 
