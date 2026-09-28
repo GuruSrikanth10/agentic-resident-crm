@@ -39,8 +39,10 @@ lacking log citations when no logs were available.
    reason code matches what the DB rule and service documentation say.
 2. Glossary violations: 'demo' = face modality, 'nonDemo' = fingerprints and
    iris. 'TD' = all nonDemo matched.
-3. Enrolment type misapplication: N / E = 1:N dedup, U = 1:N dedup plus 1:1
-   auth and append against its own parent, MBU = treated as 1:N.
+3. Enrolment type misapplication: N / E = 1:N dedup, U = 1:N dedup whose result
+   must contain only its own parent's historical biometrics (not 1:1 auth),
+   plus append; Z = same as U; MBU = treated as 1:N. Reject an investigation
+   that describes a U or Z packet as a 1:1 authentication.
 4. Claims not grounded in docs: verify service behaviour claims against the
    documentation. Every claim about what the code does must cite the doc.
 5. Claims not grounded in logs (when logs ARE available): if logs were

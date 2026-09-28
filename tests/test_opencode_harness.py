@@ -256,7 +256,10 @@ def test_every_payload_enrolment_code_has_one_description():
         return orch.enrolment_type_display({"packetMetaData": {"enrolmentType": code}})
 
     assert display("E") == display("N") == display(" n ")
-    assert "1:N" in display("U") and "1:1" in display("U")
+    assert "1:N" in display("U") and "parent" in display("U")
+    assert "1:1" not in display("U")
+    assert "1:N" in display("Z") and "parent" in display("Z")
+    assert "1:1" not in display("Z")
     assert display("X") == "X"
     assert orch.enrolment_type_display({"packetMetaData": None}) == "Unknown"
 

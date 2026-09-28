@@ -92,13 +92,14 @@ def is_reviewer_approved(feedback: str) -> bool:
 #: their own, and they disagreed -- the harness path had no "Z", the direct
 #: path had no "E" (the code the runbooks are keyed on), and they described
 #: "U" differently. The descriptions follow InvestigatorAgent.md and
-#: agent_policy_context.md: an update is checked 1:N against other residents
-#: as well as 1:1 against its own parent.
+#: agent_policy_context.md: an update (and a reactivation, which follows the
+#: same rule) is 1:N deduplicated, not 1:1 authenticated, and succeeds only
+#: when every match is its own parent.
 ENROLMENT_TYPE_DISPLAY = {
     "N": "New Enrolment (1:N deduplication)",
     "E": "New Enrolment (1:N deduplication)",
-    "U": "Biometric Update (1:N deduplication and 1:1 authentication and append)",
-    "Z": "Reactivation (1:N deduplication and 1:1 authentication and append)",
+    "U": "Biometric Update (1:N deduplication, matches must be only the parent Aadhaar; append)",
+    "Z": "Reactivation (1:N deduplication, matches must be only the parent Aadhaar; append)",
 }
 
 

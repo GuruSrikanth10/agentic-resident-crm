@@ -20,9 +20,11 @@ To understand a rejection, you must first understand what a successful packet lo
 - **Why?** One person can only have one Aadhaar. If they match with *anyone* else in the database, the system assumes they are trying to enroll twice, and the packet is rejected.
 
 ### B. STANDARD BIOMETRIC UPDATE
-- **Success Criteria:** The applicant's new biometrics must **match their own historical biometrics** (1:1 Authentication).
-- **Rule:** They must match the "parent" (their original enrolment). They must NOT match any other different parent.
-- **Why?** We must verify the person updating the Aadhaar is the actual owner. If the biometrics match a *different* person's Aadhaar, it is rejected as a biometric mix-up or fraud.
+- **How it is checked:** The new biometrics undergo **1:N de-duplication** against the whole database, exactly like an enrolment. It is NOT a 1:1 authentication against the parent: the parent check is applied to the 1:N result.
+- **Success Criteria:** The 1:N result must contain **only the historical biometrics of the resident's own parent Aadhaar**. If every match returned belongs to the parent, the update succeeds.
+- **Rule:** The result must not be empty (the resident's own historical biometrics must come back), and it must NOT contain any candidate from a different parent.
+- **Why?** A genuine owner's biometrics will de-duplicate against their own earlier records and against no one else's. If the result contains a *different* person's Aadhaar, it is rejected as a biometric mix-up or fraud; if it contains nothing, the new biometrics could not be tied to the parent.
+- **Reactivation (enrolment type `Z`)** follows exactly the same criteria as a standard biometric update.
 
 ### C. MANDATORY BIOMETRIC UPDATE (MBU)
 - **Success Criteria:** Treated exactly like a new Enrolment.
@@ -39,7 +41,7 @@ When a packet fails, it triggers a `reject_reason_code` based on JSON rule condi
 - `isApplicantWhiteListed: false` -> The resident triggered a manual review threshold but lacked the necessary whitelisting override to bypass it.
 - `isApplicantWrongFaceCapture: true` -> The photo uploaded was invalid (e.g., closed eyes, multiple faces), violating capture quality rules.
 - `"enrolmentType": "UPDATE"` AND `isFirstTimeBioUpdate: true` -> Indicates this is a **MANDATORY BIOMETRIC UPDATE (MBU)**. Treat this strictly as an Enrolment (1:N deduplication) since it is their first time giving biometrics.
-- `"enrolmentType": "UPDATE"` AND `isFirstTimeBioUpdate: false` -> Indicates this is a **STANDARD BIOMETRIC UPDATE**. They must match their own parent Aadhaar. If they matched a different parent (`numberOfCandidatesWithDifferentParent > 0`), it's a biometric mix-up.
+- `"enrolmentType": "UPDATE"` AND `isFirstTimeBioUpdate: false` -> Indicates this is a **STANDARD BIOMETRIC UPDATE**. The 1:N de-duplication result must contain only their own parent Aadhaar's historical biometrics. If it contains a different parent (`numberOfCandidatesWithDifferentParent > 0`), it's a biometric mix-up.
 - **DEFAULT OVERRIDE**: If `isFirstTimeBioUpdate` is completely missing from the rule data, you MUST check the Elasticsearch logs. If neither source specifies it, you MUST assume it is a **STANDARD BIOMETRIC UPDATE**.
 
 ---

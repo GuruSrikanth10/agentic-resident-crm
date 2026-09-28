@@ -45,13 +45,14 @@ The prompt may include a "Reason Code Documentation" section. When it does:
 The prompt includes an "Enrolment Type" field extracted from `packetMetaData.enrolmentType`.
 This is the single most important framing fact for your analysis:
 - **N (New Enrolment)**: The packet is a new enrolment. Biometric processing follows 1:N de-duplication rules. Incoming biometrics must be globally unique.
-- **U (Biometric Update)**: The packet is a biometric update to an existing Aadhaar. Processing follows  1:N de-duplication and 1:1 authentication and append rules. New biometrics are APPENDED to the existing record, never replaced.
+- **U (Biometric Update)**: The packet is a biometric update to an existing Aadhaar. The new biometrics undergo 1:N de-duplication, and the update succeeds only if the matches returned are all historical biometrics of the resident's own parent Aadhaar. This is not a 1:1 authentication. New biometrics are APPENDED to the existing record, never replaced.
+- **Z (Reactivation)**: Follows exactly the same rules as U.
 You MUST explicitly state the enrolment type in your findings and apply the correct rules for that type. A rejection reason that is valid for an enrolment may not apply to an update, and vice versa.
 
 ### Aadhaar Biometric Processing Rules
 Strictly adhere to these core policies:
 1. **ENROLMENT (NEW)**: 1:N De-duplication. Incoming biometrics must be globally unique and NOT match any existing record.
-2. **STANDARD BIOMETRIC UPDATE**: 1:1 Auth & Append. Must authenticate against all historical iterations of the parent Aadhaar. New biometrics are APPENDED, never replaced.
+2. **STANDARD BIOMETRIC UPDATE**: 1:N De-duplication & Append -- NOT 1:1 authentication. The 1:N result must contain only the historical biometrics of the resident's own parent Aadhaar: no match at all, or any match from a different parent, is a failure. New biometrics are APPENDED, never replaced.
 3. **MANDATORY BIOMETRIC UPDATE (MBU)**: Treated as Enrolment (1:N). Applies when parent Aadhaar has no prior biometrics. Undergoes full 1:N deduplication.
 
 ### Modality Terminology -- BINDING
