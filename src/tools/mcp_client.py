@@ -16,14 +16,25 @@ AGENT_MCP_RETRY_SECONDS, and the orchestrators rebuild their graphs from the
 new one (`is_stale`). So a tool server that is down when the first packet
 arrives costs that packet its tools, not every packet until a restart.
 
-Which role gets which tool
---------------------------
+Which role gets which tool, for which service
+---------------------------------------------
 By default, the roles a tool's listing names under `_meta` (mcp_config.
 META_AGENTS) -- what the toolset in src/tools/agent_tools declared. A tool
 whose listing names no roles, which is any tool from a server that does not
 know this repository, goes to no role until AGENT_TOOLS_<ROLE> names it.
 AGENT_TOOLS_<ROLE> replaces a role's selection outright: a comma-separated
 list of tool names, or `none`.
+
+The rejection lane's roles are then scoped by the packet's service
+(MULTI_SERVICE_PLAN.md D7, 5.6): an agent for service S gets only the tools
+whose listing names S or "*" (mcp_config.META_SERVICES), the undeclared tools
+AGENT_TOOLS_COMMON names, and the tools S's pack includes -- less those it
+excludes. Nothing widens that scope: not AGENT_TOOLS_<ROLE>, and not a tool's
+description. The `_default` pack, for unresolved packets, gets the "*" tools
+alone. The DLT roles are not scoped by service yet (Phase 8), so they take
+none. Tool names are global across servers, and a tool scoped to one service
+carries that service's prefix (D8): a served tool that breaks the prefix rule
+is left out of the catalog like a reserved name.
 
 Calling a tool
 --------------
@@ -50,13 +61,19 @@ from typing import Optional
 from langchain_core.tools import BaseTool, StructuredTool
 
 from src.tools import mcp_config
-from src.tools.agent_tools import AGENT_ROLES, RESERVED_TOOL_NAMES
+from src.tools.agent_tools import AGENT_ROLES, DLT_ROLES, RESERVED_TOOL_NAMES, SERVICE_ROLES
+from src.utils import service_registry
 from src.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
 
 ENV_ROLE_PREFIX = "AGENT_TOOLS_"
 _NONE = "none"
+
+#: Undeclared tools -- a listing that names no services, as any tool from a
+#: server that does not know this repository's metadata -- to treat as tools
+#: for every service. A comma-separated list of tool names.
+ENV_COMMON = "AGENT_TOOLS_COMMON"
 
 #: The roles that run on the opencode harness, and the opencode agent each
 #: one runs as there. A prefix keeps them clear of opencode's own agents.
@@ -72,7 +89,7 @@ The tools below read live systems. What they return is evidence about this
 packet, with the same standing as the logs. For every one of them:
 
 1. Cite what you rely on: name the tool and the fields, for example
-   "get_parking_status: parked_now is false".
+   "<tool>: <field> is <value>".
 2. A result saying a lookup was switched off, refused an argument, or failed
    means nothing was read. That is an evidence gap: say so, and never treat
    it as "no rows".
@@ -107,6 +124,9 @@ class RemoteTool:
     agents: tuple = ()
     guidance: str = ""
     read_only: Optional[bool] = None
+    #: The services whose packets the tool is for; ("*",) for every service,
+    #: () when the listing names none.
+    services: tuple = ()
 
     @property
     def opencode_name(self) -> str:
@@ -189,6 +209,15 @@ def load_catalog() -> Catalog:
                 logger.error("Ignoring a served tool whose name another server "
                              "already uses", server=server.name, tool=remote.name)
                 continue
+            # The prefix rule holds for every server's tools (D8). This
+            # repository's own are checked at boot; another team's server can
+            # only be checked once it lists them.
+            problem = service_registry.tool_prefix_error(remote.name, remote.services)
+            if problem:
+                logger.error("Ignoring a served tool that breaks the tool prefix "
+                             "rule", server=server.name, tool=remote.name,
+                             detail=problem)
+                continue
             seen.add(remote.name)
             tools.append(remote)
     logger.info("Agent tool catalog loaded", servers=[s.name for s in configured],
@@ -202,6 +231,10 @@ def _remote_tool(server: mcp_config.ServerConfig, tool) -> RemoteTool:
     agents = meta.get(mcp_config.META_AGENTS)
     agents = tuple(role for role in agents if role in AGENT_ROLES) \
         if isinstance(agents, list) else ()
+    services = meta.get(mcp_config.META_SERVICES)
+    services = tuple(dict.fromkeys(service.strip() for service in services
+                                   if isinstance(service, str) and service.strip())) \
+        if isinstance(services, list) else ()
     toolset = meta.get(mcp_config.META_TOOLSET)
     guidance = meta.get(mcp_config.META_GUIDANCE)
     annotations = tool.annotations
@@ -214,6 +247,7 @@ def _remote_tool(server: mcp_config.ServerConfig, tool) -> RemoteTool:
         agents=agents,
         guidance=guidance if isinstance(guidance, str) else "",
         read_only=annotations.read_only_hint if annotations is not None else None,
+        services=services,
     )
 
 
@@ -336,10 +370,53 @@ def _override(role: str) -> Optional[list]:
     return list(dict.fromkeys(part.strip() for part in raw.split(",") if part.strip()))
 
 
-def selection(role: str, catalog: Optional[Catalog] = None) -> list:
-    """The catalog's tools that `role` gets, in a stable order."""
+def _common_names() -> frozenset:
+    """The AGENT_TOOLS_COMMON tool names."""
+    raw = os.environ.get(ENV_COMMON, "")
+    return frozenset(part.strip() for part in raw.split(",") if part.strip())
+
+
+def _check_scope(role: str, service: Optional[str]) -> None:
+    """A rejection role is always scoped by a service; a DLT role never is."""
     if role not in AGENT_ROLES:
         raise ValueError(f"Unknown agent role {role!r}; the roles are {list(AGENT_ROLES)}.")
+    if role in SERVICE_ROLES and not service:
+        raise ValueError(f"The {role} role's tools are scoped by service; name the "
+                         f"packet's pack ({service_registry.DEFAULT_PACK} for an "
+                         f"unresolved packet).")
+    if role in DLT_ROLES and service is not None:
+        raise ValueError(f"The {role} role is not scoped by service; pass no service.")
+
+
+def in_scope(tool: RemoteTool, service: str) -> bool:
+    """Whether `tool` may be offered for a packet analysed with the pack
+    `service` (MULTI_SERVICE_PLAN.md 5.6).
+
+    Yes when its listing names every service ("*") or this one, or it names
+    none and AGENT_TOOLS_COMMON lists it, or the pack's `tools.include` lists
+    it; never when the pack's `tools.exclude` does. The `_default` pack is no
+    service a tool can name, so an unresolved packet gets the tools for every
+    service alone.
+    """
+    include, exclude = service_registry.tool_scope(service)
+    if tool.name in exclude:
+        return False
+    if tool.name in include or service_registry.ALL_SERVICES in tool.services:
+        return True
+    if service != service_registry.DEFAULT_PACK and service in tool.services:
+        return True
+    return not tool.services and tool.name in _common_names()
+
+
+def selection(role: str, service: Optional[str] = None, *,
+              catalog: Optional[Catalog] = None) -> list:
+    """The catalog's tools that `role` gets for a packet analysed with the pack
+    `service`, in a stable order.
+
+    `service` is required for the rejection roles and refused for the DLT
+    roles, which keep the role-only selection (MULTI_SERVICE_PLAN.md 5.6).
+    """
+    _check_scope(role, service)
     catalog = catalog or current_catalog()
     chosen_names = _override(role)
     if chosen_names is None:
@@ -356,12 +433,17 @@ def selection(role: str, catalog: Optional[Catalog] = None) -> list:
                            "unreachable", role=role, tools=unknown,
                            failed=sorted(catalog.failures))
         chosen = [known[name] for name in chosen_names if name in known]
+    if service is not None:
+        # After the override, never before it: AGENT_TOOLS_<ROLE> can narrow
+        # or replace a role's list, but not add a tool outside the scope.
+        chosen = [tool for tool in chosen if in_scope(tool, service)]
     return sorted(chosen, key=lambda tool: (tool.toolset or "", tool.name))
 
 
-def tools_for(role: str) -> list:
-    """LangChain tools for `role`, each calling its server over MCP."""
-    return [_langchain_tool(tool) for tool in selection(role)]
+def tools_for(role: str, service: Optional[str] = None) -> list:
+    """LangChain tools for `role` and the pack `service`, each calling its
+    server over MCP."""
+    return [_langchain_tool(tool) for tool in selection(role, service)]
 
 
 def _langchain_tool(remote: RemoteTool) -> BaseTool:
@@ -381,13 +463,15 @@ def _langchain_tool(remote: RemoteTool) -> BaseTool:
                           args_schema=remote.input_schema, func=run, coroutine=arun)
 
 
-def prompt_section(role: str, *, opencode: bool = False) -> str:
-    """The system-prompt section describing `role`'s tools, or "" for none.
+def prompt_section(role: str, service: Optional[str] = None, *,
+                   opencode: bool = False) -> str:
+    """The system-prompt section describing the tools `role` gets for the
+    pack `service`, or "" for none.
 
     `opencode` names the tools the way opencode exposes them
     (`<server>_<tool>`), for the harness prompts.
     """
-    tools = selection(role)
+    tools = selection(role, service)
     if not tools:
         return ""
     groups: dict = {}
@@ -409,35 +493,67 @@ def prompt_section(role: str, *, opencode: bool = False) -> str:
     return "\n\n".join(parts)
 
 
-def fingerprint_material() -> str:
-    """Everything tool-related an agent sees, for the prompt fingerprint.
+def _fingerprint_scope(role: str, service: Optional[str]):
+    """(included, scope) for `role` in the fingerprint of the pack `service`.
+
+    The LogFilter is one agent for every packet, built with the `_default`
+    scope, so it is hashed with that scope whatever the pack. With no pack,
+    the pooled roles are left out: there is no service to scope them by.
+    """
+    if role in DLT_ROLES:
+        return True, None
+    if role == "log_filter":
+        return True, service_registry.DEFAULT_PACK
+    return service is not None, service
+
+
+def fingerprint_material(service: Optional[str] = None) -> str:
+    """Everything tool-related the agents of the pack `service` see, for its
+    prompt fingerprint (MULTI_SERVICE_PLAN.md D13).
 
     The tool names, descriptions, argument schemas and prompt sections decide
     what the agents can look up and how they are told to read it -- a change
-    to any of them is a prompt change and must move the fingerprint.
+    to any of them is a prompt change and must move the fingerprint. Scoped
+    per service, so a tool added for one service moves only that service's
+    fingerprint.
     """
     lines = []
     for role in AGENT_ROLES:
-        for tool in selection(role):
+        included, scope = _fingerprint_scope(role, service)
+        if not included:
+            continue
+        for tool in selection(role, scope):
             schema = json.dumps(tool.input_schema, sort_keys=True, default=str)
             lines.append(f"{role}\ttool\t{tool.server.name}\t{tool.name}\t"
                          f"{tool.description}\t{schema}")
-        lines.append(f"{role}\tsection\t{prompt_section(role)}")
+        lines.append(f"{role}\tsection\t{prompt_section(role, scope)}")
     return "\n".join(lines)
 
 
+def scopes() -> tuple:
+    """Every pack a rejection agent can be built for: each registered
+    service, then `_default`."""
+    return (*service_registry.load().services(), service_registry.DEFAULT_PACK)
+
+
 def describe() -> dict:
-    """The catalog and each role's selection, for the CLI and diagnostics."""
+    """The catalog and the selections, for the CLI and diagnostics: per pack
+    for the rejection roles, per role for the DLT roles."""
     catalog = current_catalog()
     return {
         "servers": [{"name": server.name, "url": server.url} for server in catalog.servers],
         "failed": dict(catalog.failures),
         "tools": [{"name": tool.name, "server": tool.server.name, "toolset": tool.toolset,
-                   "default_agents": list(tool.agents), "read_only": tool.read_only,
+                   "default_agents": list(tool.agents), "services": list(tool.services),
+                   "read_only": tool.read_only,
                    "summary": tool.description.splitlines()[0] if tool.description else ""}
                   for tool in catalog.tools],
-        "roles": {role: [tool.name for tool in selection(role, catalog)]
-                  for role in AGENT_ROLES},
+        "services": {service: {role: [tool.name
+                                      for tool in selection(role, service, catalog=catalog)]
+                               for role in SERVICE_ROLES}
+                     for service in scopes()},
+        "roles": {role: [tool.name for tool in selection(role, catalog=catalog)]
+                  for role in DLT_ROLES},
     }
 
 
@@ -451,9 +567,11 @@ def validate() -> list:
     errors = list(mcp_config.validate())
     known = {ENV_ROLE_PREFIX + role.upper() for role in AGENT_ROLES}
     for variable in sorted(os.environ):
-        if variable.startswith(ENV_ROLE_PREFIX) and variable not in known:
+        if variable.startswith(ENV_ROLE_PREFIX) and variable not in known \
+                and variable != ENV_COMMON:
             errors.append(f"{variable} is not a known setting; per-role tool "
-                          f"selections are {sorted(known)}.")
+                          f"selections are {sorted(known)}, and {ENV_COMMON} "
+                          f"lists undeclared tools for every service.")
     return errors
 
 
@@ -461,17 +579,30 @@ def validate() -> list:
 # opencode
 # ---------------------------------------------------------------------------
 
-def opencode_agent(role: str) -> str:
+def opencode_agent(role: str, service: Optional[str] = None) -> str:
+    """The opencode agent a harness task for `role` runs as.
+
+    `crm_<role>__<service_slug>` for a rejection role -- `crm_<role>__default`
+    for the `_default` pack, and for no pack at all -- and `crm_<role>` for a
+    DLT role, which is not scoped by service.
+    """
+    if role in SERVICE_ROLES:
+        slug = service_registry.service_slug(service or service_registry.DEFAULT_PACK)
+        return f"{OPENCODE_AGENT_PREFIX}{role}__{slug}"
     return OPENCODE_AGENT_PREFIX + role
 
 
 def opencode_config() -> dict:
     """The `mcp` and `agent` blocks opencode needs, or {} with no servers.
 
-    One opencode agent per harness role, each allowed exactly the tools its
-    role gets here -- so a harness task can no more reach a tool its role was
-    not given than a deep agent can. opencode deep-merges this with its other
-    config, so the provider block it already has is left alone.
+    One opencode agent per harness role and scope, each allowed exactly the
+    tools that role gets here for that scope: for a rejection role, one per
+    registered service and one for `_default`; for a DLT role, one. So a
+    harness task can no more reach a tool outside its role and service than a
+    deep agent can. opencode deep-merges this with its other config, so the
+    provider block it already has is left alone. Built when `opencode serve`
+    starts, so a pack added later needs a restart -- it ships with a deploy
+    anyway.
     """
     catalog = current_catalog()
     if not catalog.servers:
@@ -481,14 +612,16 @@ def opencode_config() -> dict:
                for server in catalog.servers}
     agents = {}
     for role in HARNESS_ROLES:
-        tools = {f"{server.name}_*": False for server in catalog.servers}
-        for tool in selection(role, catalog):
-            tools[tool.opencode_name] = True
-        agents[opencode_agent(role)] = {
-            "mode": "primary",
-            "description": f"Agentic Resident CRM harness task: {role}.",
-            "tools": tools,
-        }
+        for service in (scopes() if role in SERVICE_ROLES else (None,)):
+            tools = {f"{server.name}_*": False for server in catalog.servers}
+            for tool in selection(role, service, catalog=catalog):
+                tools[tool.opencode_name] = True
+            agents[opencode_agent(role, service)] = {
+                "mode": "primary",
+                "description": (f"Agentic Resident CRM harness task: {role}"
+                                + (f", {service} packets." if service else ".")),
+                "tools": tools,
+            }
     return {"mcp": servers, "agent": agents}
 
 
@@ -636,8 +769,8 @@ def main(argv=None) -> int:
     """What the agents see through MCP.
 
         python3 -m src.tools.mcp_client list
-        python3 -m src.tools.mcp_client prompt investigator
-        python3 -m src.tools.mcp_client call get_parking_status '{"refid": "..."}'
+        python3 -m src.tools.mcp_client prompt investigator --service enu-biometric
+        python3 -m src.tools.mcp_client call bio_get_parking_status '{"refid": "..."}'
     """
     import argparse
     import sys
@@ -645,9 +778,12 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="python3 -m src.tools.mcp_client",
                                      description="Inspect and call the agent tools over MCP.")
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("list", help="the servers, their tools, and each role's selection")
+    commands.add_parser("list", help="the servers, their tools, and the selections")
     prompt = commands.add_parser("prompt", help="the tools section of a role's prompt")
     prompt.add_argument("role", choices=AGENT_ROLES)
+    prompt.add_argument("--service", default=None,
+                        help="the pack whose agent it is (a rejection role needs one; "
+                             f"{service_registry.DEFAULT_PACK} for unresolved packets)")
     prompt.add_argument("--opencode", action="store_true", help="name tools as opencode does")
     call = commands.add_parser("call", help="call one tool as an agent would")
     call.add_argument("tool")
@@ -659,7 +795,7 @@ def main(argv=None) -> int:
             print(json.dumps(describe(), indent=2))
             return 0
         if args.command == "prompt":
-            print(prompt_section(args.role, opencode=args.opencode)
+            print(prompt_section(args.role, args.service, opencode=args.opencode)
                   or f"(no tools for {args.role})")
             return 0
         arguments = json.loads(args.arguments)

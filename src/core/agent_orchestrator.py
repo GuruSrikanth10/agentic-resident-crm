@@ -351,14 +351,17 @@ TOOL_EVIDENCE_FILE = "tool_evidence.txt"
 TOOL_EVIDENCE_ARTIFACT = "tool_evidence.json"
 
 
-def _with_tools_section(prompt: str, role: str) -> str:
-    """A harness prompt with `role`'s AVAILABLE TOOLS section appended.
+def _with_tools_section(prompt: str, role: str, pack: str) -> str:
+    """A harness prompt with the AVAILABLE TOOLS section `role` gets for the
+    pack `pack` appended.
 
-    The same section a deep agent's system prompt gets, with the tools named
-    as opencode names them; nothing is appended for a role with no tools, so
-    the prompt is then exactly the template.
+    The same section the pack's deep agent's system prompt gets, with the
+    tools named as opencode names them -- and the same tools the task's
+    opencode agent is allowed (`opencode_runner.run_task(service=pack)`).
+    Nothing is appended for a role with no tools, so the prompt is then
+    exactly the template.
     """
-    section = mcp_client.prompt_section(role, opencode=True)
+    section = mcp_client.prompt_section(role, pack, opencode=True)
     return f"{prompt.rstrip()}\n\n{section}\n" if section else prompt
 
 
@@ -525,10 +528,11 @@ def compute_prompt_fingerprint(base_dir: str, pack: Optional[str] = None) -> str
         digest.update(body)
 
     # What the agents are told on top of those files: the service pack, each
-    # role's tools, their descriptions and argument schemas, the AVAILABLE
-    # TOOLS sections, and the operating note every agent gets. Switching a
-    # toolset on or off changes what the agents can see, so it moves the
-    # fingerprint like a prompt edit.
+    # role's tools for that pack, their descriptions and argument schemas, the
+    # AVAILABLE TOOLS sections, and the operating note every agent gets.
+    # Switching a toolset on or off changes what the agents can see, so it
+    # moves the fingerprint like a prompt edit -- the fingerprint of every
+    # pack whose scope includes it, and no other (MULTI_SERVICE_PLAN.md D13).
     from src.core.agent_factory import OPERATING_MODE
     extras = []
     if pack:
@@ -536,7 +540,7 @@ def compute_prompt_fingerprint(base_dir: str, pack: Optional[str] = None) -> str
         # A pack that is not in the registry is hashed as missing rather than
         # skipped, so it can never share a fingerprint with no pack at all.
         extras.append(("service_pack", f"{pack}\t{found.sha256 if found else 'missing'}"))
-    extras += [("agent_tools", mcp_client.fingerprint_material()),
+    extras += [("agent_tools", mcp_client.fingerprint_material(pack)),
                ("operating_mode", OPERATING_MODE)]
     for name, body in extras:
         encoded = body.encode("utf-8")
@@ -748,26 +752,30 @@ def _build_agent():
     # so every node below sends only its user message.
     #
     # The Investigator, the Reviewer and Synthesis each have one agent per
-    # service pack, because the pack is part of the system prompt
-    # (MULTI_SERVICE_PLAN.md D4). The pool lives in this closure, so a graph
-    # rebuilt for a stale tool catalog rebuilds its agents with it. The
-    # prebuilt packs are built here, in the order the agents always were;
-    # any other pack is built the first time a packet needs it.
+    # service pack, because the pack is part of the system prompt and decides
+    # the agent's tools (MULTI_SERVICE_PLAN.md D4, D7). The pool lives in this
+    # closure, so a graph rebuilt for a stale tool catalog rebuilds its agents
+    # with it. The prebuilt packs are built here, in the order the agents
+    # always were; any other pack is built the first time a packet needs it.
     pool: dict = {}
     pool_lock = threading.Lock()
 
+    # The pack is also the agent's tool scope (MULTI_SERVICE_PLAN.md D7): an
+    # agent built for one pack is offered only the tools that pack may use,
+    # and so is its `task` subagent.
     def _new_agent(role: str, pack: str):
         system_prompt = prompt_composer.compose_system_prompt(role, pack)
         if role == "investigator":
-            return build_agent("investigator", llm, system_prompt)
+            return build_agent("investigator", llm, system_prompt, pack=pack)
         if role == "synthesis":
-            return build_agent("synthesis", llm, system_prompt, tools=[queue_tool])
+            return build_agent("synthesis", llm, system_prompt, tools=[queue_tool],
+                               pack=pack)
         # 2.2: the Reviewer would be a natural fit for the cheaper "simple"
         # tier. It is NOT on that tier today -- `simple_llm` is bound to
         # "complex" by the deliberate deviation documented at its assignment
         # above. The name is kept so the one-word fix stays a one-word fix.
         return build_agent("reviewer", simple_llm, system_prompt,
-                           tools=[add_learning_rule])
+                           tools=[add_learning_rule], pack=pack)
 
     def agent_for(role: str, pack: str):
         """The `role` agent built from `pack`, built on first use and kept."""
@@ -783,7 +791,10 @@ def _build_agent():
 
     for pack in prebuilt_packs:
         agent_for("investigator", pack)
-    log_filter_agent = build_agent("log_filter", llm, log_filter_prompt)
+    # One LogFilter serves every service's packets, so it is scoped as an
+    # unresolved packet is: to the tools for every service, and no other.
+    log_filter_agent = build_agent("log_filter", llm, log_filter_prompt,
+                                   pack=service_registry.DEFAULT_PACK)
     queue_tool = get_tool_by_name("queue_for_replay")
     for pack in prebuilt_packs:
         agent_for("synthesis", pack)
@@ -991,7 +1002,7 @@ def _build_agent():
                 event_id=event_id,
                 etype_display=etype_display,
                 output_path=output_path,
-            ), "investigator", state), "investigator")
+            ), "investigator", state), "investigator", pack)
 
             try:
                 # No `timeout=` here: opencode_runner._task_timeout() is the
@@ -1004,6 +1015,7 @@ def _build_agent():
                     prompt=harness_prompt,
                     output_path=output_path,
                     node="investigator",
+                    service=pack,
                 )
                 investigation = result["result"].get("investigation", "")
                 log.info("Investigator finished (opencode harness)",
@@ -1165,7 +1177,7 @@ def _build_agent():
                 "RejectionReviewer",
                 event_id=event_id,
                 output_path=output_path,
-            ), "reviewer", state), "reviewer")
+            ), "reviewer", state), "reviewer", pack)
 
             try:
                 # Inside the try, and the evidence rewritten rather than
@@ -1186,6 +1198,7 @@ def _build_agent():
                     prompt=harness_prompt,
                     output_path=output_path,
                     node="reviewer",
+                    service=pack,
                 )
                 verdict = result["result"].get("verdict", "REJECTED").upper()
                 feedback = result["result"].get("feedback", "")

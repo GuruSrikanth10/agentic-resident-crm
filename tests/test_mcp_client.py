@@ -16,14 +16,18 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.pool import StaticPool
 
 from src.tools import agent_tools, mcp_client, mcp_config
-from src.tools.agent_tools import Toolset, _process_db, agent_tool
+from src.tools.agent_tools import Toolset, agent_tool
+from src.tools.agent_tools.enu_biometric import _process_db
 from src.utils.resilience import process_db_breaker
 
+#: The service the process DB tools are for, and the pack its agents use.
+BIO = "enu-biometric"
+
 PROCESS_DB_TOOLS = {
-    "get_packet_stage_summary", "get_packet_stage_timeline", "get_parking_status",
-    "list_helper_records", "get_abis_candidates", "get_candidate_facts",
-    "get_parking_match_verdicts", "get_update_checker_result",
-    "get_helper_record_fields",
+    "bio_get_packet_stage_summary", "bio_get_packet_stage_timeline", "bio_get_parking_status",
+    "bio_list_helper_records", "bio_get_abis_candidates", "bio_get_candidate_facts",
+    "bio_get_parking_match_verdicts", "bio_get_update_checker_result",
+    "bio_get_helper_record_fields",
 }
 
 
@@ -41,7 +45,7 @@ def stage_db(monkeypatch):
         conn.execute(text(
             "INSERT INTO bio_stage_tracker VALUES (1, 'R1', 'ABIS_DEDUP', "
             "'IN PROGRESS', NULL, 0, 0, 'Biometric', '2026-09-01 10:00:00')"))
-    monkeypatch.setattr(_process_db, "get_engine", lambda: engine)
+    monkeypatch.setattr(_process_db.PROCESS, "get_engine", lambda: engine)
     monkeypatch.setenv("PROCESS_DB_ENABLED", "true")
     process_db_breaker.close()
     yield engine
@@ -54,8 +58,8 @@ def served(stage_db, tool_server):
     return tool_server()
 
 
-def _tool(role, name):
-    return next(tool for tool in mcp_client.tools_for(role) if tool.name == name)
+def _tool(role, name, service=BIO):
+    return next(tool for tool in mcp_client.tools_for(role, service) if tool.name == name)
 
 
 # ======================================================================
@@ -112,7 +116,7 @@ def test_malformed_server_settings_fail_validation(monkeypatch, value, message):
 def test_validate_reports_bad_switches_and_misspelt_roles(monkeypatch):
     monkeypatch.setenv("AGENT_MCP_SERVE", "sometimes")
     monkeypatch.setenv("AGENT_MCP_PORT", "70000")
-    monkeypatch.setenv("AGENT_TOOLS_INVESTIGATER", "get_parking_status")
+    monkeypatch.setenv("AGENT_TOOLS_INVESTIGATER", "bio_get_parking_status")
     errors = mcp_client.validate()
     assert any("AGENT_MCP_SERVE" in error for error in errors)
     assert any("AGENT_MCP_PORT" in error for error in errors)
@@ -139,8 +143,9 @@ def test_the_catalog_lists_the_served_tools_with_their_roles(served):
     catalog = mcp_client.current_catalog()
     assert catalog.complete
     assert {tool.name for tool in catalog.tools} == PROCESS_DB_TOOLS
-    summary = next(tool for tool in catalog.tools if tool.name == "get_packet_stage_summary")
+    summary = next(tool for tool in catalog.tools if tool.name == "bio_get_packet_stage_summary")
     assert summary.agents == ("investigator",)
+    assert summary.services == (BIO,)
     assert summary.toolset == "process_db"
     assert summary.read_only is True
     assert "None of these tables holds the final approve/reject verdict" in summary.guidance
@@ -148,38 +153,45 @@ def test_the_catalog_lists_the_served_tools_with_their_roles(served):
 
 
 def test_only_the_investigator_gets_them_by_default(served):
-    assert {tool.name for tool in mcp_client.tools_for("investigator")} == PROCESS_DB_TOOLS
-    for role in agent_tools.AGENT_ROLES:
+    assert {tool.name for tool in mcp_client.tools_for("investigator", BIO)} == PROCESS_DB_TOOLS
+    for role in agent_tools.SERVICE_ROLES:
         if role != "investigator":
-            assert mcp_client.tools_for(role) == [], role
+            assert mcp_client.tools_for(role, BIO) == [], role
+    for role in agent_tools.DLT_ROLES:
+        assert mcp_client.tools_for(role) == [], role
+
+
+def test_only_enu_biometric_packets_get_them(served):
+    """Scoped to enu-biometric: an unresolved packet's agents get none."""
+    assert mcp_client.tools_for("investigator", "_default") == []
 
 
 def test_a_tool_call_goes_over_mcp_and_is_recorded(served):
-    tool = _tool("investigator", "get_packet_stage_summary")
+    tool = _tool("investigator", "bio_get_packet_stage_summary")
     with mcp_client.recording() as calls:
         result = json.loads(tool.invoke({"refid": "R1"}))
     assert result["open_substages"][0]["sub_stage"] == "ABIS_DEDUP"
-    assert calls == [{"tool": "get_packet_stage_summary", "args": {"refid": "R1"},
+    assert calls == [{"tool": "bio_get_packet_stage_summary", "args": {"refid": "R1"},
                       "result": json.dumps(result, separators=(",", ":"))}]
 
 
 def test_a_tool_can_be_awaited(served):
-    tool = _tool("investigator", "get_packet_stage_summary")
+    tool = _tool("investigator", "bio_get_packet_stage_summary")
     with mcp_client.recording() as calls:
         result = json.loads(asyncio.run(tool.ainvoke({"refid": "R1"})))
     assert result["found"] is True
-    assert [call["tool"] for call in calls] == ["get_packet_stage_summary"]
+    assert [call["tool"] for call in calls] == ["bio_get_packet_stage_summary"]
 
 
 def test_arguments_the_server_refuses_come_back_as_a_readable_result(served):
-    tool = _tool("investigator", "get_helper_record_fields")
+    tool = _tool("investigator", "bio_get_helper_record_fields")
     result = tool.invoke({"refid": "R1", "record_type": "ParkingHelperRecord"})
     assert result.startswith("The tool reported an error, so nothing was read.")
     assert "json_paths" in result
 
 
 def test_calls_are_recorded_only_inside_recording(served):
-    tool = _tool("investigator", "get_packet_stage_summary")
+    tool = _tool("investigator", "bio_get_packet_stage_summary")
     tool.invoke({"refid": "R1"})
     with mcp_client.recording() as calls:
         pass
@@ -187,37 +199,37 @@ def test_calls_are_recorded_only_inside_recording(served):
 
 
 def test_the_selection_can_be_overridden_per_role(served, monkeypatch):
-    monkeypatch.setenv("AGENT_TOOLS_REVIEWER", "get_parking_status, get_packet_stage_summary")
+    monkeypatch.setenv("AGENT_TOOLS_REVIEWER", "bio_get_parking_status, bio_get_packet_stage_summary")
     monkeypatch.setenv("AGENT_TOOLS_INVESTIGATOR", "none")
-    assert {tool.name for tool in mcp_client.tools_for("reviewer")} == {
-        "get_parking_status", "get_packet_stage_summary"}
-    assert mcp_client.tools_for("investigator") == []
+    assert {tool.name for tool in mcp_client.tools_for("reviewer", BIO)} == {
+        "bio_get_parking_status", "bio_get_packet_stage_summary"}
+    assert mcp_client.tools_for("investigator", BIO) == []
 
 
 def test_an_override_naming_an_unserved_tool_is_an_error_when_every_server_answered(
         served, monkeypatch):
     monkeypatch.setenv("AGENT_TOOLS_INVESTIGATOR", "get_parking_statuss")
     with pytest.raises(ValueError, match="no server serves"):
-        mcp_client.tools_for("investigator")
+        mcp_client.tools_for("investigator", BIO)
 
 
 def test_prompt_sections_name_tools_as_each_consumer_sees_them(served):
-    deep = mcp_client.prompt_section("investigator")
-    harness = mcp_client.prompt_section("investigator", opencode=True)
+    deep = mcp_client.prompt_section("investigator", BIO)
+    harness = mcp_client.prompt_section("investigator", BIO, opencode=True)
     assert deep.startswith(mcp_client.TOOLS_HEADING)
-    assert "#### process_db" in deep and "Tools: get_abis_candidates," in deep
-    assert "agent_tools_get_parking_status" in harness
+    assert "#### process_db" in deep and "Tools: bio_get_abis_candidates," in deep
+    assert "agent_tools_bio_get_parking_status" in harness
     assert "agent_tools_" not in deep
-    assert mcp_client.prompt_section("reviewer") == ""
+    assert mcp_client.prompt_section("reviewer", BIO) == ""
 
 
 def test_the_fingerprint_moves_with_what_is_served(stage_db, tool_server, monkeypatch):
     monkeypatch.delenv("AGENT_MCP_SERVERS", raising=False)
-    without = mcp_client.fingerprint_material()
+    without = mcp_client.fingerprint_material(BIO)
     tool_server()
-    with_tools = mcp_client.fingerprint_material()
+    with_tools = mcp_client.fingerprint_material(BIO)
     assert without != with_tools
-    assert with_tools == mcp_client.fingerprint_material()
+    assert with_tools == mcp_client.fingerprint_material(BIO)
 
 
 def test_the_same_tool_from_two_servers_is_taken_once(stage_db, tool_server, monkeypatch):
@@ -249,8 +261,8 @@ def test_an_unreachable_server_leaves_an_incomplete_catalog_that_goes_stale(monk
 
 def test_an_override_is_not_an_error_while_a_server_is_down(monkeypatch):
     monkeypatch.setenv("AGENT_MCP_SERVERS", json.dumps({"down": "http://127.0.0.1:9/mcp"}))
-    monkeypatch.setenv("AGENT_TOOLS_INVESTIGATOR", "get_parking_status")
-    assert mcp_client.tools_for("investigator") == []
+    monkeypatch.setenv("AGENT_TOOLS_INVESTIGATOR", "bio_get_parking_status")
+    assert mcp_client.tools_for("investigator", BIO) == []
 
 
 def test_a_changed_server_list_makes_a_catalog_stale(served, monkeypatch):
@@ -266,12 +278,12 @@ def test_a_call_to_a_server_that_went_away_is_an_evidence_gap(stage_db, monkeypa
     catalog = mcp_client.Catalog(
         servers=(), tools=(mcp_client.RemoteTool(
             server=mcp_config.ServerConfig(name="gone", url="http://127.0.0.1:9/mcp"),
-            name="get_parking_status", description="d", input_schema={
+            name="bio_get_parking_status", description="d", input_schema={
                 "type": "object", "properties": {"refid": {"type": "string"}}}),))
     tool = mcp_client._langchain_tool(catalog.tools[0])
     with mcp_client.recording() as calls:
         result = tool.invoke({"refid": "R1"})
-    assert result.startswith("The tool get_parking_status could not be called on the gone server")
+    assert result.startswith("The tool bio_get_parking_status could not be called on the gone server")
     assert "evidence gap" in result
     assert calls[0]["result"] == result
 
@@ -293,9 +305,23 @@ def _remote(name, agents=(), toolset=None):
 
 def test_a_tool_that_names_no_roles_goes_to_none_until_configured(monkeypatch):
     catalog = _catalog_of(_remote("org_lookup"))
-    assert mcp_client.selection("investigator", catalog) == []
+    assert mcp_client.selection("dlt_investigator", catalog=catalog) == []
+    monkeypatch.setenv("AGENT_TOOLS_DLT_INVESTIGATOR", "org_lookup")
+    assert [tool.name for tool in mcp_client.selection("dlt_investigator", catalog=catalog)] \
+        == ["org_lookup"]
+
+
+def test_an_undeclared_tool_reaches_a_service_only_once_named_common(monkeypatch):
+    """It names no services, so a role override alone cannot add it to a
+    service's scope; AGENT_TOOLS_COMMON makes it a tool for every service."""
+    catalog = _catalog_of(_remote("org_lookup"))
     monkeypatch.setenv("AGENT_TOOLS_INVESTIGATOR", "org_lookup")
-    assert [tool.name for tool in mcp_client.selection("investigator", catalog)] == ["org_lookup"]
+    assert mcp_client.selection("investigator", BIO, catalog=catalog) == []
+    monkeypatch.setenv("AGENT_TOOLS_COMMON", "org_lookup")
+    for service in (BIO, "_default"):
+        assert [tool.name for tool in mcp_client.selection("investigator", service,
+                                                           catalog=catalog)] \
+            == ["org_lookup"]
 
 
 def test_listing_metadata_is_read_defensively():
@@ -308,27 +334,38 @@ def test_listing_metadata_is_read_defensively():
     assert remote.agents == ("investigator",)
     assert remote.toolset is None
     assert remote.read_only is None
+    assert remote.services == ()
 
 
 def test_unknown_roles_are_refused():
     with pytest.raises(ValueError, match="Unknown agent role"):
-        mcp_client.selection("investigatr", _catalog_of())
+        mcp_client.selection("investigatr", BIO, catalog=_catalog_of())
+
+
+def test_a_rejection_role_needs_a_service_and_a_dlt_role_takes_none():
+    with pytest.raises(ValueError, match="scoped by service"):
+        mcp_client.selection("investigator", catalog=_catalog_of())
+    with pytest.raises(ValueError, match="not scoped by service"):
+        mcp_client.selection("dlt_investigator", BIO, catalog=_catalog_of())
 
 
 # ======================================================================
 # opencode
 # ======================================================================
 
-def test_opencode_gets_the_servers_and_one_agent_per_harness_role(served):
+def test_opencode_gets_the_servers_and_one_agent_per_harness_role_and_service(served):
     config = mcp_client.opencode_config()
     assert config["mcp"] == {"agent_tools": {"type": "remote", "url": served, "enabled": True}}
-    assert set(config["agent"]) == {"crm_investigator", "crm_reviewer",
-                                    "crm_dlt_investigator", "crm_dlt_reviewer"}
-    investigator = config["agent"]["crm_investigator"]
+    assert set(config["agent"]) == {
+        "crm_investigator__enu_biometric", "crm_investigator__default",
+        "crm_reviewer__enu_biometric", "crm_reviewer__default",
+        "crm_dlt_investigator", "crm_dlt_reviewer"}
+    investigator = config["agent"]["crm_investigator__enu_biometric"]
     assert investigator["mode"] == "primary"
     assert investigator["tools"]["agent_tools_*"] is False
     assert {name for name, allowed in investigator["tools"].items() if allowed} == {
         f"agent_tools_{name}" for name in PROCESS_DB_TOOLS}
+    assert config["agent"]["crm_investigator__default"]["tools"] == {"agent_tools_*": False}
     assert config["agent"]["crm_dlt_investigator"]["tools"] == {"agent_tools_*": False}
 
 
@@ -345,14 +382,14 @@ def test_opencode_headers_are_passed_on(monkeypatch):
 
 def test_harness_tool_calls_become_evidence_under_their_own_names(served):
     records = mcp_client.evidence_from_harness([
-        {"tool": "agent_tools_get_parking_status", "input": {"refid": "R1"},
+        {"tool": "agent_tools_bio_get_parking_status", "input": {"refid": "R1"},
          "output": '{"parked_now": false}', "status": "completed"},
         {"tool": "grep", "input": {"pattern": "x"}, "output": "...", "status": "completed"},
-        {"tool": "agent_tools_get_abis_candidates", "input": "not a dict",
+        {"tool": "agent_tools_bio_get_abis_candidates", "input": "not a dict",
          "output": "x" * (mcp_client.MAX_RECORDED_RESULT_CHARS + 50), "status": "completed"},
     ])
     assert [(r["tool"], r["args"]) for r in records] == [
-        ("get_parking_status", {"refid": "R1"}), ("get_abis_candidates", {})]
+        ("bio_get_parking_status", {"refid": "R1"}), ("bio_get_abis_candidates", {})]
     assert len(records[1]["result"]) <= mcp_client.MAX_RECORDED_RESULT_CHARS
 
 
@@ -411,7 +448,8 @@ def test_a_new_registered_tool_is_served_and_offered_to_its_role(tool_server):
     saved = dict(agent_tools._registry)
     try:
         toolset = Toolset(name="late_addition", agents=("reviewer",),
-                          guidance="Use echo_refid to echo.", read_only=True)
+                          guidance="Use echo_refid to echo.", read_only=True,
+                          services=("*",))
 
         @agent_tool(toolset)
         def echo_refid(refid: str) -> str:
@@ -419,10 +457,10 @@ def test_a_new_registered_tool_is_served_and_offered_to_its_role(tool_server):
             return f"echo:{refid}"
 
         tool_server()
-        tools = mcp_client.tools_for("reviewer")
+        tools = mcp_client.tools_for("reviewer", BIO)
         assert [tool.name for tool in tools] == ["echo_refid"]
         assert tools[0].invoke({"refid": "R7"}) == "echo:R7"
-        assert "Use echo_refid to echo." in mcp_client.prompt_section("reviewer")
+        assert "Use echo_refid to echo." in mcp_client.prompt_section("reviewer", BIO)
     finally:
         agent_tools._registry.clear()
         agent_tools._registry.update(saved)
@@ -435,12 +473,15 @@ def test_a_new_registered_tool_is_served_and_offered_to_its_role(tool_server):
 def test_cli_lists_prompts_and_calls(served, capsys):
     assert mcp_client.main(["list"]) == 0
     listed = json.loads(capsys.readouterr().out)
-    assert set(listed["roles"]["investigator"]) == PROCESS_DB_TOOLS
+    assert set(listed["services"][BIO]["investigator"]) == PROCESS_DB_TOOLS
+    assert listed["services"]["_default"]["investigator"] == []
+    assert listed["roles"] == {"dlt_investigator": [], "dlt_reviewer": [],
+                               "dlt_synthesis": []}
     assert listed["failed"] == {}
 
-    assert mcp_client.main(["prompt", "investigator", "--opencode"]) == 0
-    assert "agent_tools_get_parking_status" in capsys.readouterr().out
+    assert mcp_client.main(["prompt", "investigator", "--service", BIO, "--opencode"]) == 0
+    assert "agent_tools_bio_get_parking_status" in capsys.readouterr().out
 
-    assert mcp_client.main(["call", "get_packet_stage_summary", '{"refid": "R1"}']) == 0
+    assert mcp_client.main(["call", "bio_get_packet_stage_summary", '{"refid": "R1"}']) == 0
     assert json.loads(capsys.readouterr().out)["found"] is True
     assert mcp_client.main(["call", "no_such_tool"]) == 1

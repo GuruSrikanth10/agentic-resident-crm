@@ -19,8 +19,8 @@ puts the two together, in one fixed order, for one role and one pack:
     ### LEARNED RULES                        (the Investigator only)
     <src/prompts/learned_rules.md, then the pack's learned_rules.md>
 
-`agent_factory.build_agent` then appends the AVAILABLE TOOLS section and the
-operating note, as it always has.
+`agent_factory.build_agent` then appends the AVAILABLE TOOLS section -- the
+tools in scope for the same pack -- and the operating note, as it always has.
 
 Services' vocabularies contradict each other -- enu-biometric's "demo" is the
 face modality, and must not be read as demographic -- so no prompt ever

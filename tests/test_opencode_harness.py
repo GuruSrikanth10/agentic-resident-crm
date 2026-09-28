@@ -319,7 +319,7 @@ def _harness_on(monkeypatch, tmp_path, verdict):
     monkeypatch.setenv(opencode_runner.ENV_DISABLE, "true")
     monkeypatch.setattr(paths, "LOCAL_CASESHEETS_DIR", tmp_path)
     monkeypatch.setattr(opencode_runner, "run_task_json",
-                        lambda prompt, output_path, node=None: {
+                        lambda prompt, output_path, node=None, service=None: {
                             "result": verdict, "seconds": 0,
                             "trace": {"llm_calls": 1, "tools": {},
                                       "tokens": {}, "cost": 0.0,

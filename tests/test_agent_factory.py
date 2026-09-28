@@ -19,6 +19,10 @@ from src.core.agent_factory import OPERATING_MODE, build_agent
 from src.tools import agent_tools, mcp_client
 from src.tools.agent_tools import Toolset, agent_tool
 
+#: The pack every rejection agent here is built for; the probe tool is for
+#: every service, so any pack would do.
+PACK = "enu-biometric"
+
 
 class ScriptedModel(BaseChatModel):
     """Replies from a list, and remembers every request it was sent."""
@@ -53,7 +57,7 @@ def probe_tool(tool_server):
     agent_tools.discover()
     saved = dict(agent_tools._registry)
     toolset = Toolset(name="factory_probe", agents=("reviewer",),
-                      guidance="Probe guidance for the reviewer.")
+                      guidance="Probe guidance for the reviewer.", services=("*",))
 
     @agent_tool(toolset)
     def probe_lookup(refid: str) -> str:
@@ -79,7 +83,7 @@ def system_text(request) -> str:
 
 def test_system_prompt_is_the_role_prompt_then_tools_then_operating_mode(probe_tool):
     model = ScriptedModel(replies=[AIMessage(content="ok")])
-    agent = build_agent("reviewer", model, "ROLE PROMPT")
+    agent = build_agent("reviewer", model, "ROLE PROMPT", pack=PACK)
     result = agent.invoke({"messages": [HumanMessage(content="go")]})
 
     assert result["messages"][-1].content == "ok"
@@ -93,7 +97,8 @@ def test_system_prompt_is_the_role_prompt_then_tools_then_operating_mode(probe_t
 
 def test_a_role_without_tools_gets_no_tools_section():
     model = ScriptedModel(replies=[AIMessage(content="ok")])
-    build_agent("synthesis", model, "ROLE").invoke({"messages": [HumanMessage(content="x")]})
+    build_agent("synthesis", model, "ROLE", pack=PACK).invoke(
+        {"messages": [HumanMessage(content="x")]})
     text = system_text(model.requests[0])
     assert mcp_client.TOOLS_HEADING not in text
     assert OPERATING_MODE in text
@@ -102,7 +107,7 @@ def test_a_role_without_tools_gets_no_tools_section():
 def test_registered_tool_calls_run_and_are_recorded(probe_tool):
     model = ScriptedModel(replies=[calls_tool(probe_tool, {"refid": "R1"}, "c1"),
                                    AIMessage(content="FINAL")])
-    agent = build_agent("reviewer", model, "ROLE", tools=[side_effect_tool])
+    agent = build_agent("reviewer", model, "ROLE", tools=[side_effect_tool], pack=PACK)
 
     with mcp_client.recording() as calls:
         result = agent.invoke({"messages": [HumanMessage(content="go")]})
@@ -119,7 +124,7 @@ def test_the_subagent_gets_registered_tools_only_and_its_calls_are_recorded(prob
         AIMessage(content="subagent report"),
         AIMessage(content="MAIN"),
     ])
-    agent = build_agent("reviewer", model, "ROLE", tools=[side_effect_tool])
+    agent = build_agent("reviewer", model, "ROLE", tools=[side_effect_tool], pack=PACK)
 
     with mcp_client.recording() as calls:
         result = agent.invoke({"messages": [HumanMessage(content="go")]})
@@ -137,7 +142,7 @@ def test_past_the_tool_limit_calls_are_refused_and_the_model_answers(probe_tool,
     model = ScriptedModel(replies=[calls_tool(probe_tool, {"refid": "A"}, "1"),
                                    calls_tool(probe_tool, {"refid": "B"}, "2"),
                                    AIMessage(content="ANSWER")])
-    agent = build_agent("reviewer", model, "ROLE")
+    agent = build_agent("reviewer", model, "ROLE", pack=PACK)
 
     with mcp_client.recording() as calls:
         result = agent.invoke({"messages": [HumanMessage(content="go")]})
@@ -150,7 +155,7 @@ def test_past_the_model_call_limit_the_run_fails(probe_tool, monkeypatch):
     monkeypatch.setenv("AGENT_MAX_MODEL_CALLS", "2")
     model = ScriptedModel(replies=[calls_tool(probe_tool, {"refid": str(i)}, str(i))
                                    for i in range(5)])
-    agent = build_agent("reviewer", model, "ROLE")
+    agent = build_agent("reviewer", model, "ROLE", pack=PACK)
     with pytest.raises(ModelCallLimitExceededError):
         agent.invoke({"messages": [HumanMessage(content="go")]})
 
@@ -169,4 +174,5 @@ def test_an_explicit_tool_may_not_share_a_registered_name(probe_tool):
         return refid
 
     with pytest.raises(ValueError, match="both passed explicitly and served over MCP"):
-        build_agent("reviewer", ScriptedModel(replies=[]), "ROLE", tools=[probe_lookup])
+        build_agent("reviewer", ScriptedModel(replies=[]), "ROLE", tools=[probe_lookup],
+                    pack=PACK)

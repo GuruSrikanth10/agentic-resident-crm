@@ -9,7 +9,9 @@ from sqlalchemy.exc import OperationalError
 db_breaker = pybreaker.CircuitBreaker(fail_max=3, reset_timeout=60)
 # The enu-biometric process DB (src/tools/agent_tools) is a different MySQL
 # from the rules DB db_breaker guards; sharing one breaker would let an outage
-# of either refuse lookups against the other.
+# of either refuse lookups against the other. It is the `process` database's
+# breaker in the tools' database layer (agent_tools/_database.py), which
+# gives every other database key a breaker of its own.
 process_db_breaker = pybreaker.CircuitBreaker(fail_max=3, reset_timeout=60)
 es_breaker = pybreaker.CircuitBreaker(fail_max=3, reset_timeout=60)
 llm_breaker = pybreaker.CircuitBreaker(fail_max=3, reset_timeout=60)

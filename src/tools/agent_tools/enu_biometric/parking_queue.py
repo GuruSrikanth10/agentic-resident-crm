@@ -17,7 +17,7 @@ The docs disagree on record_category's casing, so it is matched
 case-insensitively.
 """
 from src.tools.agent_tools import agent_tool
-from src.tools.agent_tools._process_db import (
+from src.tools.agent_tools.enu_biometric._process_db import (
     COMPLETED,
     PROCESS_DB,
     field,
@@ -35,7 +35,7 @@ MAX_REFS_PER_STATUS = 25
 
 
 @agent_tool(PROCESS_DB)
-def get_parking_status(refid: str) -> str:
+def bio_get_parking_status(refid: str) -> str:
     """Whether a packet is parked in biometric dedup, what it waits on, and who waits on it.
 
     An applicant is parked when ABIS matched candidates that are still being

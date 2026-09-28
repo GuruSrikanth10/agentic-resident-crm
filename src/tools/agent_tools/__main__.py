@@ -2,13 +2,13 @@
 Operator CLI for the tools registered in this package, in-process.
 
     python3 -m src.tools.agent_tools list
-    python3 -m src.tools.agent_tools call get_packet_stage_summary '{"refid": "<refId>"}'
+    python3 -m src.tools.agent_tools call bio_get_packet_stage_summary '{"refid": "<refId>"}'
 
 `list` shows every registered tool, its toolset, whether that toolset is
-switched on, and the roles it names. `call` runs one tool in this process --
-same argument validation, same output as the server -- which is the quickest
-way to develop a tool against a real system. No MCP server is involved; to
-see what the agents actually get through MCP, use
+switched on, and the roles and services it names. `call` runs one tool in
+this process -- same argument validation, same output as the server -- which
+is the quickest way to develop a tool against a real system. No MCP server is
+involved; to see what the agents actually get through MCP, use
 `python3 -m src.tools.mcp_client`.
 
 Exit codes:

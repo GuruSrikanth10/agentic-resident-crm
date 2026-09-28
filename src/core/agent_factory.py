@@ -4,9 +4,11 @@ Every agent in the pipeline is a deep agent (`deepagents.create_deep_agent`).
 One builder for both lanes, so every agent gets the same things:
 
 - the tools its role gets from the MCP tool servers (src/tools/mcp_client.py;
-  src/tools/mcp_config.py says which servers), with the system-prompt section
-  describing them, beside any tools the orchestrator passes itself
-  (queue_for_replay, add_learning_rule);
+  src/tools/mcp_config.py says which servers) -- for a rejection role, only
+  those in scope for the service pack the agent is built for
+  (MULTI_SERVICE_PLAN.md D7) -- with the system-prompt section describing
+  them, beside any tools the orchestrator passes itself (queue_for_replay,
+  add_learning_rule);
 - the deep-agent built-ins: planning (write_todos), a scratch filesystem held
   in the run's own state -- nothing is written to disk -- and `task`
   subagents;
@@ -21,14 +23,15 @@ left to the deepagents default, for two reasons. The default copies every
 tool the parent has -- which would hand queue_for_replay and
 add_learning_rule, the two tools with side effects, to a subagent none of the
 prompts mention -- and it gets none of the parent's middleware, so it would
-run without the limits. Here it gets the role's MCP tools and limits of its
-own.
+run without the limits. Here it gets the parent's MCP tools -- the same
+service-scoped list, never the role's full one, or the subagent would be a way
+around the scope (D4) -- and limits of its own.
 
 The system prompt is fixed when the agent is built, so a node invokes the
 agent with the user message alone: {"messages": [HumanMessage(...)]}.
 """
 import os
-from typing import Sequence
+from typing import Optional, Sequence
 
 from deepagents import create_deep_agent
 from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT
@@ -90,30 +93,36 @@ def _limits() -> list:
     ]
 
 
-def system_prompt_for(role: str, system_prompt: str) -> str:
+def system_prompt_for(role: str, system_prompt: str, pack: Optional[str] = None) -> str:
     """The role's prompt, its AVAILABLE TOOLS section, then the operating note.
 
     deepagents appends its own base prompt and the built-in tools'
     instructions after this.
     """
-    parts = [(system_prompt or "").rstrip(), mcp_client.prompt_section(role),
+    parts = [(system_prompt or "").rstrip(), mcp_client.prompt_section(role, pack),
              OPERATING_MODE]
     return "\n\n".join(part for part in parts if part)
 
 
-def build_agent(role: str, model, system_prompt: str, tools: Sequence = ()):
+def build_agent(role: str, model, system_prompt: str, tools: Sequence = (), *,
+                pack: Optional[str] = None):
     """Build the deep agent for `role` (one of agent_tools.AGENT_ROLES).
 
-    `tools` are the role's explicit tools; its MCP tools are added here.
-    Returns a compiled graph to invoke with {"messages": [...]}.
+    `pack` is the service pack the agent is built for: a rejection role's MCP
+    tools are the ones in scope for it, and it is required for those roles;
+    a DLT role takes none (mcp_client.selection). `tools` are the role's
+    explicit tools; its MCP tools are added here. Returns a compiled graph to
+    invoke with {"messages": [...]}.
     """
-    registered = mcp_client.tools_for(role)
+    registered = mcp_client.tools_for(role, pack)
     explicit = list(tools)
     clash = sorted({tool.name for tool in explicit} & {tool.name for tool in registered})
     if clash:
         raise ValueError(f"Tool name(s) {clash} are both passed explicitly and "
                          f"served over MCP for role {role!r}.")
 
+    # The parent's own scoped list: a subagent given the role's full list
+    # would reach tools the parent's service may not use.
     general_purpose = {
         **GENERAL_PURPOSE_SUBAGENT,
         "tools": registered,
@@ -122,12 +131,12 @@ def build_agent(role: str, model, system_prompt: str, tools: Sequence = ()):
     agent = create_deep_agent(
         model=model,
         tools=[*explicit, *registered],
-        system_prompt=system_prompt_for(role, system_prompt),
+        system_prompt=system_prompt_for(role, system_prompt, pack),
         middleware=_limits(),
         subagents=[general_purpose],
         name=role,
     )
-    logger.info("Agent built", role=role,
+    logger.info("Agent built", role=role, service_pack=pack,
                 explicit_tools=[tool.name for tool in explicit],
                 mcp_tools=[tool.name for tool in registered],
                 max_tool_calls=max_tool_calls(),

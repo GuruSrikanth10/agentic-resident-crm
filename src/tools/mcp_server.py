@@ -16,9 +16,9 @@ never holds up another request.
 
 Besides its name, description and argument schema, each tool's listing
 carries the MCP read-only hint (from its toolset) and, under `_meta`, the
-roles that get it by default and the guidance their prompts include
-(mcp_config.META_*). A client needs none of this repository's code to act on
-them.
+roles that get it by default, the services whose packets it is for, and the
+guidance their prompts include (mcp_config.META_*). A client needs none of
+this repository's code to act on them.
 
 Run it on its own:
     python3 -m src.tools.mcp_server [--host 127.0.0.1] [--port 8765]
@@ -51,8 +51,9 @@ INSTRUCTIONS = (
     "keyed by a packet's refId. A result saying a lookup was switched off or "
     "failed means nothing was read; a lookup that ran and found nothing is a "
     "finding. Each tool's _meta names the agent roles it is meant for "
-    f"({mcp_config.META_AGENTS}) and the guidance for using it "
-    f"({mcp_config.META_GUIDANCE})."
+    f"({mcp_config.META_AGENTS}), the services whose packets it is for "
+    f"({mcp_config.META_SERVICES}; \"*\" is every service) and the guidance "
+    f"for using it ({mcp_config.META_GUIDANCE})."
 )
 
 
@@ -76,6 +77,7 @@ def build_server():
             meta={
                 mcp_config.META_TOOLSET: entry.toolset.name,
                 mcp_config.META_AGENTS: list(entry.toolset.agents),
+                mcp_config.META_SERVICES: list(entry.toolset.services),
                 mcp_config.META_GUIDANCE: entry.toolset.guidance,
             },
             # The tools return text; a structured copy of it would only

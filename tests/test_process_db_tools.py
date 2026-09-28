@@ -1,6 +1,7 @@
 """
-The enu-biometric process DB tools (src/tools/agent_tools/stage_tracker.py,
-parking_queue.py, helper_cache.py and their shared _process_db.py).
+The enu-biometric process DB tools (src/tools/agent_tools/enu_biometric/:
+stage_tracker.py, parking_queue.py, helper_cache.py and their _process_db.py,
+over the shared read-only database layer, agent_tools/_database.py).
 
 Run against SQLite in memory with the three tables' DDL columns. The
 MySQL-only parts -- the READ ONLY session hook and URL escaping -- are tested
@@ -15,7 +16,8 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.pool import StaticPool
 
 from src.tools import agent_tools
-from src.tools.agent_tools import _process_db
+from src.tools.agent_tools import _database
+from src.tools.agent_tools.enu_biometric import _process_db
 from src.utils.resilience import process_db_breaker
 
 REFID = "3f2b9c1e-0d4a-4a8e-9b1f-6c7d8e9f0a1b"
@@ -52,7 +54,7 @@ def db(monkeypatch):
                 record_category TEXT, event_json TEXT, created_by TEXT,
                 creation_date TEXT, last_updated_by TEXT,
                 last_updated_date TEXT, is_parked INTEGER)"""))
-    monkeypatch.setattr(_process_db, "get_engine", lambda: engine)
+    monkeypatch.setattr(_process_db.PROCESS, "get_engine", lambda: engine)
     monkeypatch.setenv("PROCESS_DB_ENABLED", "true")
     for variable in ("PROCESS_DB_MAX_ROWS", "PROCESS_DB_MAX_OUTPUT_CHARS"):
         monkeypatch.delenv(variable, raising=False)
@@ -125,7 +127,7 @@ def test_summary_finds_an_open_substage_and_ignores_request_copies(db):
         stage(conn, REFID, "SDK_CROSS_MATCH_RESUBMISSION", "IN PROGRESS", "2026-09-01 10:03:00")
         stage(conn, OTHER, "MFC_PORTAL", "IN PROGRESS", "2026-09-01 10:03:00")
 
-    result = call("get_packet_stage_summary", refid=REFID)
+    result = call("bio_get_packet_stage_summary", refid=REFID)
 
     assert result["found"] is True
     assert [o["sub_stage"] for o in result["open_substages"]] == ["SDK_CROSS_MATCH"]
@@ -144,7 +146,7 @@ def test_summary_marks_a_replayed_attempt_superseded_not_stuck(db):
               attempt=1, retry=1)
         stage(conn, REFID, "UPDATE_CHECKER", "COMPLETED", "2026-09-01 11:00:40", attempt=1)
 
-    result = call("get_packet_stage_summary", refid=REFID)
+    result = call("bio_get_packet_stage_summary", refid=REFID)
 
     assert result["open_substages"] == []
     checker = result["substages"][0]
@@ -159,7 +161,7 @@ def test_summary_reports_reject_codes_from_completed_rows(db):
         stage(conn, REFID, "MDD_POLICY_BATCH_1", "COMPLETED", "2026-09-01 10:00:05",
               reject="RESIDENT_MAN_DEDUP_REJECT_TD")
 
-    result = call("get_packet_stage_summary", refid=REFID)
+    result = call("bio_get_packet_stage_summary", refid=REFID)
 
     assert result["reject_reason_codes"] == [{
         "sub_stage": "MDD_POLICY_BATCH_1", "created_by": "Biometric", "attempt": 0,
@@ -173,7 +175,7 @@ def test_summary_keeps_canary_rows_apart(db):
         stage(conn, REFID, "ABIS_DEDUP", "COMPLETED", "2026-09-01 10:01:00",
               writer="Biometric_Canary_Mode")
 
-    result = call("get_packet_stage_summary", refid=REFID)
+    result = call("bio_get_packet_stage_summary", refid=REFID)
 
     assert {(s["created_by"], s["latest_state"]) for s in result["substages"]} == {
         ("Biometric", "in_progress"), ("Biometric_Canary_Mode", "completed")}
@@ -183,12 +185,12 @@ def test_summary_keeps_canary_rows_apart(db):
 def test_status_spelt_with_an_underscore_is_still_in_progress(db):
     with db.begin() as conn:
         stage(conn, REFID, "ABIS_UPDATE", "IN_PROGRESS", "2026-09-01 10:00:00")
-    assert call("get_packet_stage_summary", refid=REFID)["open_substages"][0]["sub_stage"] \
+    assert call("bio_get_packet_stage_summary", refid=REFID)["open_substages"][0]["sub_stage"] \
         == "ABIS_UPDATE"
 
 
 def test_summary_for_an_unknown_packet_says_not_found(db):
-    assert call("get_packet_stage_summary", refid=REFID) == {
+    assert call("bio_get_packet_stage_summary", refid=REFID) == {
         "refid": REFID, "found": False, "substages": []}
 
 
@@ -198,7 +200,7 @@ def test_timeline_is_oldest_first_without_event_uid_or_integrity(db):
         stage(conn, REFID, "ABIS_DEDUP", "COMPLETED", "2026-09-01 10:01:00",
               reject="SOME_CODE")
 
-    result = call("get_packet_stage_timeline", refid=REFID)
+    result = call("bio_get_packet_stage_timeline", refid=REFID)
 
     assert [row["sub_stage_status"] for row in result["rows"]] == ["IN PROGRESS", "COMPLETED"]
     assert result["packet"] == {"sid": SID, "sid_date": "2026-09-01 09:00:00",
@@ -217,7 +219,7 @@ def test_timeline_filters_by_substage_and_keeps_the_newest_when_capped(db, monke
                   attempt=minute)
         stage(conn, REFID, "SDK_CONSISTENCY", "IN PROGRESS", "2026-09-01 10:09:00")
 
-    result = call("get_packet_stage_timeline", refid=REFID, sub_stage="ABIS_DEDUP")
+    result = call("bio_get_packet_stage_timeline", refid=REFID, sub_stage="ABIS_DEDUP")
 
     assert result["truncated"] is True
     assert [row["stage_resubmission_count"] for row in result["rows"]] == [2, 3]
@@ -230,7 +232,7 @@ def test_timeline_shrinks_to_fit_the_output_cap_keeping_valid_json(db, monkeypat
         for second in range(20):
             stage(conn, REFID, "ABIS_DEDUP", "IN PROGRESS", f"2026-09-01 10:00:{second:02d}")
 
-    raw = agent_tools.get_tool("get_packet_stage_timeline").invoke({"refid": REFID})
+    raw = agent_tools.get_tool("bio_get_packet_stage_timeline").invoke({"refid": REFID})
     result = json.loads(raw)
 
     assert len(raw) <= 900
@@ -247,7 +249,7 @@ def test_applicant_waiting_on_an_in_process_candidate_is_parked(db):
         parking(conn, REFID, "APPLICANT", {CANDIDATE: "InProcess", OTHER: "Completed"})
         stage(conn, REFID, "BIO_CANDIDATE_PARKING", "COMPLETED", "2026-09-01 10:00:00")
 
-    result = call("get_parking_status", refid=REFID)
+    result = call("bio_get_parking_status", refid=REFID)
 
     assert result["parked_now"] is True
     assert result["as_applicant"]["counts"] == {"InProcess": 1, "Completed": 1}
@@ -261,7 +263,7 @@ def test_a_departing_completed_row_means_not_parked_even_with_a_stale_map(db):
         parking(conn, REFID, "Applicant", {CANDIDATE: "InProcess"})
         stage(conn, REFID, "BIO_CANDIDATE_DEPARTING", "COMPLETED", "2026-09-01 11:00:00")
 
-    result = call("get_parking_status", refid=REFID)
+    result = call("bio_get_parking_status", refid=REFID)
 
     assert result["parked_now"] is False
     assert "BIO_CANDIDATE_DEPARTING" in result["parked_now_basis"]
@@ -271,7 +273,7 @@ def test_a_departing_completed_row_means_not_parked_even_with_a_stale_map(db):
 def test_no_in_process_entry_left_means_not_parked(db):
     with db.begin() as conn:
         parking(conn, REFID, "APPLICANT", {CANDIDATE: "Completed"})
-    result = call("get_parking_status", refid=REFID)
+    result = call("bio_get_parking_status", refid=REFID)
     assert result["parked_now"] is False
     assert "no InProcess" in result["parked_now_basis"]
 
@@ -280,7 +282,7 @@ def test_candidate_row_lists_the_applicants_waiting_on_it(db):
     with db.begin() as conn:
         parking(conn, CANDIDATE, "CANDIDATE", {REFID: "InProcess"}, bms_error=True)
 
-    result = call("get_parking_status", refid=CANDIDATE)
+    result = call("bio_get_parking_status", refid=CANDIDATE)
 
     assert result["parked_now"] is False
     assert result["as_candidate"]["waiting_on_this"] == {"InProcess": [REFID]}
@@ -289,7 +291,7 @@ def test_candidate_row_lists_the_applicants_waiting_on_it(db):
 
 
 def test_never_parked_packet(db):
-    result = call("get_parking_status", refid=REFID)
+    result = call("bio_get_parking_status", refid=REFID)
     assert result["found"] is False
     assert result["parked_now"] is False
 
@@ -315,7 +317,7 @@ def test_list_helper_records_names_the_missing_steps(db):
     with db.begin() as conn:
         helper(conn, REFID, "AbisMwCandidateRecord", ABIS_RECORD)
 
-    result = call("list_helper_records", refid=REFID)
+    result = call("bio_list_helper_records", refid=REFID)
 
     assert [r["record_type"] for r in result["records"]] == ["AbisMwCandidateRecord"]
     assert result["records"][0]["helper_record_bytes"] > 0
@@ -327,7 +329,7 @@ def test_abis_candidates_take_the_highest_score_across_engines(db):
     with db.begin() as conn:
         helper(conn, REFID, "AbisMwCandidateRecord", ABIS_RECORD)
 
-    result = call("get_abis_candidates", refid=REFID)
+    result = call("bio_get_abis_candidates", refid=REFID)
 
     assert result["requestType"] == "BIOUPDATE"
     assert [c["candidateRefId"] for c in result["candidates"]] == [CANDIDATE, OTHER]
@@ -341,20 +343,20 @@ def test_abis_candidates_take_the_highest_score_across_engines(db):
 def test_abis_record_without_the_wrapper_is_read_too(db):
     with db.begin() as conn:
         helper(conn, REFID, "AbisMwCandidateRecord", ABIS_RECORD["abisMWResponseNewSeda"])
-    assert call("get_abis_candidates", refid=REFID)["candidate_count"] == 2
+    assert call("bio_get_abis_candidates", refid=REFID)["candidate_count"] == 2
 
 
 def test_an_unexpected_shape_is_reported_not_read_as_no_candidates(db):
     with db.begin() as conn:
         helper(conn, REFID, "AbisMwCandidateRecord", {"somethingElse": {"x": 1}})
-    result = call("get_abis_candidates", refid=REFID)
+    result = call("bio_get_abis_candidates", refid=REFID)
     assert result["shape_recognized"] is False
     assert result["top_level_keys"] == ["somethingElse"]
     assert "candidates" not in result
 
 
 def test_missing_record_means_the_step_did_not_happen(db):
-    result = call("get_abis_candidates", refid=REFID)
+    result = call("bio_get_abis_candidates", refid=REFID)
     assert result["found"] is False
     assert "No ABIS middleware response" in result["meaning"]
 
@@ -375,7 +377,7 @@ def test_candidate_facts_mask_uids_and_rank_by_score(db):
     with db.begin() as conn:
         helper(conn, REFID, "ApplicantCandidateHelperRecord", FACTS_RECORD)
 
-    result = call("get_candidate_facts", refid=REFID)
+    result = call("bio_get_candidate_facts", refid=REFID)
 
     assert result["applicant"]["isFirstTimeBioUpdate"] is True
     assert [c["candidateRefId"] for c in result["candidates"]] == [CANDIDATE, OTHER]
@@ -389,11 +391,11 @@ def test_candidate_facts_for_one_candidate(db):
     with db.begin() as conn:
         helper(conn, REFID, "ApplicantCandidateHelperRecord", FACTS_RECORD)
 
-    one = call("get_candidate_facts", refid=REFID, candidate_ref_id=CANDIDATE.upper())
+    one = call("bio_get_candidate_facts", refid=REFID, candidate_ref_id=CANDIDATE.upper())
     assert one["candidate_found"] is True
     assert [c["eid"] for c in one["candidates"]] == ["E1"]
 
-    none = call("get_candidate_facts", refid=REFID, candidate_ref_id="not-a-candidate")
+    none = call("bio_get_candidate_facts", refid=REFID, candidate_ref_id="not-a-candidate")
     assert none["candidate_found"] is False
     assert none["candidates"] == []
     assert none["candidate_count"] == 2
@@ -406,7 +408,7 @@ def test_parking_verdicts_are_counted_and_unwrapped(db):
         helper(conn, REFID, "ParkingHelperRecord",
                {"allCandidatesPerModalityOverallMatchResult": verdicts})
 
-    result = call("get_parking_match_verdicts", refid=REFID)
+    result = call("bio_get_parking_match_verdicts", refid=REFID)
 
     assert result["verdict_counts"] == {"MATCH": 2, "NO_MATCH": 1, "CANNOT_DETERMINE": 1}
     first = result["candidates"][0]
@@ -423,7 +425,7 @@ def test_update_checker_result_counts_matches(db):
     with db.begin() as conn:
         helper(conn, REFID, "UpdateCheckerHelperRecord", record)
 
-    result = call("get_update_checker_result", refid=REFID)
+    result = call("bio_get_update_checker_result", refid=REFID)
 
     assert result["isFlagged"] is True
     candidate = result["candidates"][0]
@@ -435,7 +437,7 @@ def test_helper_record_fields_uses_json_extract(db):
     with db.begin() as conn:
         helper(conn, REFID, "ApplicantCandidateHelperRecord", FACTS_RECORD)
 
-    result = call("get_helper_record_fields", refid=REFID,
+    result = call("bio_get_helper_record_fields", refid=REFID,
                   record_type="ApplicantCandidateHelperRecord",
                   json_paths=["$.isFirstTimeBioUpdate",
                               f'$.candidateHelperRecordMap."{CANDIDATE}".maxAbisScore',
@@ -449,13 +451,13 @@ def test_helper_record_fields_uses_json_extract(db):
 @pytest.mark.parametrize("path", ["isFlagged", "$.a; DROP TABLE x", "$.a**", "$..a",
                                   "$.a[-1]", "$" + ".a" * 200])
 def test_helper_record_fields_refuses_unsupported_paths(db, path):
-    result = call("get_helper_record_fields", refid=REFID,
+    result = call("bio_get_helper_record_fields", refid=REFID,
                   record_type="ParkingHelperRecord", json_paths=[path])
     assert isinstance(result, str) and result.startswith("Invalid argument")
 
 
 def test_helper_record_fields_needs_paths(db):
-    result = call("get_helper_record_fields", refid=REFID,
+    result = call("bio_get_helper_record_fields", refid=REFID,
                   record_type="ParkingHelperRecord", json_paths=[])
     assert result.startswith("Invalid argument")
 
@@ -464,8 +466,8 @@ def test_helper_record_fields_needs_paths(db):
 # Failures never read like an empty result
 # ======================================================================
 
-@pytest.mark.parametrize("name", ["get_packet_stage_summary", "get_parking_status",
-                                  "list_helper_records", "get_abis_candidates"])
+@pytest.mark.parametrize("name", ["bio_get_packet_stage_summary", "bio_get_parking_status",
+                                  "bio_list_helper_records", "bio_get_abis_candidates"])
 def test_disabled_lookup_is_an_evidence_gap(db, monkeypatch, name):
     monkeypatch.setenv("PROCESS_DB_ENABLED", "false")
     result = call(name, refid=REFID)
@@ -475,18 +477,18 @@ def test_disabled_lookup_is_an_evidence_gap(db, monkeypatch, name):
 
 @pytest.mark.parametrize("refid", ["", "   ", "x" * 37])
 def test_an_unusable_refid_is_refused_before_any_query(db, refid):
-    result = call("get_packet_stage_summary", refid=refid)
+    result = call("bio_get_packet_stage_summary", refid=refid)
     assert isinstance(result, str) and result.startswith("Invalid argument")
 
 
 def test_a_failing_database_is_an_evidence_gap_not_an_exception(monkeypatch):
     broken = MagicMock()
     broken.connect.side_effect = RuntimeError("boom")
-    monkeypatch.setattr(_process_db, "get_engine", lambda: broken)
+    monkeypatch.setattr(_process_db.PROCESS, "get_engine", lambda: broken)
     monkeypatch.setenv("PROCESS_DB_ENABLED", "true")
     process_db_breaker.close()
     try:
-        result = call("get_parking_status", refid=REFID)
+        result = call("bio_get_parking_status", refid=REFID)
     finally:
         process_db_breaker.close()
     assert result.startswith("The process DB lookup failed (RuntimeError)")
@@ -499,9 +501,9 @@ def test_an_open_breaker_fails_fast_with_a_message(db, monkeypatch):
 
     monkeypatch.setattr(_process_db, "query", refuse)
     # The tool modules bound `query` at import; patch where it is used.
-    from src.tools.agent_tools import stage_tracker
+    from src.tools.agent_tools.enu_biometric import stage_tracker
     monkeypatch.setattr(stage_tracker, "query", refuse)
-    result = call("get_packet_stage_summary", refid=REFID)
+    result = call("bio_get_packet_stage_summary", refid=REFID)
     assert "circuit breaker is open" in result
 
 
@@ -514,7 +516,7 @@ def test_connections_are_forced_read_only_first():
     connection = MagicMock()
     connection.cursor.return_value = cursor
 
-    _process_db._on_connect(connection, None)
+    _process_db.PROCESS.on_connect(connection, None)
 
     statements = [c.args[0] for c in cursor.execute.call_args_list]
     assert statements[0] == "SET SESSION TRANSACTION READ ONLY"
@@ -526,7 +528,7 @@ def test_a_missing_statement_timeout_does_not_block_the_connection():
     cursor.execute.side_effect = [None, Exception("unknown variable")]
     connection = MagicMock()
     connection.cursor.return_value = cursor
-    _process_db._on_connect(connection, None)
+    _process_db.PROCESS.on_connect(connection, None)
 
 
 def test_a_read_only_failure_refuses_the_connection():
@@ -535,11 +537,11 @@ def test_a_read_only_failure_refuses_the_connection():
     connection = MagicMock()
     connection.cursor.return_value = cursor
     with pytest.raises(Exception, match="denied"):
-        _process_db._on_connect(connection, None)
+        _process_db.PROCESS.on_connect(connection, None)
 
 
 def test_engine_escapes_the_password(monkeypatch):
-    monkeypatch.setattr(_process_db, "_ENGINE", None)
+    _process_db.PROCESS.reset_engine()
     monkeypatch.setenv("PROCESS_DB_HOST", "db.internal")
     monkeypatch.setenv("PROCESS_DB_USERNAME", "reader")
     monkeypatch.setenv("PROCESS_DB_PASSWORD", "p@ss:w/rd")
@@ -551,9 +553,8 @@ def test_engine_escapes_the_password(monkeypatch):
         assert engine.url.password == "p@ss:w/rd"
         assert engine.url.port == 6446
         assert engine.url.database == "uidprocessv2_2"
-        engine.dispose()
     finally:
-        monkeypatch.setattr(_process_db, "_ENGINE", None)
+        _process_db.PROCESS.reset_engine()
 
 
 def test_redaction_spares_refids_but_not_pii_beside_them():
@@ -565,3 +566,88 @@ def test_redaction_spares_refids_but_not_pii_beside_them():
     assert redacted["ids"] == [CANDIDATE]
     assert redacted["uid"] == "[REDACTED:UID]"
     assert redacted["score"] == 9500
+
+
+# ======================================================================
+# The shared database layer (agent_tools/_database.py, D9)
+# ======================================================================
+
+@pytest.fixture
+def other_database():
+    """A second database key, forgotten afterwards."""
+    database = _database.declare("probe_other", label="probe DB")
+    yield database
+    database.breaker.close()
+    _database._databases.pop("probe_other", None)
+
+
+def test_the_process_database_keeps_its_settings_and_breaker():
+    assert _process_db.PROCESS.setting("HOST") == "PROCESS_DB_HOST"
+    assert _process_db.PROCESS.breaker is process_db_breaker
+    assert _process_db.PROCESS.breaker_name == "process_db_breaker"
+
+
+def test_another_database_has_its_own_settings_and_breaker(other_database):
+    assert other_database.setting("ENABLED") == "AGENT_DB_PROBE_OTHER_ENABLED"
+    assert other_database.breaker is not process_db_breaker
+    assert _database.breakers()["agent_db_probe_other_breaker"] is other_database.breaker
+
+
+def test_one_database_is_shared_and_cannot_be_declared_two_ways(other_database):
+    assert _database.declare("probe_other", label="probe DB") is other_database
+    with pytest.raises(ValueError, match="declared twice"):
+        _database.declare("probe_other", label="another label")
+    with pytest.raises(ValueError, match="must match"):
+        _database.declare("Bad-Key", label="x")
+
+
+def test_one_databases_outage_opens_only_its_own_breaker(db, other_database, monkeypatch):
+    broken = MagicMock()
+    broken.connect.side_effect = RuntimeError("down")
+    monkeypatch.setattr(other_database, "get_engine", lambda: broken)
+    monkeypatch.setenv("AGENT_DB_PROBE_OTHER_ENABLED", "true")
+
+    for _ in range(4):
+        result = other_database.run_lookup(lambda: {"rows": other_database.query("SELECT 1", {})})
+        assert "evidence gap" in result
+    assert other_database.breaker.current_state == "open"
+    assert "circuit breaker is open" in other_database.run_lookup(
+        lambda: {"rows": other_database.query("SELECT 1", {})})
+
+    # The process database still answers.
+    assert call("bio_get_packet_stage_summary", refid=REFID)["found"] is False
+    assert process_db_breaker.current_state == "closed"
+
+
+def test_a_database_switched_on_without_its_settings_fails_the_boot(other_database, monkeypatch):
+    monkeypatch.setenv("AGENT_DB_PROBE_OTHER_ENABLED", "true")
+    monkeypatch.setenv("AGENT_DB_PROBE_OTHER_HOST", "db.internal")
+    for name in ("USERNAME", "PASSWORD"):
+        monkeypatch.delenv(f"AGENT_DB_PROBE_OTHER_{name}", raising=False)
+    monkeypatch.setenv("PROCESS_DB_ENABLED", "true")
+    for name in ("HOST", "USERNAME", "PASSWORD"):
+        monkeypatch.delenv(f"PROCESS_DB_{name}", raising=False)
+
+    errors = _database.validate()
+
+    assert "AGENT_DB_PROBE_OTHER_ENABLED=true requires AGENT_DB_PROBE_OTHER_USERNAME to be set." \
+        in errors
+    assert "PROCESS_DB_ENABLED=true requires PROCESS_DB_HOST to be set." in errors
+    assert not any("AGENT_DB_PROBE_OTHER_HOST" in error for error in errors)
+
+
+def test_a_database_switched_off_needs_no_settings(other_database, monkeypatch):
+    monkeypatch.delenv("AGENT_DB_PROBE_OTHER_ENABLED", raising=False)
+    monkeypatch.setenv("PROCESS_DB_ENABLED", "false")
+    assert _database.validate() == []
+
+
+def test_every_databases_breaker_is_sampled(other_database):
+    from src.utils import metrics
+
+    if not metrics.METRICS_AVAILABLE:
+        pytest.skip("prometheus_client is not installed")
+    other_database.breaker.open()
+    metrics.sample_breaker_states()
+    assert metrics.BREAKER_STATE.labels(breaker="agent_db_probe_other_breaker")._value.get() == 2
+    assert metrics.BREAKER_STATE.labels(breaker="process_db_breaker")._value.get() in (0, 1, 2)

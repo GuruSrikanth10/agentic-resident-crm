@@ -776,7 +776,8 @@ agentic-resident-crm/
 │   ├── test_mcp_server.py          # MCP server: listing, calls, health, the supervised local process
 │   ├── test_opencode_mcp.py        # opencode harness: MCP config, role agents, harness tool evidence
 │   ├── test_agent_tool_evidence.py # Tool evidence through both lanes, the casebook and the fingerprint
-│   ├── test_process_db_tools.py    # The process DB tools against the three tables (SQLite)
+│   ├── test_process_db_tools.py    # The process DB tools against the three tables (SQLite); the database layer
+│   ├── test_service_tools.py       # Tools per service: the selection matrix, prefix rule, opencode agents, subagent
 │   ├── test_service_prompts.py     # Prompts per pack: content kept, neutrality, snapshots, pool
 │   ├── test_service_rules.py       # Rule source per pack: the rules table, the notes, the case files
 │   ├── fixtures/reason_code_docs/  # A small valid store the pipeline tests look up in
@@ -870,13 +871,16 @@ agentic-resident-crm/
 │   │   ├── mcp_server.py           # The bundled MCP tool server (streamable HTTP) + the API's supervised child
 │   │   ├── mcp_client.py           # MCP client: catalog, per-role tools for deep agents, opencode config, evidence
 │   │   ├── agent_tools/            # The tools the bundled server serves, discovered (section 3.5.1)
-│   │   │   ├── __init__.py         #   Registry: Toolset, @agent_tool, discovery, what is served
+│   │   │   ├── __init__.py         #   Registry: Toolset (roles, services), @agent_tool, discovery, scope checks
 │   │   │   ├── __main__.py         #   CLI: registered tools; call one in-process, without a server
-│   │   │   ├── _process_db.py      #   Process DB plumbing: read-only engine, breaker, bounds, redaction
-│   │   │   ├── stage_tracker.py    #   bio_stage_tracker: stage summary, timeline
-│   │   │   ├── parking_queue.py    #   bio_parking_queue_store: parking status
-│   │   │   └── helper_cache.py     #   bio_helper_cache_store: ABIS candidates, candidate facts,
-│   │   │                           #     parking verdicts, update checker, JSON_EXTRACT fields
+│   │   │   ├── _database.py        #   Read-only database layer: one engine and breaker per database key
+│   │   │   ├── common/             #   Tools for every service (services=("*",)); none yet
+│   │   │   └── enu_biometric/      #   enu-biometric's tools, all named bio_* (section 3.2.3)
+│   │   │       ├── _process_db.py  #     The process_db toolset and the `process` database it reads
+│   │   │       ├── stage_tracker.py #    bio_stage_tracker: stage summary, timeline
+│   │   │       ├── parking_queue.py #    bio_parking_queue_store: parking status
+│   │   │       └── helper_cache.py #     bio_helper_cache_store: ABIS candidates, candidate facts,
+│   │   │                           #       parking verdicts, update checker, JSON_EXTRACT fields
 │   │   ├── approve_replays.py      # CLI: approve queued packet replays
 │   │   ├── promote_rules.py        # CLI: promote + git-commit learned rules
 │   │   ├── record_outcome.py       # CLI: attach a ground-truth verdict to a completed investigation
@@ -972,7 +976,7 @@ agentic-resident-crm/
 The system manages all operational feature flags, LLM credentials, MySQL database connections, and Kafka connectivity settings via a strictly typed `.env` file (loaded via `python-dotenv` in `src/utils/env.py`).
 - **Template:** `.env.example` is the annotated reference: it carries every setting an operator is expected to tune, with the reasoning behind each default. It is a starting point, not an exhaustive dump of every variable the code reads -- a handful of internal tunables (retry budgets, renderer selection, pipeline line bounds) exist only in code with working defaults.
 - **Database Modes:** Set `USE_MOCK_DB=true` to parse rules locally from a CSV, or `USE_MOCK_DB=false` to dynamically query the live MySQL `rules` table via SQLAlchemy/PyMySQL.
-- **Agent tools and the process database:** Every agent is a deep agent, and every agent -- deep agents and the opencode harness alike -- reaches its tools only through MCP servers (section 3.5.1). `AGENT_MCP_SERVERS` lists them; unset, it is the bundled server, which the API runs as a supervised child whenever `AGENT_MCP_SERVE` (default `auto`: when some bundled toolset is on) says so, on `AGENT_MCP_HOST`/`AGENT_MCP_PORT` (127.0.0.1:8765). Moving to an organisation-hosted server is a change to `AGENT_MCP_SERVERS` (with `${NAME}` references for tokens) and `AGENT_MCP_SERVE=false`, not to any agent. The process DB toolset reads enu-biometric's own `uidprocessv2_2` -- a second MySQL datasource with its own engine and its own `process_db_breaker`, used by the tool server process -- and is off unless `PROCESS_DB_ENABLED=true`. `validate_config()` fails the boot if the DB toolset is on without `PROCESS_DB_HOST`/`USERNAME`/`PASSWORD`, if a tool module fails to import, if an `AGENT_MCP_*` setting is malformed, or if an `AGENT_TOOLS_<ROLE>` variable names an unknown role; the tool names a selection lists are checked against the servers' listings when the first agent is built. Per-run limits are `AGENT_MAX_TOOL_CALLS` and `AGENT_MAX_MODEL_CALLS`.
+- **Agent tools and the process database:** Every agent is a deep agent, and every agent -- deep agents and the opencode harness alike -- reaches its tools only through MCP servers (section 3.5.1). `AGENT_MCP_SERVERS` lists them; unset, it is the bundled server, which the API runs as a supervised child whenever `AGENT_MCP_SERVE` (default `auto`: when some bundled toolset is on) says so, on `AGENT_MCP_HOST`/`AGENT_MCP_PORT` (127.0.0.1:8765). Moving to an organisation-hosted server is a change to `AGENT_MCP_SERVERS` (with `${NAME}` references for tokens) and `AGENT_MCP_SERVE=false`, not to any agent. The rejection lane's tools are scoped by the packet's service as well as by role (section 3.2.3, "Tools per service"); `AGENT_TOOLS_COMMON` names undeclared tools from other servers to treat as tools for every service. The process DB toolset reads enu-biometric's own `uidprocessv2_2` -- a second MySQL datasource with its own engine and its own `process_db_breaker`, used by the tool server process -- and is off unless `PROCESS_DB_ENABLED=true`. It is the `process` key of the tools' shared read-only database layer (`agent_tools/_database.py`); any other database a toolset reads is its own key, with `AGENT_DB_<KEY>_*` settings, pool and breaker. `validate_config()` fails the boot if a database is on without its `..._HOST`/`USERNAME`/`PASSWORD`, if a tool module fails to import, if an `AGENT_MCP_*` setting is malformed, or if an `AGENT_TOOLS_<ROLE>` variable names an unknown role; the tool names a selection lists are checked against the servers' listings when the first agent is built, and the tools' service scopes against the registry by `main_api.validate_service_registry()`. Per-run limits are `AGENT_MAX_TOOL_CALLS` and `AGENT_MAX_MODEL_CALLS`.
 - **Security:** The actual `.env` file is excluded via `.gitignore` to prevent secret leakage.
 - **Credentials the process holds:** the LLM provider key, MySQL, Elasticsearch, a Kubernetes kubeconfig (or an in-cluster ServiceAccount), `OIS_API_KEY` for the replay endpoint, and -- when the replay precheck is configured -- `BITBUCKET_TOKEN`. The last is **read-only and scoped to the repositories named in `DLT_REPO_MAP`**: `src/dlt/bitbucket.py` has no code path that writes, and leaving `BITBUCKET_BASE_URL` empty disables every source lookup outright.
 - **Feature flags are layered, not global.** Several capabilities are gated by two or three independent switches rather than one, so "let the system nominate an action" and "let the action actually happen" are always separate decisions -- `DLT_AUTO_REPLAY_ENABLED` vs `ENABLE_AUTO_REPLAY`, and `DLT_CODE_CHECK_ENABLED` vs `DLT_CODE_CHECK_GATES_REPLAY` vs `DLT_CODE_CHECK_PARK_ENABLED` (section 4.4.1).
@@ -1182,8 +1186,10 @@ does. So `opencode_runner._harness_config()` never sends one, and the provider
 block (npm package, `baseURL`, API key, model names) must be in
 `~/.config/opencode/config.json`. What it does send -- when agent tool
 servers are configured -- is an `mcp` block (the servers) and an `agent`
-block (one `crm_<role>` agent per harness role, allowed exactly that role's
-MCP tools; section 3.5.1). Blocks without a `provider` are deep-merged:
+block (one agent per harness role and service pack -- `crm_<role>__<service>`
+and `crm_<role>__default` for the rejection roles, `crm_<role>` for the DLT
+roles -- each allowed exactly the MCP tools that role gets for that pack;
+sections 3.2.3 and 3.5.1). Blocks without a `provider` are deep-merged:
 verified on opencode 1.18.20 with `opencode debug config`, the provider
 surviving from both the global and the project file.
 In a container `entrypoint.sh` writes that file from the runtime environment
@@ -1299,15 +1305,19 @@ replace the files shipped in `src/` -- or when no bucket is configured.
 Every service publishes its rejections to the one topic the fast consumer
 reads, in one structure. `MULTI_SERVICE_PLAN.md` moves the lane from "every
 packet is enu-biometric" to "every packet is analysed with its own service's
-knowledge". Phases 1 and 2 are built:
+knowledge". Phases 1 to 4 are built:
 
 - **Phase 1** places each packet in a service and can turn away the services
   that are not switched on yet.
 - **Phase 2** builds each packet's agents from its own service pack. The role
   prompts now hold only what every service shares; the enu-biometric text they
-  used to carry lives in the enu-biometric pack. The rule lookup, the
-  documentation, the tools and the runbooks are still the biometric ones
-  (Phases 3-5).
+  used to carry lives in the enu-biometric pack.
+- **Phase 3** gives each pack its own rule source and its own reason-code
+  documentation first.
+- **Phase 4** scopes the agents' tools by service as well as by role.
+
+The runbooks, the learned-rule scopes and the logs are still the biometric
+ones (Phases 5 and 6).
 
 **The registry** (`src/utils/service_registry.py`) is one directory per service
 under `SERVICE_PACKS_DIR` (default `src/service_packs/`), each with a
@@ -1510,6 +1520,97 @@ Counted on `reason_code_doc_lookups_total{outcome, match, service, scope}`, and
 `tests/test_service_rules.py` guards it: the rules table is wired to fail the
 test if a `none` service reaches it at all.
 
+#### Tools per service (Phase 4)
+
+A tool is meaningful for some services' packets and not others': the process
+DB tools read enu-biometric's own tables, and on another service's packet a
+"no row" from them would read like a finding. So the scope is enforced when an
+agent is built, never left to a tool's description (`MULTI_SERVICE_PLAN.md`
+D7):
+
+- **A toolset declares its services.** `Toolset(..., services=(...))` names
+  the services whose packets its tools are for, or `("*",)` for every service.
+  The server publishes it in each tool's `_meta` as `uidai.crm/services`, next
+  to `uidai.crm/agents`; the client reads it into `RemoteTool.services`.
+- **The selection** (`mcp_client.selection(role, service)`) for a rejection
+  role and a pack keeps a tool the role gets (by its listing, or by
+  `AGENT_TOOLS_<ROLE>`) only when it is in the pack's scope:
+
+  | The tool | In scope for pack S when |
+  | --- | --- |
+  | names `"*"` | always |
+  | names S | S is a service (never for `_default`) |
+  | names no services (another team's server) | `AGENT_TOOLS_COMMON` lists it |
+  | any | S's `tools.include` lists it -- unless its `tools.exclude` does |
+
+  `AGENT_TOOLS_<ROLE>` is applied first, so it can narrow or replace a role's
+  list but never add a tool outside the scope, and `tools.include` never
+  widens the roles a tool is for. An unresolved packet's `_default` pack gets
+  the `"*"` tools alone (it may not include any). The DLT roles are not scoped
+  by service yet: they take no service and keep the role-only selection.
+- **Every agent is built for a pack.** `build_agent(role, model, prompt,
+  tools, pack=...)` takes its MCP tools and its AVAILABLE TOOLS section for
+  that pack; a rejection role without one is refused. The pool already builds
+  one agent per (role, pack), so each pack's agents are offered exactly its
+  tools, and the `task` subagent is given the parent's scoped list, never the
+  role's full one. The one LogFilter serves every service, so it is built with
+  the `_default` scope.
+- **The harness** gets one opencode agent per harness rejection role and
+  registered service, `crm_<role>__<service_slug>` (the name with every
+  character outside `[a-z0-9]` turned into `_`: `crm_investigator__enu_biometric`),
+  plus `crm_<role>__default` with the `"*"` tools; the DLT roles keep
+  `crm_dlt_investigator` and `crm_dlt_reviewer`. A task runs as its pack's
+  agent (`run_task(..., service=pack)`); a pack the server was started without
+  falls back to `__default`, never to a wider set, and with tool servers
+  configured a task that finds no agent of its own is refused -- opencode's
+  default agent would have every tool -- so the node falls back to its direct
+  path. The prompt's appended tools section is the same pack's
+  (`_with_tools_section(prompt, role, pack)`). The config is built when
+  `opencode serve` starts, so a new pack needs a restart; it ships with a
+  deploy anyway.
+- **Names carry the service's prefix** (D8). Tool names are global across
+  servers, so a tool scoped to exactly one service is named with that
+  service's `tool_prefix` and an underscore, and any other declared tool
+  carries no registered service's prefix. The process DB tools became
+  `bio_get_packet_stage_summary`, `bio_get_parking_status` and so on.
+  `main_api.validate_service_registry()` refuses to boot on a local toolset
+  naming an unregistered service or a local tool breaking the prefix rule
+  (`agent_tools.scope_problems`), and two modules registering one name fail
+  discovery; a toolset for a rejection role that declares no services is a
+  warning. A served tool that breaks the rule -- another team's server,
+  checkable only once it lists -- is left out of the catalog with an error
+  log, as a reserved name is. A service named `default` is refused: its
+  agents would be the unresolved packets'.
+- **The package layout** follows the scope: `agent_tools/common/` for the
+  `"*"` tools and `agent_tools/<service_slug>/` for one service's
+  (`agent_tools/enu_biometric/`). `discover()` walks subpackages; a module or
+  subpackage whose name starts with `_` is still a helper.
+- **Databases are shared per database** (D9). `agent_tools/_database.py` is
+  the read-only layer every database-backed toolset shares: `declare(key)`
+  returns one `Database` per key -- one engine, one circuit breaker, one
+  switch and one set of settings -- so two toolsets reading one database share
+  its pool, and one database's outage opens only its own breaker. The
+  `process` key keeps its `PROCESS_DB_*` settings and `process_db_breaker`;
+  any other key's are `AGENT_DB_<KEY>_*` and `agent_db_<key>_breaker`. A
+  toolset is served only while its database is on, and `validate_config()`
+  requires the connection settings of every database that is on. A common
+  database does not make a common tool: a toolset for one service may read a
+  shared database. `agentic_resident_crm_breaker_state` samples every
+  declared database's breaker as well; the tools run in the tool server, so
+  in the API process these show that process's own calls (the in-process CLI),
+  not the tool server's.
+- **The fingerprint is per pack** (D13): `mcp_client.fingerprint_material(pack)`
+  hashes each role's tools and section for that pack (the LogFilter's with the
+  `_default` scope, the DLT roles' unscoped), so a tool added for one service
+  moves only the fingerprints of the packs whose scope includes it.
+
+`python3 -m src.tools.mcp_client list` shows the selection per pack and role,
+and `prompt <role> --service <pack>` one AVAILABLE TOOLS section.
+`tests/test_service_tools.py` holds the selection matrix, the prefix and
+scope checks, the per-service opencode agents, and a fixture service's
+Investigator and its `task` subagent over the real tool server, offered no
+`bio_` tool.
+
 ### 3.3 Core Pipeline (Deterministic StateGraph)
 Instead of relying on an unpredictable LLM to orchestrate the subagents, the system uses a highly robust, strictly deterministic Python `StateGraph` (via `langgraph`) in `src/core/agent_orchestrator.py`. This ensures the exact sequential execution of every step.
 
@@ -1555,39 +1656,39 @@ The intelligence of the system relies on a multi-agent hierarchy. The Investigat
 
 ### 3.5.1 Deep agents and agent tools over MCP
 
-**Every agent is a deep agent.** `core/agent_factory.py::build_agent(role, model, system_prompt, tools=())` builds all seven -- the rejection lane's `investigator`, `reviewer`, `synthesis` and `log_filter`, and the DLT lane's `dlt_investigator`, `dlt_reviewer` and `dlt_synthesis` -- with `deepagents.create_deep_agent`. Each gets:
+**Every agent is a deep agent.** `core/agent_factory.py::build_agent(role, model, system_prompt, tools=(), pack=None)` builds all seven -- the rejection lane's `investigator`, `reviewer`, `synthesis` and `log_filter`, and the DLT lane's `dlt_investigator`, `dlt_reviewer` and `dlt_synthesis` -- with `deepagents.create_deep_agent`. Each gets:
 
-- its explicit tools (`queue_for_replay` for Synthesis, `add_learning_rule` for the Reviewer) and the MCP tools its role is given;
+- its explicit tools (`queue_for_replay` for Synthesis, `add_learning_rule` for the Reviewer) and the MCP tools its role is given -- for a rejection role, only those in scope for the service pack it is built for (section 3.2.3, "Tools per service");
 - the deep-agent built-ins: `write_todos`, a scratch filesystem held in the run's own state (nothing touches disk), and `task` subagents;
 - a system prompt fixed at build time: the role's prompt file, then an `### AVAILABLE TOOLS` section when the role has MCP tools, then an `### OPERATING MODE` note (unattended; only the final message is read; never ask a question), then deepagents' own base prompt. Nodes therefore invoke an agent with the user message alone;
 - per-run limits the deepagents default (a recursion limit of 9,999) does not provide: past `AGENT_MAX_TOOL_CALLS` (20) further tool calls are refused and the model is told to answer; past `AGENT_MAX_MODEL_CALLS` (25) the run raises `ModelCallLimitExceededError` and the node fails like any agent failure.
 
-The general-purpose subagent behind `task` is configured by the factory: it gets the role's MCP tools and limits of its own, and never the explicit tools, since the deepagents default would hand it `queue_for_replay` and `add_learning_rule` and none of the limits. `queue_for_replay` and `add_learning_rule` stay in-process on purpose: both act on this packet's pipeline state (the replay queue, the pending-rules file with the event id the Reviewer node sets), which a tool server has no way to see and an opencode task must not reach.
+The general-purpose subagent behind `task` is configured by the factory: it gets the parent's MCP tools -- the same service-scoped list, so it is no way around the scope -- and limits of its own, and never the explicit tools, since the deepagents default would hand it `queue_for_replay` and `add_learning_rule` and none of the limits. `queue_for_replay` and `add_learning_rule` stay in-process on purpose: both act on this packet's pipeline state (the replay queue, the pending-rules file with the event id the Reviewer node sets), which a tool server has no way to see and an opencode task must not reach.
 
-**Every tool is reached over MCP.** The tools in `src/tools/agent_tools` are served by the bundled server, `src/tools/mcp_server.py`: an `MCPServer` (the `mcp` 2.x SDK) over streamable HTTP at `/mcp`, stateless with JSON responses so every request stands alone -- a restarted server is invisible to its clients, and replicas can sit behind one URL, which is how a hosted server would run. Its tools run on worker threads; bound to loopback it accepts only loopback Host and Origin headers (DNS-rebinding protection). Each tool's listing carries, besides its description and argument schema, the MCP read-only hint and, under `_meta`, `uidai.crm/toolset`, `uidai.crm/agents` (the roles it is meant for) and `uidai.crm/guidance` -- so a client needs none of this repository's code to use it. `src/tools/mcp_config.py` is the one place the consumers learn which servers exist (`AGENT_MCP_SERVERS`, or the bundled server when `AGENT_MCP_SERVE` runs it). The API starts the bundled server as a child process (`LocalToolServer`), restarts it with backoff if it dies, gates `/ready` on its health, starts it before `opencode serve`, and stops it after the drain.
+**Every tool is reached over MCP.** The tools in `src/tools/agent_tools` are served by the bundled server, `src/tools/mcp_server.py`: an `MCPServer` (the `mcp` 2.x SDK) over streamable HTTP at `/mcp`, stateless with JSON responses so every request stands alone -- a restarted server is invisible to its clients, and replicas can sit behind one URL, which is how a hosted server would run. Its tools run on worker threads; bound to loopback it accepts only loopback Host and Origin headers (DNS-rebinding protection). Each tool's listing carries, besides its description and argument schema, the MCP read-only hint and, under `_meta`, `uidai.crm/toolset`, `uidai.crm/agents` (the roles it is meant for), `uidai.crm/services` (the services whose packets it is for, or `"*"`) and `uidai.crm/guidance` -- so a client needs none of this repository's code to use it. `src/tools/mcp_config.py` is the one place the consumers learn which servers exist (`AGENT_MCP_SERVERS`, or the bundled server when `AGENT_MCP_SERVE` runs it). The API starts the bundled server as a child process (`LocalToolServer`), restarts it with backoff if it dies, gates `/ready` on its health, starts it before `opencode serve`, and stops it after the drain.
 
-**The client (`src/tools/mcp_client.py`).** One catalog -- the listing of every configured server -- is shared by every agent built from it. A server that cannot be listed is left out and the catalog marked incomplete; an incomplete catalog is fetched again after `AGENT_MCP_RETRY_SECONDS`, and `get_agent()`/`get_dlt_agent()` rebuild their graphs from it (`is_stale`), so a tool server that is down when the first packet arrives costs the packets that met the outage their tools, not every packet until a restart. A role gets the tools whose listing names it; a tool whose listing names no roles -- any tool from a server that does not know this repository -- goes to no role until `AGENT_TOOLS_<ROLE>` lists it, and `AGENT_TOOLS_<ROLE>` replaces a role's selection outright (a list, or `none`). Each tool becomes a LangChain tool whose sync and async implementations open their own MCP session (a couple of requests), use the listing's JSON schema as it is (the server validates, and its refusal comes back as a readable result), time out after `AGENT_MCP_TIMEOUT_SECONDS`, never send loopback traffic through a proxy, and turn any failure -- server down, timeout, a tool error -- into a result saying nothing was read, because an exception would end the agent run. Tool names that are reserved or already served by an earlier server are ignored with an error log.
+**The client (`src/tools/mcp_client.py`).** One catalog -- the listing of every configured server -- is shared by every agent built from it. A server that cannot be listed is left out and the catalog marked incomplete; an incomplete catalog is fetched again after `AGENT_MCP_RETRY_SECONDS`, and `get_agent()`/`get_dlt_agent()` rebuild their graphs from it (`is_stale`), so a tool server that is down when the first packet arrives costs the packets that met the outage their tools, not every packet until a restart. A role gets the tools whose listing names it; a tool whose listing names no roles -- any tool from a server that does not know this repository -- goes to no role until `AGENT_TOOLS_<ROLE>` lists it, and `AGENT_TOOLS_<ROLE>` replaces a role's selection outright (a list, or `none`). For a rejection role that list is then narrowed to the pack's scope (section 3.2.3): `selection(role, service)`, `tools_for`, `prompt_section` and `fingerprint_material` all take the pack. Each tool becomes a LangChain tool whose sync and async implementations open their own MCP session (a couple of requests), use the listing's JSON schema as it is (the server validates, and its refusal comes back as a readable result), time out after `AGENT_MCP_TIMEOUT_SECONDS`, never send loopback traffic through a proxy, and turn any failure -- server down, timeout, a tool error -- into a result saying nothing was read, because an exception would end the agent run. Tool names that are reserved, already served by an earlier server, or breaking the service prefix rule are ignored with an error log.
 
-**opencode gets the same servers and the same selection.** `opencode_runner._harness_config()` returns `mcp_client.opencode_config()`: an `mcp` block naming the servers, and one agent per harness role (`crm_investigator`, `crm_reviewer`, `crm_dlt_investigator`, `crm_dlt_reviewer`) whose `tools` deny `<server>_*` and allow exactly that role's tools. Each harness task runs as its role's agent (`--agent`); an attached task takes its server's own config, so it can never name an agent the server was not started with. The orchestrators append the role's AVAILABLE TOOLS section to the harness prompt, naming tools as opencode does (`agent_tools_get_parking_status`). Verified end to end on opencode 1.18.20 against a scripted model: the investigator agent was offered all nine MCP tools and its call ran over MCP against the server, while the DLT investigator agent was offered none of them -- opencode removes denied tools from the model's list, it does not merely refuse them.
+**opencode gets the same servers and the same selection.** `opencode_runner._harness_config()` returns `mcp_client.opencode_config()`: an `mcp` block naming the servers, and one agent per harness role and scope -- `crm_investigator__<service>` and `crm_reviewer__<service>` for every registered service, `crm_investigator__default` and `crm_reviewer__default`, and `crm_dlt_investigator` and `crm_dlt_reviewer` -- whose `tools` deny `<server>_*` and allow exactly the tools that role gets for that scope. Each harness task runs as its role's agent for the packet's pack (`--agent`, `opencode_runner._task_agent(node, service, config)`); an attached task takes its server's own config, so it can never name an agent the server was not started with. The orchestrators append the role's AVAILABLE TOOLS section for the same pack to the harness prompt, naming tools as opencode does (`agent_tools_bio_get_parking_status`). Verified end to end on opencode 1.18.20 against a scripted model: the investigator agent was offered all nine MCP tools and its call ran over MCP against the server, while the DLT investigator agent was offered none of them -- opencode removes denied tools from the model's list, it does not merely refuse them.
 
-**Adding a tool.** A tool is a plain function decorated with `@agent_tool(TOOLSET)` in any module of `src/tools/agent_tools` whose name does not start with `_`. The next time the server starts it serves the tool, and every role in the toolset's `agents` gets it -- deep agents and harness alike, with no other file changed. A `Toolset` also carries `guidance` (added to the AVAILABLE TOOLS section of every agent that gets one of its tools), `enabled` (checked at server start; a disabled toolset is not served) and `read_only` (published as the MCP hint; defaults to false). The decorator turns the docstring and signature into the description and schema, and an exception inside the tool into a result saying it failed and read nothing. `validate_config()` imports every tool module at boot. `python3 -m src.tools.agent_tools list|call` inspects and runs the registered tools in-process; `python3 -m src.tools.mcp_client list|prompt <role> [--opencode]|call` shows and calls what the agents actually get through MCP; `python3 -m src.tools.mcp_server` runs a server by itself.
+**Adding a tool.** A tool is a plain function decorated with `@agent_tool(TOOLSET)` in any module of `src/tools/agent_tools` -- in its service's subpackage (`enu_biometric/`), or `common/` for a tool for every service -- whose name does not start with `_`. The next time the server starts it serves the tool, and every role in the toolset's `agents` gets it for the packets of the services in its `services` -- deep agents and harness alike, with no other file changed. A tool scoped to one service is named with that service's `tool_prefix`. A `Toolset` also carries `guidance` (added to the AVAILABLE TOOLS section of every agent that gets one of its tools), `enabled` (checked at server start; a disabled toolset is not served) and `read_only` (published as the MCP hint; defaults to false). The decorator turns the docstring and signature into the description and schema, and an exception inside the tool into a result saying it failed and read nothing. `validate_config()` imports every tool module at boot. `python3 -m src.tools.agent_tools list|call` inspects and runs the registered tools in-process; `python3 -m src.tools.mcp_client list|prompt <role> [--opencode]|call` shows and calls what the agents actually get through MCP; `python3 -m src.tools.mcp_server` runs a server by itself.
 
-**Tool evidence.** Recording uses a `ContextVar` holding the node's list, and the MCP client's tool wrapper appends to it; LangGraph and the tool node copy the context into the threads they run tools on, so a call -- including one inside a `task` subagent -- lands in the list of the node that started the run. A harness task's MCP calls are read off its `--format json` event stream instead (`tool_use` parts: `callID`, `state.input`, `state.output`, `status`) and mapped back to the tools' own names by `mcp_client.evidence_from_harness`. The Investigator nodes of both lanes merge their calls into `tool_evidence` ({tool, args, result}, one record per tool and arguments, at most 30), and `mcp_client.render_evidence` bounds what a prompt carries to `AGENT_TOOL_EVIDENCE_MAX_CHARS` (40000), keeping the most recent. The rejection Reviewer gets it through `rejection_context.build_review_prompt`, a retry through `build_retry_prompt`, and a harness Reviewer as `tool_evidence.txt`; the DLT lane appends it to `_evidence_block`, which its Reviewer, its retries and its harness files already read. With no tool calls every prompt is byte-for-byte what it was without tools. The prompt fingerprint covers `mcp_client.fingerprint_material()` -- each role's tool names, descriptions, schemas and prompt section -- and the operating note, so a change to what is served moves it like a prompt edit.
+**Tool evidence.** Recording uses a `ContextVar` holding the node's list, and the MCP client's tool wrapper appends to it; LangGraph and the tool node copy the context into the threads they run tools on, so a call -- including one inside a `task` subagent -- lands in the list of the node that started the run. A harness task's MCP calls are read off its `--format json` event stream instead (`tool_use` parts: `callID`, `state.input`, `state.output`, `status`) and mapped back to the tools' own names by `mcp_client.evidence_from_harness`. The Investigator nodes of both lanes merge their calls into `tool_evidence` ({tool, args, result}, one record per tool and arguments, at most 30), and `mcp_client.render_evidence` bounds what a prompt carries to `AGENT_TOOL_EVIDENCE_MAX_CHARS` (40000), keeping the most recent. The rejection Reviewer gets it through `rejection_context.build_review_prompt`, a retry through `build_retry_prompt`, and a harness Reviewer as `tool_evidence.txt`; the DLT lane appends it to `_evidence_block`, which its Reviewer, its retries and its harness files already read. With no tool calls every prompt is byte-for-byte what it was without tools. The prompt fingerprint covers `mcp_client.fingerprint_material(pack)` -- each role's tool names, descriptions, schemas and prompt section for the pack -- and the operating note, so a change to what is served moves it like a prompt edit, for the packs whose scope includes it.
 
-**Process DB toolset (`process_db`).** Served when `PROCESS_DB_ENABLED=true`, for the `investigator` role only. The Reviewer gets its results as evidence instead of querying again, and the DLT roles get none: the DLT narrative is stored per error code and re-served to every record with the same failure signature (section 4.4), so one packet's rows must not reach it. Nine tools, all keyed by `refid`:
+**Process DB toolset (`process_db`, `agent_tools/enu_biometric/`).** Served when `PROCESS_DB_ENABLED=true`, for the `investigator` role of enu-biometric packets only (`services=("enu-biometric",)`). The Reviewer gets its results as evidence instead of querying again, and the DLT roles get none: the DLT narrative is stored per error code and re-served to every record with the same failure signature (section 4.4), so one packet's rows must not reach it. Nine tools, all keyed by `refid`:
 
 | Question | Tool | Table |
 |---|---|---|
-| Where is the packet, is a substage stuck, how long did a step take, was it retried | `get_packet_stage_summary`, `get_packet_stage_timeline` | `bio_stage_tracker` |
-| Is the applicant parked, what is it waiting on, who waits on a candidate | `get_parking_status` | `bio_parking_queue_store` (+ the tracker's parking rows) |
-| Which candidates ABIS returned, with what scores | `get_abis_candidates` | `bio_helper_cache_store` (`AbisMwCandidateRecord`) |
-| What the service knew about each candidate at the PB1 decision | `get_candidate_facts` | `ApplicantCandidateHelperRecord` |
-| Cross-match verdicts of a parked update packet | `get_parking_match_verdicts` | `ParkingHelperRecord` |
-| What the Update Checker returned | `get_update_checker_result` | `UpdateCheckerHelperRecord` |
-| Which helper records exist | `list_helper_records` | `bio_helper_cache_store` |
-| Any other field of a record | `get_helper_record_fields` (MySQL `JSON_EXTRACT`) | `bio_helper_cache_store` |
+| Where is the packet, is a substage stuck, how long did a step take, was it retried | `bio_get_packet_stage_summary`, `bio_get_packet_stage_timeline` | `bio_stage_tracker` |
+| Is the applicant parked, what is it waiting on, who waits on a candidate | `bio_get_parking_status` | `bio_parking_queue_store` (+ the tracker's parking rows) |
+| Which candidates ABIS returned, with what scores | `bio_get_abis_candidates` | `bio_helper_cache_store` (`AbisMwCandidateRecord`) |
+| What the service knew about each candidate at the PB1 decision | `bio_get_candidate_facts` | `ApplicantCandidateHelperRecord` |
+| Cross-match verdicts of a parked update packet | `bio_get_parking_match_verdicts` | `ParkingHelperRecord` |
+| What the Update Checker returned | `bio_get_update_checker_result` | `UpdateCheckerHelperRecord` |
+| Which helper records exist | `bio_list_helper_records` | `bio_helper_cache_store` |
+| Any other field of a record | `bio_get_helper_record_fields` (MySQL `JSON_EXTRACT`) | `bio_helper_cache_store` |
 
-The stage summary applies the table's rules rather than returning rows: per writer (`created_by`, so canary rows stay apart), substage and attempt (`stage_resubmission_count`) it reports IN PROGRESS/COMPLETED times and the duration between them; a latest attempt that is IN PROGRESS with no COMPLETED row is listed in `open_substages`, an earlier one is `superseded_by_replay`, and `<NAME>_RESUBMISSION` request copies -- IN PROGRESS by design -- are listed apart and never counted as open. `get_parking_status` derives `parked_now` by the service's rule (the APPLICANT map still has InProcess entries and the tracker has no `BIO_CANDIDATE_DEPARTING` COMPLETED row), matching `record_category` case-insensitively. The helper-record tools return the documented fields rather than the blob, tolerate the wrapper and key-casing variations the documentation leaves open, and report a record of unexpected shape as such instead of as empty. Guarantees, all in `_process_db.py`: every connection runs `SET SESSION TRANSACTION READ ONLY` (and is refused if that fails -- the service's configured account can write) and `max_execution_time` (`PROCESS_DB_QUERY_TIMEOUT_MS`); every statement is fixed SQL filtered on the indexed `refid`, with JSON paths checked against a strict grammar before they reach the server; rows are capped at `PROCESS_DB_MAX_ROWS` and output at `PROCESS_DB_MAX_OUTPUT_CHARS` by dropping whole list entries so the JSON stays valid; values from the JSON blobs pass through the log pipeline's PII redaction with refIds (UUIDs) shielded and `uid` masked outright; and a disabled, refused or failed lookup returns a message saying nothing was read, never something that reads like an empty table -- which for the `*_DATA_NOT_FOUND` codes would itself be evidence.
+The stage summary applies the table's rules rather than returning rows: per writer (`created_by`, so canary rows stay apart), substage and attempt (`stage_resubmission_count`) it reports IN PROGRESS/COMPLETED times and the duration between them; a latest attempt that is IN PROGRESS with no COMPLETED row is listed in `open_substages`, an earlier one is `superseded_by_replay`, and `<NAME>_RESUBMISSION` request copies -- IN PROGRESS by design -- are listed apart and never counted as open. `bio_get_parking_status` derives `parked_now` by the service's rule (the APPLICANT map still has InProcess entries and the tracker has no `BIO_CANDIDATE_DEPARTING` COMPLETED row), matching `record_category` case-insensitively. The helper-record tools return the documented fields rather than the blob, tolerate the wrapper and key-casing variations the documentation leaves open, and report a record of unexpected shape as such instead of as empty. Guarantees, all in the shared database layer (`agent_tools/_database.py`, the `process` key): every connection runs `SET SESSION TRANSACTION READ ONLY` (and is refused if that fails -- the service's configured account can write) and `max_execution_time` (`PROCESS_DB_QUERY_TIMEOUT_MS`); every statement is fixed SQL filtered on the indexed `refid`, with JSON paths checked against a strict grammar before they reach the server; rows are capped at `PROCESS_DB_MAX_ROWS` and output at `PROCESS_DB_MAX_OUTPUT_CHARS` by dropping whole list entries so the JSON stays valid; values from the JSON blobs pass through the log pipeline's PII redaction with refIds (UUIDs) shielded and `uid` masked outright; and a disabled, refused or failed lookup returns a message saying nothing was read, never something that reads like an empty table -- which for the `*_DATA_NOT_FOUND` codes would itself be evidence.
 
 ### 3.6 Log Reduction Pipeline
 Fetched logs are heavily compressed to prevent LLM context window exhaustion and save tokens, using a map-reduce and clustering architecture (`src/log_pipeline/`). The stages are numbered as the design named them, which is why there is a 2.5: it was inserted between two existing stages and the numbers of the others are load-bearing in the code and the tests. `pipeline.reduce_logs` runs them in this order:
@@ -1962,11 +2063,11 @@ testing `/process-rejection` from the browser.
 ```bash
 # Agent tools over MCP (section 3.5.1)
 python3 -m src.tools.mcp_server             # run the bundled tool server by itself (127.0.0.1:8765/mcp)
-python3 -m src.tools.mcp_client list        # the servers, their tools, and each role's selection
-python3 -m src.tools.mcp_client prompt investigator [--opencode]   # the AVAILABLE TOOLS section a role gets
-python3 -m src.tools.mcp_client call get_packet_stage_summary '{"refid": "<refId>"}'   # as an agent calls it
+python3 -m src.tools.mcp_client list        # the servers, their tools, and the selections per service and role
+python3 -m src.tools.mcp_client prompt investigator --service enu-biometric [--opencode]   # the AVAILABLE TOOLS section a role gets for a pack
+python3 -m src.tools.mcp_client call bio_get_packet_stage_summary '{"refid": "<refId>"}'   # as an agent calls it
 python3 -m src.tools.agent_tools list       # the registered tools, in-process
-python3 -m src.tools.agent_tools call get_packet_stage_summary '{"refid": "<refId>"}'  # in-process, no server
+python3 -m src.tools.agent_tools call bio_get_packet_stage_summary '{"refid": "<refId>"}'  # in-process, no server
 
 # Self-learning & rules
 python3 -m src.tools.promote_rules          # review + git-commit staged learning rules
@@ -2398,6 +2499,38 @@ first means group state is not accumulating.
 This section records where the running code diverges from the design intent above.
 It is maintained deliberately so the document stays a truthful source of truth.
 
+**Update 2026-09-28 (c):** Phase 4 of `MULTI_SERVICE_PLAN.md` -- tools per
+service (section 3.2.3, "Tools per service"). Every rejection agent is now
+built for a service pack and offered only that pack's tools; the harness runs
+as a per-service opencode agent; the process DB tools moved under
+`agent_tools/enu_biometric/` and were renamed `bio_*`; the database plumbing
+became a shared per-database layer. What to know:
+
+1. **The nine process DB tools have new names** (`get_parking_status` is now
+   `bio_get_parking_status`, and so on). Anything outside the repository that
+   names the old ones -- an `AGENT_TOOLS_<ROLE>` setting, a dashboard, a
+   script -- must use the new names; an `AGENT_TOOLS_<ROLE>` naming an old one
+   is refused as an unserved tool once every server answers. Casebooks written
+   before the rename keep the old names in `provenance.tool_calls`.
+2. **The prompt fingerprint moves once where tools are served**: the tool
+   names, their guidance and the generic tool rules' citation example (now
+   `"<tool>: <field> is <value>"`, not a biometric tool) changed. With no tool
+   server configured the fingerprint material is what it was. Compare accuracy
+   per period across this date on a deployment with `PROCESS_DB_ENABLED=true`.
+3. **Nothing but enu-biometric has tools yet.** There is no common tool and
+   no second service's toolset; the scope, the prefix rule and the
+   per-service opencode agents are exercised by the tests' fixture service.
+   The database layer's second key is likewise exercised only in tests.
+4. **The per-database breakers on `/metrics` are the API process's.** The
+   tools run in the tool server process, which exposes no metrics, so
+   `agent_db_*` and `process_db_breaker` readings in the API reflect only
+   in-process calls (the `agent_tools call` CLI), not the agents' lookups.
+5. **A harness task with no opencode agent of its own is refused while tool
+   servers are configured**, rather than run as opencode's default agent,
+   which would have every tool. It then falls back to the direct path. A pack
+   registered after `opencode serve` started uses `crm_<role>__default` until
+   the next restart.
+
 **Update 2026-09-28 (b):** Phase 3 of `MULTI_SERVICE_PLAN.md` -- each
 service's rule source and its own documentation (sections 3.2.2 and 3.2.3).
 A pack now declares whether its rules are rows in the rules table or text in
@@ -2414,8 +2547,9 @@ validated before it replaces what is on disk. What this does not do:
 2. **The rules table itself is still one service's.** Nothing routes a query
    to a per-service table, because there is only one. A second `rules_db`
    service needs that first (plan section 4, D6).
-3. **Tools and runbooks are still the biometric ones** (Phases 4 and 5). A
-   `none` service gets no runbook at all rather than another service's.
+3. **Tools and runbooks are still the biometric ones** (Phases 4 and 5; Phase
+   4 has since landed -- see the entry above). A `none` service gets no
+   runbook at all rather than another service's.
 4. **The S3 download is untested against a real bucket.** It is covered by the
    fake (`tests/s3_fakes.py`): the swap, the two layouts, and that a broken,
    empty or unreadable upload keeps the last good copy. Off by default.

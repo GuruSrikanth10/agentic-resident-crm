@@ -395,15 +395,31 @@ def sample_breaker_states() -> None:
     Sampled on scrape rather than pushed on transition: pybreaker has no
     transition hook we control from here, and a breaker that resets on a
     timeout would otherwise leave a stale "open" reading behind.
+
+    The agent tools' databases each have their own breaker
+    (`src/tools/agent_tools/_database.py`), labelled `process_db_breaker` or
+    `agent_db_<key>_breaker`; they are the ones declared in this process. The
+    tools themselves run in the tool server, so a breaker sampled in the API
+    process reports this process's own calls -- the in-process CLI and tests
+    -- not the tool server's.
     """
     try:
+        import sys
+
         from src.utils import resilience
 
+        breakers = {}
         for name in ("db_breaker", "es_breaker", "llm_breaker", "k8s_breaker",
                      "bitbucket_breaker"):
             breaker = getattr(resilience, name, None)
-            if breaker is None:
-                continue
+            if breaker is not None:
+                breakers[name] = breaker
+        # Only when the tool modules are already loaded: sampling must not be
+        # what imports them.
+        database = sys.modules.get("src.tools.agent_tools._database")
+        if database is not None:
+            breakers.update(database.breakers())
+        for name, breaker in breakers.items():
             state = str(getattr(breaker, "current_state", "closed"))
             BREAKER_STATE.labels(breaker=name).set(
                 _BREAKER_STATE_VALUES.get(state, 0)

@@ -30,7 +30,8 @@ def probe(tool_server):
     Returns its name."""
     agent_tools.discover()
     saved = dict(agent_tools._registry)
-    toolset = Toolset(name="evidence_probe", agents=("investigator", "dlt_investigator"))
+    toolset = Toolset(name="evidence_probe", agents=("investigator", "dlt_investigator"),
+                      services=("*",))
 
     @agent_tool(toolset)
     def evidence_probe(refid: str) -> str:
@@ -47,16 +48,18 @@ class ToolUsingAgent:
     """Calls `tool_name` over MCP once per invoke, then answers; keeps its
     prompts."""
 
-    def __init__(self, tool_name=None, reply="the findings", role="investigator"):
+    def __init__(self, tool_name=None, reply="the findings", role="investigator",
+                 service="enu-biometric"):
         self.tool_name = tool_name
         self.reply = reply
         self.role = role
+        self.service = service
         self.prompts = []
 
     def invoke(self, request):
         self.prompts.append(request["messages"][-1].content)
         if self.tool_name:
-            tool = next(tool for tool in mcp_client.tools_for(self.role)
+            tool = next(tool for tool in mcp_client.tools_for(self.role, self.service)
                         if tool.name == self.tool_name)
             tool.invoke({"refid": REFID})
         return {"messages": [AIMessage(content=self.reply)]}
@@ -221,17 +224,17 @@ def test_prompt_fingerprint_moves_with_the_tools_served(monkeypatch, probe):
     import os
 
     base_dir = os.path.dirname(os.path.dirname(orch.__file__))
-    served = orch.compute_prompt_fingerprint(base_dir)
-    assert served == orch.compute_prompt_fingerprint(base_dir)
+    served = orch.compute_prompt_fingerprint(base_dir, "enu-biometric")
+    assert served == orch.compute_prompt_fingerprint(base_dir, "enu-biometric")
     monkeypatch.delenv("AGENT_MCP_SERVERS")
-    assert orch.compute_prompt_fingerprint(base_dir) != served
+    assert orch.compute_prompt_fingerprint(base_dir, "enu-biometric") != served
 
 
 def test_the_agents_are_built_with_their_roles_and_explicit_tools(monkeypatch):
     built = []
 
-    def fake_build_agent(role, model, system_prompt, tools=()):
-        built.append((role, [tool.name for tool in tools], system_prompt))
+    def fake_build_agent(role, model, system_prompt, tools=(), pack=None):
+        built.append((role, [tool.name for tool in tools], system_prompt, pack))
         return MagicMock()
 
     monkeypatch.setattr(orch, "_agent", None)
@@ -240,10 +243,15 @@ def test_the_agents_are_built_with_their_roles_and_explicit_tools(monkeypatch):
     monkeypatch.setattr(orch, "get_checkpointer", lambda: None)
     orch._build_agent()
 
-    assert [(role, tools) for role, tools, _ in built] == [
+    assert [(role, tools) for role, tools, _, _ in built] == [
         ("investigator", []), ("log_filter", []),
         ("synthesis", ["queue_for_replay"]), ("reviewer", ["add_learning_rule"])]
-    prompts = {role: prompt for role, _, prompt in built}
+    # Each pooled agent is scoped to its pack; the one LogFilter, which serves
+    # every service, to the tools for every service.
+    assert [(role, pack) for role, _, _, pack in built] == [
+        ("investigator", "enu-biometric"), ("log_filter", "_default"),
+        ("synthesis", "enu-biometric"), ("reviewer", "enu-biometric")]
+    prompts = {role: prompt for role, _, prompt, _ in built}
     assert prompts["investigator"].startswith("You are the Rejection Investigator Agent.")
     assert prompts["reviewer"].startswith("You are the Reviewer Agent.")
 
@@ -272,7 +280,8 @@ def test_dlt_evidence_block_carries_tool_results_to_the_reviewer(monkeypatch):
 
 
 def test_dlt_investigator_records_tool_calls(monkeypatch, probe):
-    node = dlt_node(monkeypatch, "investigate", ToolUsingAgent(probe, role="dlt_investigator"))
+    node = dlt_node(monkeypatch, "investigate",
+                    ToolUsingAgent(probe, role="dlt_investigator", service=None))
     out = node(dict(DLT_STATE))
     assert out["tool_evidence"] == [RECORD]
 

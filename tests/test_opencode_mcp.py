@@ -2,10 +2,11 @@
 The opencode harness reaches the same MCP tool servers as the deep agents.
 
 opencode_runner hands `opencode serve` the servers and one agent per harness
-role (each allowed exactly its role's tools), runs every harness task as its
-role's agent, and reads the MCP calls a task made off its event stream so
-they become evidence like the direct path's. The orchestrators append the
-role's tools section to the harness prompt.
+role and service pack (each allowed exactly the tools that role gets for that
+pack), runs every harness task as its role's agent for the packet's pack, and
+reads the MCP calls a task made off its event stream so they become evidence
+like the direct path's. The orchestrators append the role's tools section for
+the same pack to the harness prompt.
 """
 import json
 import sys
@@ -22,6 +23,7 @@ from src.tools.agent_tools import Toolset, agent_tool
 from src.utils import opencode_runner
 
 REFID = "3f2b9c1e-0d4a-4a8e-9b1f-6c7d8e9f0a1b"
+BIO = "enu-biometric"
 
 
 @pytest.fixture
@@ -30,7 +32,8 @@ def served(tool_server):
     agent_tools.discover()
     saved = dict(agent_tools._registry)
     toolset = Toolset(name="harness_probe", agents=("investigator", "dlt_investigator"),
-                      guidance="Probe guidance for the harness.", read_only=True)
+                      guidance="Probe guidance for the harness.", read_only=True,
+                      services=("*",))
 
     @agent_tool(toolset)
     def harness_probe(refid: str) -> str:
@@ -50,17 +53,35 @@ def served(tool_server):
 def test_no_servers_means_no_config_and_no_agent(monkeypatch):
     monkeypatch.delenv("AGENT_MCP_SERVERS", raising=False)
     assert opencode_runner._harness_config("m") == {}
-    assert opencode_runner._task_agent("investigator", {}) is None
+    assert opencode_runner._task_agent("investigator", BIO, {}) is None
 
 
 def test_servers_give_opencode_an_mcp_block_and_role_agents(served):
     config = opencode_runner._harness_config("m")
     assert config["mcp"]["agent_tools"]["url"] == served
     assert "provider" not in config
-    tools = config["agent"]["crm_investigator"]["tools"]
+    tools = config["agent"]["crm_investigator__enu_biometric"]["tools"]
     assert tools == {"agent_tools_*": False, "agent_tools_harness_probe": True}
-    assert opencode_runner._task_agent("investigator", config) == "crm_investigator"
-    assert opencode_runner._task_agent(None, config) is None
+    assert opencode_runner._task_agent("investigator", BIO, config) \
+        == "crm_investigator__enu_biometric"
+    assert opencode_runner._task_agent("dlt_investigator", None, config) \
+        == "crm_dlt_investigator"
+    assert opencode_runner._task_agent(None, None, config) is None
+
+
+def test_a_pack_the_server_was_started_without_falls_back_to_the_default_agent(served):
+    """Never to a wider set: `__default` has only the tools for every service."""
+    config = opencode_runner._harness_config("m")
+    assert opencode_runner._task_agent("reviewer", "svc-added-later", config) \
+        == "crm_reviewer__default"
+    assert opencode_runner._task_agent("reviewer", None, config) == "crm_reviewer__default"
+
+
+def test_a_task_with_no_agent_of_its_own_is_refused_while_servers_are_configured():
+    """opencode's default agent would have every server's tools."""
+    config = {"mcp": {"agent_tools": {}}, "agent": {"crm_dlt_investigator": {}}}
+    with pytest.raises(opencode_runner.OpencodeUnavailable, match="no agent for reviewer"):
+        opencode_runner._task_agent("reviewer", BIO, config)
 
 
 def test_a_config_that_cannot_be_worked_out_leaves_the_harness_without_tools(monkeypatch):
@@ -115,26 +136,26 @@ def _fake_binary(tmp_path, monkeypatch):
     monkeypatch.setenv(opencode_runner.ENV_BINARY, str(fake))
 
 
-def _run(tmp_path, node=None, session=None):
+def _run(tmp_path, node=None, session=None, service=None):
     output = tmp_path / "casebook_x" / "investigation.json"
     output.parent.mkdir(exist_ok=True)
     result = opencode_runner.run_task_json("instructions", str(output), node=node,
-                                           session=session)
+                                           session=session, service=service)
     argv = json.loads(Path(str(output) + ".argv.json").read_text(encoding="utf-8"))
     return result, argv
 
 
 def test_a_task_runs_as_its_roles_agent(served, tmp_path, monkeypatch):
     _fake_binary(tmp_path, monkeypatch)
-    _, argv = _run(tmp_path, node="investigator")
-    assert argv[argv.index("--agent") + 1] == "crm_investigator"
+    _, argv = _run(tmp_path, node="investigator", service=BIO)
+    assert argv[argv.index("--agent") + 1] == "crm_investigator__enu_biometric"
     assert argv.index("--agent") < argv.index("--dir")
 
 
 def test_without_servers_a_task_is_unchanged(tmp_path, monkeypatch):
     monkeypatch.delenv("AGENT_MCP_SERVERS", raising=False)
     _fake_binary(tmp_path, monkeypatch)
-    _, argv = _run(tmp_path, node="investigator")
+    _, argv = _run(tmp_path, node="investigator", service=BIO)
     assert "--agent" not in argv
 
 
@@ -144,13 +165,13 @@ def test_an_attached_task_uses_its_servers_config(tmp_path, monkeypatch):
     monkeypatch.delenv("AGENT_MCP_SERVERS", raising=False)
     _fake_binary(tmp_path, monkeypatch)
     session = MagicMock(url="http://127.0.0.1:4096", password="pw",
-                        config={"agent": {"crm_reviewer": {}}})
-    _, argv = _run(tmp_path, node="reviewer", session=session)
+                        config={"agent": {"crm_reviewer__enu_biometric": {}}})
+    _, argv = _run(tmp_path, node="reviewer", session=session, service=BIO)
     assert argv[argv.index("--attach") + 1] == "http://127.0.0.1:4096"
-    assert argv[argv.index("--agent") + 1] == "crm_reviewer"
+    assert argv[argv.index("--agent") + 1] == "crm_reviewer__enu_biometric"
 
     session.config = {}
-    _, argv = _run(tmp_path, node="reviewer", session=session)
+    _, argv = _run(tmp_path, node="reviewer", session=session, service=BIO)
     assert "--agent" not in argv
 
 
@@ -198,9 +219,10 @@ def _capture_harness(monkeypatch, tmp_path, captured):
     monkeypatch.setattr(paths, "LOCAL_CASESHEETS_DIR", tmp_path)
     monkeypatch.setattr(docs_loader, "corpus_available", lambda: True)
 
-    def fake_run_task_json(prompt, output_path, node=None):
+    def fake_run_task_json(prompt, output_path, node=None, service=None):
         captured["prompt"] = prompt
         captured["node"] = node
+        captured["service"] = service
         return {"result": {"investigation": "harness findings"}, "seconds": 0,
                 "trace": {}, "tool_calls": list(_HARNESS_CALLS)}
 
@@ -234,6 +256,7 @@ def test_the_rejection_harness_investigator_gets_the_tools_and_keeps_its_calls(
                                      "result": f"probe:{REFID}"}]
     assert storage.save_artifact.call_args.args[1] == orch.TOOL_EVIDENCE_ARTIFACT
     assert captured["node"] == "investigator"
+    assert captured["service"] == BIO
     assert mcp_client.TOOLS_HEADING in captured["prompt"]
     assert "agent_tools_harness_probe" in captured["prompt"]
 
@@ -249,7 +272,8 @@ def test_the_rejection_harness_reviewer_prompt_has_no_tools_section_by_default(
     captured = {}
     _capture_harness(monkeypatch, tmp_path, captured)
     monkeypatch.setattr(opencode_runner, "run_task_json",
-                        lambda prompt, output_path, node=None: captured.update(prompt=prompt)
+                        lambda prompt, output_path, node=None, service=None:
+                        captured.update(prompt=prompt)
                         or {"result": {"verdict": "APPROVED", "feedback": ""}, "seconds": 0,
                             "trace": {}})
 

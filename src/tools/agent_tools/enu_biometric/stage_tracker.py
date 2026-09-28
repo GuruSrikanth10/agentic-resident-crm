@@ -12,7 +12,7 @@ not a status of its own. `stage` is 'Biometric' on every row, so it is never
 used as a filter, and the `event_message` payload is never returned.
 """
 from src.tools.agent_tools import agent_tool
-from src.tools.agent_tools._process_db import (
+from src.tools.agent_tools.enu_biometric._process_db import (
     COMPLETED,
     IN_PROGRESS,
     PROCESS_DB,
@@ -41,7 +41,7 @@ _OMIT_WHEN_NULL = ("sub_stage_status_date", "sub_stage_reason_code",
 
 
 @agent_tool(PROCESS_DB)
-def get_packet_stage_summary(refid: str) -> str:
+def bio_get_packet_stage_summary(refid: str) -> str:
     """Summarise where a packet is in the enu-biometric pipeline, from bio_stage_tracker.
 
     Use this first for: which substage the packet reached, whether a substage
@@ -69,7 +69,7 @@ def get_packet_stage_summary(refid: str) -> str:
 
 
 @agent_tool(PROCESS_DB)
-def get_packet_stage_timeline(refid: str, sub_stage: str = "") -> str:
+def bio_get_packet_stage_timeline(refid: str, sub_stage: str = "") -> str:
     """List a packet's bio_stage_tracker rows in time order, oldest first.
 
     Use it when the summary is not enough and you need the rows themselves.

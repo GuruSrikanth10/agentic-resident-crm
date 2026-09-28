@@ -17,10 +17,10 @@ from src.tools import agent_tools
 from src.tools.agent_tools import Toolset, agent_tool
 
 PROCESS_DB_TOOLS = {
-    "get_packet_stage_summary", "get_packet_stage_timeline", "get_parking_status",
-    "list_helper_records", "get_abis_candidates", "get_candidate_facts",
-    "get_parking_match_verdicts", "get_update_checker_result",
-    "get_helper_record_fields",
+    "bio_get_packet_stage_summary", "bio_get_packet_stage_timeline", "bio_get_parking_status",
+    "bio_list_helper_records", "bio_get_abis_candidates", "bio_get_candidate_facts",
+    "bio_get_parking_match_verdicts", "bio_get_update_checker_result",
+    "bio_get_helper_record_fields",
 }
 
 
@@ -227,7 +227,7 @@ def test_cli_lists_and_calls_in_process(monkeypatch, capsys):
     assert {row["name"] for row in listed} >= PROCESS_DB_TOOLS
     assert all(row["enabled"] is False for row in listed if row["toolset"] == "process_db")
 
-    assert main(["call", "get_parking_status", '{"refid": "r1"}']) == 0
+    assert main(["call", "bio_get_parking_status", '{"refid": "r1"}']) == 0
     assert "switched off" in capsys.readouterr().out
     assert main(["call", "no_such_tool", "{}"]) == 1
-    assert main(["call", "get_parking_status", "[1]"]) == 1
+    assert main(["call", "bio_get_parking_status", "[1]"]) == 1

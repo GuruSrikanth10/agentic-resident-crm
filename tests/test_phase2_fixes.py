@@ -110,7 +110,7 @@ def test_reviewer_built_once_with_simple_llm(monkeypatch):
 
     build_agent_calls = []
 
-    def fake_build_agent(role, llm, system_prompt, tools=()):
+    def fake_build_agent(role, llm, system_prompt, tools=(), pack=None):
         build_agent_calls.append((llm, list(tools)))
         return MagicMock()
 
@@ -148,7 +148,7 @@ def test_add_learning_rule_uses_per_packet_contextvars(monkeypatch, tmp_path):
 
     captured = {}
 
-    def fake_build_agent(role, llm, system_prompt, tools=()):
+    def fake_build_agent(role, llm, system_prompt, tools=(), pack=None):
         tools = list(tools)
         if tools and getattr(tools[0], "name", "") == "add_learning_rule":
             captured["tool"] = tools[0]

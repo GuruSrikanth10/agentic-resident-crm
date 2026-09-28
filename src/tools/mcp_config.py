@@ -29,8 +29,8 @@ AGENT_MCP_RETRY_SECONDS (default 30)
     is kept before it is fetched again.
 
 A server's name is how its tools are addressed where names must be unique
-across servers: opencode calls the local server's get_parking_status
-`agent_tools_get_parking_status`.
+across servers: opencode calls the local server's bio_get_parking_status
+`agent_tools_bio_get_parking_status`.
 """
 import json
 import os
@@ -63,6 +63,10 @@ DEFAULT_RETRY_SECONDS = 30.0
 META_TOOLSET = "uidai.crm/toolset"
 META_AGENTS = "uidai.crm/agents"
 META_GUIDANCE = "uidai.crm/guidance"
+#: The services whose packets the tool is for, or ["*"] for every service
+#: (MULTI_SERVICE_PLAN.md D7). A tool whose listing has none reaches no
+#: service until AGENT_TOOLS_COMMON or a pack's tools.include names it.
+META_SERVICES = "uidai.crm/services"
 
 #: A server name: it becomes a prefix of tool names in opencode and a JSON key
 #: in its config, so it is kept to what both accept.

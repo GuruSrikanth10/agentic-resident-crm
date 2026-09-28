@@ -368,7 +368,7 @@ def built(monkeypatch):
     """Build the graph with recording agents; yields [(role, system_prompt)]."""
     calls = []
 
-    def fake_build_agent(role, model, system_prompt, tools=()):
+    def fake_build_agent(role, model, system_prompt, tools=(), pack=None):
         calls.append((role, system_prompt))
         agent = MagicMock()
         agent.invoke.return_value = {"messages": [AIMessage(content="APPROVED")]}

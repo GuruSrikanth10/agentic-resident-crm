@@ -11,12 +11,12 @@ cleanup deletes only the Redis copy.
 The records are large JSON, so every tool returns the fields a question needs
 rather than the blob: the per-type tools project the documented fields (and
 tolerate the wrapper and key-casing variations the docs leave open), and
-`get_helper_record_fields` reads arbitrary paths with MySQL JSON_EXTRACT.
+`bio_get_helper_record_fields` reads arbitrary paths with MySQL JSON_EXTRACT.
 """
 import re
 
 from src.tools.agent_tools import agent_tool
-from src.tools.agent_tools._process_db import (
+from src.tools.agent_tools.enu_biometric._process_db import (
     PROCESS_DB,
     InvalidArgument,
     as_list,
@@ -78,7 +78,7 @@ MAX_PATH_CHARS = 300
 
 
 @agent_tool(PROCESS_DB)
-def list_helper_records(refid: str) -> str:
+def bio_list_helper_records(refid: str) -> str:
     """List which bio_helper_cache_store records exist for a packet, without their contents.
 
     There are four record types: AbisMwCandidateRecord (the candidates ABIS
@@ -96,7 +96,7 @@ def list_helper_records(refid: str) -> str:
 
 
 @agent_tool(PROCESS_DB)
-def get_abis_candidates(refid: str) -> str:
+def bio_get_abis_candidates(refid: str) -> str:
     """Which candidates ABIS returned for a packet, and with what scores (AbisMwCandidateRecord).
 
     Returns the request type and response status, and every matched candidate
@@ -113,7 +113,7 @@ def get_abis_candidates(refid: str) -> str:
 
 
 @agent_tool(PROCESS_DB)
-def get_candidate_facts(refid: str, candidate_ref_id: str = "") -> str:
+def bio_get_candidate_facts(refid: str, candidate_ref_id: str = "") -> str:
     """What the service knew about each candidate when the rule engine decided (ApplicantCandidateHelperRecord).
 
     Per candidate: eid, masterRefId, masterEid, masterRefIdCreationDate,
@@ -133,7 +133,7 @@ def get_candidate_facts(refid: str, candidate_ref_id: str = "") -> str:
 
 
 @agent_tool(PROCESS_DB)
-def get_parking_match_verdicts(refid: str, candidate_ref_id: str = "") -> str:
+def bio_get_parking_match_verdicts(refid: str, candidate_ref_id: str = "") -> str:
     """Per-candidate, per-modality cross-match verdicts kept while an update packet was parked (ParkingHelperRecord).
 
     Each candidate maps LEFT_SLAP, RIGHT_SLAP, BOTH_THUMBS, LEFT_IRIS,
@@ -149,7 +149,7 @@ def get_parking_match_verdicts(refid: str, candidate_ref_id: str = "") -> str:
 
 
 @agent_tool(PROCESS_DB)
-def get_update_checker_result(refid: str) -> str:
+def bio_get_update_checker_result(refid: str) -> str:
     """What the Update Checker returned for an update packet (UpdateCheckerHelperRecord).
 
     Returns applicantRefid, masterRefid, latestBioUpdateRefid and isFlagged,
@@ -165,7 +165,7 @@ def get_update_checker_result(refid: str) -> str:
 
 
 @agent_tool(PROCESS_DB)
-def get_helper_record_fields(refid: str, record_type: str, json_paths: list[str]) -> str:
+def bio_get_helper_record_fields(refid: str, record_type: str, json_paths: list[str]) -> str:
     """Read specific fields of one bio_helper_cache_store record with MySQL JSON_EXTRACT.
 
     Use it for a field the other helper-record tools do not return. Paths use
@@ -176,7 +176,7 @@ def get_helper_record_fields(refid: str, record_type: str, json_paths: list[str]
     cut.
 
     refid: the packet's refId. record_type: the exact record type, e.g.
-    ApplicantCandidateHelperRecord (list_helper_records shows which exist).
+    ApplicantCandidateHelperRecord (bio_list_helper_records shows which exist).
     json_paths: 1 to 10 paths.
     """
     return run_lookup(lambda: _record_fields(refid, record_type, json_paths))
@@ -222,7 +222,7 @@ def _unrecognised(refid: str, record_type: str, meta: dict, document) -> dict:
             "record": meta, "shape_recognized": False,
             "top_level_keys": sorted(document)[:50] if isinstance(document, dict) else None,
             "hint": "The record does not have the documented shape; read the "
-                    "fields you need with get_helper_record_fields."}
+                    "fields you need with bio_get_helper_record_fields."}
 
 
 def _list_records(refid) -> dict:

@@ -118,7 +118,9 @@ ISOLATED_ENV_VARS = (
     # guard for the whole session or make every live claim look abandoned.
     "PACKET_CLAIM_ENABLED",
     "PACKET_CLAIM_TTL_SECONDS",
-    # Agent tools: the process DB toolset's switch, the MCP tool servers the
+    # Agent tools: the process DB toolset's switch (the `process` database of
+    # agent_tools/_database.py; another key's AGENT_DB_<KEY>_ENABLED names a
+    # database no shipped tool reads), the MCP tool servers the
     # agents use (and whether the API runs its own), and the per-role
     # selections. Each decides which tools a built agent is offered, and so
     # what its system prompt says; AGENT_MCP_SERVE also decides whether a
@@ -135,6 +137,9 @@ ISOLATED_ENV_VARS = (
     "AGENT_TOOLS_DLT_INVESTIGATOR",
     "AGENT_TOOLS_DLT_REVIEWER",
     "AGENT_TOOLS_DLT_SYNTHESIS",
+    # Undeclared tools treated as tools for every service: widens what every
+    # service's agents are offered.
+    "AGENT_TOOLS_COMMON",
     # The service registry and the intake gate. The directory selects which
     # packs exist; the other three decide whether a packet is analysed at all.
     "SERVICE_PACKS_DIR",

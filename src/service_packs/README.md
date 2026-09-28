@@ -74,7 +74,7 @@ nothing.
 
 | Field | Meaning |
 |---|---|
-| `tool_prefix` | Unique across the registry, `^[a-z][a-z0-9]{1,11}$`. Every tool scoped to this service alone is named `<prefix>_...` (Phase 4) |
+| `tool_prefix` | Unique across the registry, `^[a-z][a-z0-9]{1,11}$`. Every tool scoped to this service alone is named `<prefix>_...`, and no other tool may start with it (Phase 4) |
 | `match.stages` | Values of `flowMetaData.stage`, compared case-insensitively |
 | `match.sub_stages` | Values of `flowMetaData.subStage`. Empty means any. Non-empty narrows `stages`, so it needs at least one stage |
 | `match.source_topics` | Regular expressions, each matched against the whole `sourceTopic`. Consulted only when the stage decides nothing |
@@ -87,7 +87,7 @@ nothing.
 | `logs.app_names`, `logs.k8s_match` | The service's Elasticsearch `application_name` values, and how its pods are found (`name_contains` or `label_selector`, not both). Namespaces stay in the environment (Phase 6) |
 | `logs.also_search` | Other registered services whose logs are worth reading for this service's packets (Phase 6) |
 | `logs.decision_vocabulary` | A regular expression added to the generic decision vocabulary (Phase 6) |
-| `tools.include`, `tools.exclude` | Widen or narrow the service's tool scope by tool name (Phase 4) |
+| `tools.include`, `tools.exclude` | Widen or narrow the service's tool scope by tool name (Phase 4). Never widen the roles a tool is for; `_default` takes no `include` |
 | `dlt.*` | Reserved for the DLT lane; nothing reads it yet |
 
 Environment-specific values -- namespaces, hosts, credentials -- never go in a
@@ -125,10 +125,24 @@ The same decision the gate makes:
 A service is not analysed with its own pack until it is in
 `REJECTION_SERVICES_ENABLED`.
 
+## Which tools a packet's agents get
+
+A tool's toolset names the services it is for (`services`, published as
+`uidai.crm/services`), or `"*"` for every service. An agent built for a pack
+is offered a tool its role gets only when the tool names `"*"` or the pack's
+service, or names no services and `AGENT_TOOLS_COMMON` lists it, or the pack's
+`tools.include` lists it -- and never when its `tools.exclude` does. The
+opencode harness gets the same scope, as one agent per role and service
+(`crm_<role>__<service with non-alphanumerics as _>`). A service's own tools
+live in `src/tools/agent_tools/<service_slug>/`; `enu-biometric`'s are the
+`bio_*` process DB tools. No service may be named `default`: that name is the
+unresolved packets' agents'.
+
 ## `_default`
 
-It matches nothing, serves no tools of its own (`tool_prefix` is not allowed)
-and has `rule_source.type` `none`. Its `policy.md` tells the agents that no
+It matches nothing, serves no tools of its own (`tool_prefix` is not allowed,
+nor is `tools.include`: its agents get the `"*"` tools alone) and has
+`rule_source.type` `none`. Its `policy.md` tells the agents that no
 service-specific policy applies. It is used only when
 `REJECTION_UNRESOLVED_SERVICE=default_pack` lets an unresolved packet through.
 

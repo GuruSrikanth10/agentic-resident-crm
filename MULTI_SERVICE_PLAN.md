@@ -1,8 +1,8 @@
 # Multi-Service Rejection Lane -- Implementation Plan
 
 - **Date:** 2026-09-25
-- **Status:** Phases 1, 2 and 3 implemented on 2026-09-28; `ARCHITECTURE.md`
-  sections 3.2.2 and 3.2.3 describe what was built. Phase 0 needs production access and is the
+- **Status:** Phases 1, 2, 3 and 4 implemented on 2026-09-28; `ARCHITECTURE.md`
+  sections 3.2.2, 3.2.3 and 3.5.1 describe what was built. Phase 0 needs production access and is the
   owner's; of it, only 0.6 (the failing-test baseline: 56 pre-existing
   failures) has been done. Implementing Phase 1 corrected four points of this
   plan, all now reflected below:
@@ -43,6 +43,19 @@
   - **The harness receives the rule source by appending** too, as Phase 2 does
     for the service context, rather than by editing the templates for it. The
     templates only list the new evidence file.
+
+  Phase 4 was implemented on 2026-09-28 too; see its own "As built" section.
+  It settled four points the plan left open, all reflected there:
+  - **The LogFilter is built with the `_default` scope**: one agent serves
+    every service, so it may use only the tools for every service.
+  - **`selection(role, None)` is an error for a rejection role**, as 5.6 says,
+    and so is a service for a DLT role; `build_agent` takes `pack=`.
+  - **A harness task with no opencode agent of its own is refused** while tool
+    servers are configured, and falls back to its direct path, because
+    opencode's default agent would have every tool.
+  - **The `_default` pack takes no `tools.include`, and no service may be
+    named `default`**, so D7's "only the `*` tools" and 5.6's opencode names
+    both hold by construction.
 - **Scope:** the rejection lane. Every service publishes its rejection events
   to one Kafka topic, in the structure the lane already parses. The DLT lane
   is deferred until its message contract is final (section 10); the registry
@@ -52,27 +65,23 @@
 
 ### Where a new session resumes (2026-09-28)
 
-**Done:** Phases 1, 2 and 3, each with an "As built" section under its own
-heading in section 6. Read those three before Phase 4: they record where the
-implementation differs from what the phase text says, and the later phases
-build on the differences, not on the original text.
+**Done:** Phases 1, 2, 3 and 4, each with an "As built" section (Phases 1
+and 2 describe theirs under "Changes, as built") under its own heading in
+section 6. Read them before Phase 5: they record where the implementation
+differs from what the phase text says, and the later phases build on the
+differences, not on the original text.
 
-**Next:** Phase 4 (tools per service), as written, starting with the three
-items it carries from Phase 2 -- `build_agent` taking the pack,
-`_with_tools_section` taking the pack, and the subagent inheriting its
-parent's scoped list. Nothing in Phases 1-3 was left half-done for Phase 4 to
-finish; the carried items are additions, and the agent pool they need
-(`agent_for(role, pack)` inside `_build_agent`) already exists.
+**Next:** Phase 5 (runbooks and learned rules per service), or Phase 6 (logs
+and privacy) -- they do not depend on each other. Nothing in Phases 1-4 was
+left half-done for them to finish.
 
-**State of the working tree:** branch `fix/dlt-group-state-and-dedupe`, all of
-Phases 1-3 uncommitted, nothing committed or pushed by any of the three
-sessions. `git status` also carries the earlier MCP tool-layer changes that
-section 2 was verified against.
+**State of the branch:** Phases 1-3 are committed on `feature/multi-service`,
+and Phase 4 is committed on top of them.
 
 **Baseline to compare against:** 56 pre-existing failures on the full suite,
-unchanged after each of the three phases. Re-measure before Phase 4 rather
-than trusting this number, and remember the `pending_rules.jsonl` restore in
-"Running the tests" below.
+re-measured before Phase 4 and unchanged after it. Re-measure before the next
+phase rather than trusting this number, and remember the
+`pending_rules.jsonl` restore in "Running the tests" below.
 
 **Still the owner's, and still not done:** Phase 0 (sampling the shared topic,
 which is what confirms every service's `flowMetaData.stage` and supplies the
@@ -83,8 +92,7 @@ values Phase 0 produces.
 
 **Deliberately not built yet, so do not read its absence as an oversight:**
 per-service rules tables (there is one table, and it is enu-biometric's --
-D6), per-service tools (Phase 4), per-service runbooks and learned-rule scopes
-(Phase 5), per-service log sources and redaction (Phase 6, required before any
+D6), per-service runbooks and learned-rule scopes (Phase 5), per-service log sources and redaction (Phase 6, required before any
 other service is enabled), and the DLT lane (Phase 8, blocked on its contract).
 
 ---
@@ -805,7 +813,7 @@ As built in Phase 2 (`src/core/prompt_composer.py`):
 <src/prompts/learned_rules.md>
 <pack/learned_rules.md>
 
-### AVAILABLE TOOLS                    mcp_client.prompt_section(R)   (per service from Phase 4)
+### AVAILABLE TOOLS                    mcp_client.prompt_section(R, S)   (per service since Phase 4)
 ### OPERATING MODE                     agent_factory.OPERATING_MODE
 ```
 
@@ -886,8 +894,11 @@ Errors:
     `REJECTION_REASON_CODE_DOCS_ENABLED` is off;
   - an enabled service has `rule_source.type = "rules_db"`, but no database
     settings are configured and `USE_MOCK_DB` is off.
-- Phase 4: a local toolset's `services` names an unregistered service; a tool
-  breaks the prefix rule (D8); or two local tools share a name.
+- Phase 4 (implemented): a local toolset's `services` names an unregistered
+  service; a tool breaks the prefix rule (D8); or two local tools share a
+  name. Also, when a pack is loaded: `_default` has a `tools.include`, or a
+  service is named `default`. `validate_config` checks every database that is
+  on has its connection settings.
 - Phase 7: a name in `REJECTION_SERVICES_PILOT` is not registered.
 
 Warnings:
@@ -898,6 +909,8 @@ Warnings:
 - Phase 2: the harness is on and an enabled service's `droa_corpus_dir` is
   absent from `docs_cache/`. This is checked at readiness, because the corpus
   downloads in the background.
+- Phase 4: a local toolset for a rejection role declares no services, so it
+  reaches no service unless `AGENT_TOOLS_COMMON` or a pack includes its tools.
 
 ### 5.8 State, artifacts, casebook, metrics
 
@@ -1321,7 +1334,7 @@ Everything above, with these differences and these details.
   `enu-biometric` a rules table, as the shipped pack has.
 - **Full suite:** the same 56 failures as the baseline, no new ones.
 
-### Phase 4 -- Tools per service
+### Phase 4 -- Tools per service (implemented 2026-09-28)
 
 Changes:
 - **Carried from Phase 2:**
@@ -1367,6 +1380,77 @@ Tests:
 - The existing process-DB tests pass under the new names.
 
 **Checkpoint.**
+
+#### As built (2026-09-28)
+
+Everything above, with these differences and these details.
+
+- **Roles and scopes.** `agent_tools.SERVICE_ROLES` (investigator, reviewer,
+  synthesis, log_filter) are scoped by service; `DLT_ROLES` are not.
+  `mcp_client.selection(role, service=None, *, catalog=None)` refuses a
+  rejection role without a service and a DLT role with one, applies
+  `AGENT_TOOLS_<ROLE>` first and the scope (`mcp_client.in_scope`) after it.
+  `tools_for`, `prompt_section` and `fingerprint_material` take the service
+  the same way; `describe()` and the CLI list the selection per pack
+  (`prompt <role> --service <pack>`).
+  - The pack's `tools.include`/`exclude` come from
+    `service_registry.tool_scope(pack)`. A tool naming `_default` reaches
+    nobody: the default pack is no service.
+  - `Toolset.services` defaults to `()`; a malformed name, `_default`, or
+    `"*"` beside another name is refused when the toolset is declared.
+- **Agents.** `build_agent(role, model, system_prompt, tools=(), *, pack=None)`
+  and `system_prompt_for(role, prompt, pack)`. The pool's agents are built for
+  their pack; the LogFilter for `_default`, since one agent serves every
+  service. The subagent already received `registered`, now the scoped list.
+- **Harness.** `opencode_agent(role, service)` gives
+  `crm_<role>__<service_slug(service)>` for the rejection roles (`_default`
+  and no service give `__default`) and `crm_<role>` for the DLT roles.
+  `opencode_config` builds one agent per rejection harness role for every
+  registered service and `_default`. `_task_agent(node, service, config)`
+  falls back to `__default`; with an `mcp` block but no usable agent it raises
+  `OpencodeUnavailable` rather than run as opencode's default agent, which
+  would have every tool, and the node falls back to its direct path.
+  `run_task`/`run_task_json` take `service=`, and the orchestrator passes the
+  pack, as it does to `_with_tools_section(prompt, role, pack)`.
+- **Names.** `service_registry.tool_prefix_error(name, services)` holds the
+  rule: a tool scoped to exactly one registered service starts with
+  `<prefix>_`; a declared tool scoped otherwise starts with no registered
+  prefix; an undeclared tool is not judged. `agent_tools.scope_problems()`
+  applies it to every local tool, enabled or not, from
+  `service_registry.validate()`; `mcp_client.load_catalog` applies it to every
+  served tool and leaves a violator out with an error log.
+  `service_registry.service_slug` is shared by the opencode names and the
+  package layout.
+- **Package layout.** `discover()` walks subpackages (`_tool_modules`), a
+  subpackage's `__init__` counting as one of its modules. `common/` ships
+  empty. The biometric modules are in `enu_biometric/`, the functions renamed
+  `bio_*`, and every guidance and docstring reference with them.
+  `mcp_client.COMMON_RULES` cited a biometric tool as its example; it now says
+  `"<tool>: <field> is <value>"`, since every service's prompt reads it.
+- **Database layer.** `agent_tools/_database.py`: `declare(key, label=,
+  default_port=, default_name=)` returns the one `Database` for a key
+  (declaring it again differently is an error); each has its settings
+  (`PROCESS_DB_*` for `process`, `AGENT_DB_<KEY>_*` otherwise), engine,
+  breaker (`process_db_breaker` for `process`), `query`, `run_lookup`,
+  `finish` and `missing_settings`. The generic value, argument and redaction
+  helpers moved there; `enu_biometric/_process_db.py` declares `process`,
+  defines the toolset and re-exports what its modules use. Every message the
+  process DB tools returned is unchanged. `config_validator` checks the
+  declared databases' settings after the tool modules import.
+  `metrics.sample_breaker_states` adds every declared database's breaker --
+  in the API process these are that process's own, not the tool server's
+  (`ARCHITECTURE.md` section 5).
+- **Settings.** `AGENT_TOOLS_COMMON` (isolated in `tests/conftest.py`, and no
+  longer reported as an unknown `AGENT_TOOLS_*` setting) and the
+  `AGENT_DB_<KEY>_*` family.
+- **Tests:** `tests/test_service_tools.py` (44) is new -- the matrix, the
+  declaration and prefix checks, the boot failure, a local clash, the
+  per-service opencode agents, and a fixture service's Investigator and its
+  `task` subagent built as real deep agents over the real tool server.
+  `test_process_db_tools.py` gained the database-layer cases. Every existing
+  tool test moved to the new names, and every fake of `build_agent` and
+  `run_task_json` accepts the new argument.
+- **Full suite:** the same 56 failures as the baseline, no new ones.
 
 ### Phase 5 -- Runbooks and learned rules per service
 

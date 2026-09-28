@@ -60,6 +60,14 @@ DEFAULT_PACK = "_default"
 #: The service of a packet no rule could place.
 UNRESOLVED = "_unresolved"
 
+#: In a tool's `services`, every service: the tool's meaning holds whatever
+#: the packet's service (MULTI_SERVICE_PLAN.md D7).
+ALL_SERVICES = "*"
+
+#: The slug that names the `_default` pack's opencode agents
+#: (`crm_<role>__default`). No service may take it.
+DEFAULT_SLUG = "default"
+
 #: The pack every packet was analysed with before packs existed. In `record`
 #: mode a packet the gate would skip is analysed with it -- exactly as it was
 #: before -- so that `record` changes how nothing is analysed, only what is
@@ -120,6 +128,7 @@ ENV_UNRESOLVED = "REJECTION_UNRESOLVED_SERVICE"
 _SERVICE_NAME = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _TOOL_PREFIX = re.compile(r"^[a-z][a-z0-9]{1,11}$")
 _DIR_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_SLUG_UNSAFE = re.compile(r"[^a-z0-9]")
 
 _FILE_KEYS = {"schema_version", "service", "display_name", "tool_prefix",
               "match", "enrolment_types", "rule_source",
@@ -367,6 +376,10 @@ def _parse_pack(dir_name: str, label: str, document, errors: list,
     if not is_default and not _SERVICE_NAME.match(name):
         errors.append(f"{label}: service name {name!r} must match "
                       f"{_SERVICE_NAME.pattern}.")
+    elif not is_default and service_slug(name) == DEFAULT_SLUG:
+        errors.append(f"{label}: service name {name!r} is reserved: its opencode "
+                      f"agents would be the unresolved packets' "
+                      f"(crm_<role>__{DEFAULT_SLUG}).")
 
     display_name = document.get("display_name")
     if not isinstance(display_name, str) or not display_name.strip():
@@ -398,6 +411,14 @@ def _parse_pack(dir_name: str, label: str, document, errors: list,
                                           errors)
     _parse_logs(label, document.get("logs"), errors)
     _parse_lists(f"{label} tools", document.get("tools"), _TOOLS_KEYS, errors)
+    if is_default and isinstance(document.get("tools"), dict) \
+            and document["tools"].get("include"):
+        # An unresolved packet gets the tools every service may use and no
+        # other (MULTI_SERVICE_PLAN.md D7): which service's tool would fit a
+        # packet nobody could place is exactly what is not known.
+        errors.append(f"{label}: the default pack takes no tools.include; an "
+                      f"unresolved packet gets only the tools for every "
+                      f"service ({ALL_SERVICES!r}).")
     _parse_lists(f"{label} dlt", document.get("dlt"), _DLT_KEYS, errors)
 
     return ServicePack(
@@ -902,6 +923,73 @@ def docs_lookup_options(name: Optional[str], registry: Optional[Registry] = None
             "type_labels": dict(types.get("family_labels") or {}) or None}
 
 
+# ======================================================================
+# Tools per service (MULTI_SERVICE_PLAN.md D7, D8)
+# ======================================================================
+
+def is_service_name(name) -> bool:
+    """Whether `name` has the shape of a service name. Says nothing about
+    whether such a service is registered."""
+    return isinstance(name, str) and bool(_SERVICE_NAME.match(name))
+
+
+def service_slug(name: str) -> str:
+    """`name` with every character outside [a-z0-9] turned into "_".
+
+    What a service is called where a hyphen is not allowed: its opencode
+    agents (`crm_<role>__<slug>`) and its tool package
+    (`src/tools/agent_tools/<slug>/`). The `_default` pack's slug is
+    `default`.
+    """
+    if name == DEFAULT_PACK:
+        return DEFAULT_SLUG
+    return _SLUG_UNSAFE.sub("_", name)
+
+
+def tool_scope(name: Optional[str], registry: Optional[Registry] = None) -> tuple:
+    """(include, exclude): the tool names the pack's `tools` section adds to
+    and removes from its scope, as frozensets. Empty for a name with no pack."""
+    found = pack(name, registry)
+    tools = (found.document.get("tools") or {}) if found else {}
+    return (frozenset(tools.get("include") or ()),
+            frozenset(tools.get("exclude") or ()))
+
+
+def tool_prefix_error(tool_name: str, services, registry: Optional[Registry] = None) -> Optional[str]:
+    """Why a tool's name breaks the prefix rule (D8), or None.
+
+    A tool scoped to exactly one registered service is named
+    `<that service's tool_prefix>_...`. A tool that declares a scope and is
+    not scoped to one service alone -- every service, or several -- carries
+    no registered service's prefix: the name would claim a service the scope
+    does not. A tool that declares no services is not judged: it reaches no
+    service unless configured to, and it may come from a server that knows
+    nothing of this registry. A scope naming an unregistered service is
+    reported where the scope is checked, not here.
+    """
+    registry = registry or load()
+    services = tuple(services or ())
+    if not services:
+        return None
+    named = [service for service in services if service != ALL_SERVICES]
+    if ALL_SERVICES not in services and len(named) == 1:
+        owner = named[0]
+        if not registry.is_registered(owner):
+            return None
+        prefix = registry.packs[owner].tool_prefix
+        if not tool_name.startswith(f"{prefix}_"):
+            return (f"Tool {tool_name!r} is scoped to {owner} alone, so its name "
+                    f"must start with {owner}'s tool prefix, '{prefix}_'.")
+        return None
+    for service in registry.services():
+        prefix = registry.packs[service].tool_prefix
+        if prefix and tool_name.startswith(f"{prefix}_"):
+            return (f"Tool {tool_name!r} carries {service}'s tool prefix "
+                    f"'{prefix}_' but is not scoped to {service} alone "
+                    f"(services {list(services)}).")
+    return None
+
+
 def missing_corpus_dirs(docs_dir, registry: Optional[Registry] = None) -> list:
     """Enabled services whose DROA corpus directory is absent from `docs_dir`.
 
@@ -985,6 +1073,15 @@ def validate(root=None, docs_root=None) -> tuple:
         warnings.append(f"The reason-code documentation file {stem}.json has "
                         f"no service pack; a packet placed by one of its codes "
                         f"is reported as {SKIP_NOT_REGISTERED}.")
+
+    # The local tools' service scopes and names (MULTI_SERVICE_PLAN.md 5.7,
+    # Phase 4). Judged here because only the registry can say whether a
+    # service is registered and what its prefix is.
+    from src.tools import agent_tools
+
+    tool_errors, tool_warnings = agent_tools.scope_problems(registry)
+    errors.extend(tool_errors)
+    warnings.extend(tool_warnings)
 
     return errors, warnings
 

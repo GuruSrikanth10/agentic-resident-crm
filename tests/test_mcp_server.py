@@ -19,7 +19,8 @@ def probe_tools():
     agent_tools.discover()
     saved = dict(agent_tools._registry)
     toolset = Toolset(name="server_probe", agents=("investigator", "reviewer"),
-                      guidance="Probe guidance.", read_only=True)
+                      guidance="Probe guidance.", read_only=True,
+                      services=("enu-biometric",))
     off = Toolset(name="server_probe_off", agents=("reviewer",), enabled=lambda: False)
 
     @agent_tool(toolset)
@@ -60,7 +61,7 @@ def test_the_server_lists_only_enabled_tools(probe_tools, monkeypatch):
     names = {tool.name for tool in _run(_listing())}
     assert "probe_echo" in names
     assert "probe_hidden" not in names
-    assert "get_parking_status" not in names
+    assert "bio_get_parking_status" not in names
 
 
 def test_a_listing_carries_roles_guidance_and_the_read_only_hint(probe_tools):
@@ -68,6 +69,7 @@ def test_a_listing_carries_roles_guidance_and_the_read_only_hint(probe_tools):
     assert tool.description == "Echo a refId."
     assert tool.meta == {mcp_config.META_TOOLSET: "server_probe",
                          mcp_config.META_AGENTS: ["investigator", "reviewer"],
+                         mcp_config.META_SERVICES: ["enu-biometric"],
                          mcp_config.META_GUIDANCE: "Probe guidance."}
     assert tool.annotations.read_only_hint is True
     assert tool.input_schema["required"] == ["refid"]
@@ -89,9 +91,11 @@ def test_bad_arguments_are_an_error_result_not_a_protocol_failure(probe_tools):
 
 def test_the_process_db_tools_are_served_when_switched_on(monkeypatch):
     monkeypatch.setenv("PROCESS_DB_ENABLED", "true")
-    names = {tool.name for tool in _run(_listing())}
-    assert {"get_packet_stage_summary", "get_parking_status",
-            "get_helper_record_fields"} <= names
+    listed = {tool.name: tool for tool in _run(_listing())}
+    assert {"bio_get_packet_stage_summary", "bio_get_parking_status",
+            "bio_get_helper_record_fields"} <= set(listed)
+    assert listed["bio_get_parking_status"].meta[mcp_config.META_SERVICES] == \
+        ["enu-biometric"]
 
 
 def test_health_answers_over_http(tool_server):

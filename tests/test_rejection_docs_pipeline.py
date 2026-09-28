@@ -331,7 +331,7 @@ def _harness_on(monkeypatch, tmp_path, result, fail=False):
     monkeypatch.setenv("USE_OPENCODE_HARNESS_REJECTION", "true")
     monkeypatch.setattr(paths, "LOCAL_CASESHEETS_DIR", tmp_path)
 
-    def run(prompt, output_path, node=None):
+    def run(prompt, output_path, node=None, service=None):
         if fail:
             raise opencode_runner.OpencodeUnavailable("no binary")
         return {"result": result, "seconds": 0,
