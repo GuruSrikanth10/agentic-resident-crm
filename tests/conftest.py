@@ -103,6 +103,10 @@ ISOLATED_ENV_VARS = (
     "REJECTION_REASON_CODE_DOCS_ENABLED",
     "REASON_CODE_DOCS_DIR",
     "REASON_CODE_DOCS_S3_PREFIX",
+    # The download: on, it makes the store come from S3 and /ready wait for
+    # it, so a stray value would have tests reaching for a bucket.
+    "REASON_CODE_DOCS_S3_DOWNLOAD",
+    "REASON_CODE_DOCS_REFRESH_SECONDS",
     # A cap rather than a tunable: below a document's length it switches
     # truncation on, so a stray value changes which branch runs.
     "REASON_CODE_DOC_MAX_CHARS",
@@ -131,6 +135,14 @@ ISOLATED_ENV_VARS = (
     "AGENT_TOOLS_DLT_INVESTIGATOR",
     "AGENT_TOOLS_DLT_REVIEWER",
     "AGENT_TOOLS_DLT_SYNTHESIS",
+    # The service registry and the intake gate. The directory selects which
+    # packs exist; the other three decide whether a packet is analysed at all.
+    "SERVICE_PACKS_DIR",
+    "REJECTION_SERVICE_GATE",
+    "REJECTION_SERVICES_ENABLED",
+    "REJECTION_UNRESOLVED_SERVICE",
+    # A cap: below a pack's size it turns the pack into a boot error.
+    "SERVICE_PACK_MAX_CHARS",
     # LLM provider selection.
     "USE_HF",
     "MOCK_LLM_WITH_MISTRAL",
@@ -192,6 +204,17 @@ def hermetic_env():
         os.environ.setdefault(name, value)
 
     yield
+
+
+@pytest.fixture(autouse=True)
+def fresh_service_registry():
+    """Each test reads the service packs it points at, not a registry an
+    earlier test loaded and the process kept."""
+    from src.utils import service_registry
+
+    service_registry.reset()
+    yield
+    service_registry.reset()
 
 
 @pytest.fixture(autouse=True)

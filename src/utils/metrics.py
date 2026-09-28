@@ -68,17 +68,43 @@ def _gauge(name, documentation, labelnames=()):
 # Packet lifecycle -----------------------------------------------------
 PACKETS_TOTAL = _counter(
     "agentic_resident_crm_packets_total",
-    "Packets processed, by terminal status and resolution source.",
-    ("status", "resolution_source"),
+    "Packets processed, by terminal status, resolution source and the "
+    "service the packet belongs to (`unknown` when it exited before its "
+    "service was resolved).",
+    ("status", "resolution_source", "service"),
 )
 
 # Buckets run to 600s because an investigation is minutes, not milliseconds --
 # the prometheus defaults top out at 10s and would put every packet in +Inf.
 PACKET_DURATION = _histogram(
     "agentic_resident_crm_packet_duration_seconds",
-    "Wall-clock duration of a full investigation.",
-    ("resolution_source",),
+    "Wall-clock duration of a full investigation, by resolution source and "
+    "service.",
+    ("resolution_source", "service"),
     buckets=(1, 5, 15, 30, 60, 120, 180, 300, 450, 600, float("inf")),
+)
+
+# Services (MULTI_SERVICE_PLAN.md D1, D5) ----------------------------
+# The `service` label is bounded by the registry and the reason-code
+# documentation files: a resolution only ever names one of those, or
+# `_unresolved`, never a value copied from a payload.
+SERVICE_RESOLUTIONS = _counter(
+    "agentic_resident_crm_service_resolutions_total",
+    "Rejection packets whose service was resolved, by service, by how "
+    "(flow_stage, source_topic, reason_code_docs, none) and by whether the "
+    "reason-code documentation named a different service (conflict). A "
+    "rising `none` is a missing mapping; a rising conflict is a mapping or a "
+    "documentation file worth checking.",
+    ("service", "source", "conflict"),
+)
+
+REJECTIONS_SKIPPED = _counter(
+    "agentic_resident_crm_rejections_skipped_total",
+    "Rejection packets acknowledged without analysis because their service "
+    "is unresolved, unregistered or not enabled. Counted only with "
+    "REJECTION_SERVICE_GATE=enforce; in record mode the same decision is "
+    "logged instead.",
+    ("service", "reason"),
 )
 
 INVESTIGATOR_RETRIES = _histogram(
@@ -90,19 +116,20 @@ INVESTIGATOR_RETRIES = _histogram(
 RUNBOOK_LOOKUPS = _counter(
     "agentic_resident_crm_runbook_lookups_total",
     "Runbook lookups by outcome (hit, shadow, miss, no_reason_code, "
-    "fingerprint_mismatch, error). Every outcome is recorded, so the hit rate "
-    "has a denominator.",
+    "fingerprint_mismatch, rule_source_none, error). Every outcome is "
+    "recorded, so the hit rate has a denominator.",
     ("outcome",),
 )
 
 REASON_CODE_DOC_LOOKUPS = _counter(
     "agentic_resident_crm_reason_code_doc_lookups_total",
     "Reason-code document lookups by outcome (hit, miss, error, "
-    "no_reason_code, disabled) and by which enrolment type matched (exact, "
-    "any, none). The miss rate per reason code is what says which document "
-    "to write next, so every outcome is counted and the rate has a "
-    "denominator.",
-    ("outcome", "match"),
+    "no_reason_code, disabled), by which enrolment type matched (exact, "
+    "any, none), by the packet's service, and by which files answered "
+    "(own, other_service, all, none). The miss rate per reason code is what "
+    "says which document to write next, so every outcome is counted and the "
+    "rate has a denominator.",
+    ("outcome", "match", "service", "scope"),
 )
 
 REJECTION_PROMPT_TRIMS = _counter(
@@ -171,8 +198,9 @@ LLM_TOKENS = _counter(
 
 LLM_CALLS = _counter(
     "agentic_resident_crm_llm_calls_total",
-    "LLM invocations by agent node and outcome (ok, error, invalid, ...).",
-    ("node", "outcome"),
+    "LLM invocations by agent node, outcome (ok, error, invalid, ...) and "
+    "service. `unknown` for the DLT lane, which does not resolve services yet.",
+    ("node", "outcome", "service"),
 )
 
 # Circuit breakers ------------------------------------------------------
@@ -276,6 +304,22 @@ def record_dlt_group_write(operation: str, ok: bool) -> None:
 def record_packet_claim(outcome: str) -> None:
     if PACKET_CLAIMS is not None:
         PACKET_CLAIMS.labels(outcome=outcome).inc()
+
+
+def record_service_resolution(resolution: dict) -> None:
+    """Count one freshly computed resolution -- not a stored one read back,
+    or a packet passing through both stages would be counted twice."""
+    resolution = resolution or {}
+    SERVICE_RESOLUTIONS.labels(
+        service=str(resolution.get("service") or "unknown"),
+        source=str(resolution.get("source") or "none"),
+        conflict="true" if resolution.get("conflict") else "false",
+    ).inc()
+
+
+def record_rejection_skipped(service: Optional[str], reason: Optional[str]) -> None:
+    REJECTIONS_SKIPPED.labels(service=service or "unknown",
+                              reason=reason or "unknown").inc()
 
 
 def record_dlt_claim(outcome: str) -> None:

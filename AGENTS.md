@@ -1,16 +1,17 @@
 # Agentic Resident CRM — opencode Agent Instructions
 
-You are an investigation agent for the Aadhaar Biometric Enrolment/Update
-pipeline. This file is loaded into every session, whatever the task, so it
-holds only what is true of every investigation. **Your task prompt names
-your flow and includes that flow's own rules -- where its evidence lives,
-what its primary evidence is, and what it must not do. Where the two differ,
-the flow rules win.**
+You are an investigation agent for the Aadhaar enrolment and update pipeline,
+which runs as many services. This file is loaded into every session, whatever
+the task or the service, so it holds only what is true of every
+investigation. **Your task prompt names your flow and includes that flow's own
+rules -- where its evidence lives, what its primary evidence is, and what it
+must not do -- and, when the packet's service is known, that service's own
+context. Where they differ from this file, the task prompt wins.**
 
 ## Project purpose
 
-This system investigates packets that failed in the ENU biometric processing
-pipeline -- packets rejected by a business rule, and records dead-lettered
+This system investigates packets that failed in the ENU processing pipeline's
+services -- packets rejected by a business rule, and records dead-lettered
 after the service gave up retrying them. For each, it gathers evidence,
 reasons about the cause from the service documentation, and produces a
 casebook explaining what happened and what should be done.

@@ -268,7 +268,8 @@ def lookup_rule_by_reason_code(reason_code: str) -> str:
 
 
 def lookup_rule_for(reason_code: str,
-                    enrolment_type: Optional[str] = None) -> Optional[list]:
+                    enrolment_type: Optional[str] = None,
+                    type_filter: Optional[dict] = None) -> Optional[list]:
     """Return the parsed rule rows for a reason code, filtered by enrolment type.
 
     Returns None when the lookup failed or matched nothing -- callers that
@@ -284,11 +285,12 @@ def lookup_rule_for(reason_code: str,
     a harmless re-export invalidated every runbook.
     """
     raw = _lookup_rule_json(reason_code)
-    return _parse_and_filter_rules(raw, enrolment_type)
+    return _parse_and_filter_rules(raw, enrolment_type, type_filter)
 
 
 def lookup_rule_text(reason_code: str,
-                     enrolment_type: Optional[str] = None) -> str:
+                     enrolment_type: Optional[str] = None,
+                     type_filter: Optional[dict] = None) -> str:
     """Return the LLM-facing rule text for a reason code.
 
     Falls back to the raw lookup string when it isn't parseable JSON, because
@@ -296,20 +298,26 @@ def lookup_rule_text(reason_code: str,
     code: X") that the Investigator should see rather than an empty prompt.
     """
     raw = _lookup_rule_json(reason_code)
-    filtered = _parse_and_filter_rules(raw, enrolment_type)
+    filtered = _parse_and_filter_rules(raw, enrolment_type, type_filter)
     if filtered is None:
         return raw
     return json.dumps(filtered)
 
 
 def _parse_and_filter_rules(raw: str,
-                            enrolment_type: Optional[str] = None) -> Optional[list]:
+                            enrolment_type: Optional[str] = None,
+                            type_filter: Optional[dict] = None) -> Optional[list]:
     """Parse the lookup's JSON-array string and filter it by enrolment type.
 
     A rule carrying no `enrolmentType` condition applies to every type and is
     always kept. If filtering would leave nothing, the unfiltered rows are
     returned instead -- a rule that matched the reason code is better evidence
     than no rule at all.
+
+    `type_filter` is the service pack's own {RAW TYPE: rules-table type}
+    (`rule_source.enrolment_type_filter`, MULTI_SERVICE_PLAN.md D6); without
+    one, `_ENROLMENT_TYPE_ALIASES` applies. A type the map does not name is
+    not filtered on.
     """
     if not raw or not raw.lstrip().startswith("["):
         return None
@@ -323,7 +331,11 @@ def _parse_and_filter_rules(raw: str,
     if not isinstance(rules, list) or not rules:
         return None
 
-    target_type = normalize_enrolment_type(enrolment_type)
+    if type_filter is not None:
+        target_type = (type_filter.get(str(enrolment_type).strip().upper())
+                       if enrolment_type else None)
+    else:
+        target_type = normalize_enrolment_type(enrolment_type)
     if not target_type:
         return rules
 

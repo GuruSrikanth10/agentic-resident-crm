@@ -1,0 +1,1 @@
+Pay special attention to the Organization Terminology Glossary in the SERVICE POLICY. If the investigator contradicts the glossary (e.g., misinterprets "demo" or "nonDemo"), you must reject their findings.

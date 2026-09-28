@@ -6,6 +6,11 @@ exploring the whole DROA corpus with a lookup done in Python: the packet's
 reason code and enrolment type select the text, and that text goes into the
 prompt alongside the Database Rule Configuration, the payload and the logs.
 
+For a service whose pack declares no rules database, this documentation is the
+only account of the rule: the prompt then carries a `Rule source` note in
+place of the Database Rule Configuration, and the harness reads the text from
+`reason_code_doc.md` in the case directory.
+
 The Reviewer is given the same text, so it can check the investigation against
 the documentation rather than only reading the investigation.
 
@@ -19,6 +24,16 @@ src/reason_code_docs/
 
 There is no separate index. A service file is keyed by reason code already,
 so the mapping is intrinsic and there is no second file to keep in step.
+
+**A file must be named after the service it documents** (`enu-biometric.json`
+for `"service": "enu-biometric"`), and the validator enforces it. The name is
+how a packet's own service's file is found: a packet is shown its own
+service's account of its reason code, and other services' files are read only
+when its own documents nothing for that code -- and then under a note saying
+whose they are, because the code may come from a shared library or the packet
+may have been placed in the wrong service. A service's pack
+(`src/service_packs/<service>/service.json`) names its file and supplies the
+words its enrolment types are rendered with.
 
 Read `REASON_CODE_DOCS_PLAN.md` at the repository root for why the store looks
 like this; sections 5 and 6 are the contract this file summarises.
@@ -153,7 +168,8 @@ These apply to the **rendered** document -- the exact text the model is shown
 2. **No prompt-injection phrases.** None of
    `runbook_validator.INJECTION_MARKERS`, compared case-insensitively. Some
    are ordinary phrases ("override the"); reword those.
-3. **Terminology** follows `agent_policy_context.md`: "demo" is the face
+3. **Terminology** follows the service's pack policy
+   (`src/service_packs/enu-biometric/policy.md`): "demo" is the face
    modality, "nonDemo" is fingerprints and iris, and "TD" means all nonDemo
    modalities matched.
 4. **Biometric Update entries** cover the Mandatory Biometric Update case -- a
@@ -174,7 +190,18 @@ that reads them. The cost is that editing one needs a deploy, which is
 acceptable: the service source they are generated from also changes on deploy.
 
 `REASON_CODE_DOCS_DIR` points the store somewhere else -- a mounted volume,
-for instance -- with no code change. Hosting the files in S3 is a follow-up:
-`reason_code_docs.s3_prefix()` and `download_service_docs()` reserve the path
-and the entry point, and `utils/docs_loader.py` is the working implementation
-to copy. Nothing downloads today.
+for instance -- with no code change.
+
+They can also be hosted in S3, which is how an estate of services keeps one
+store current without a deploy per document. With
+`REASON_CODE_DOCS_S3_DOWNLOAD=true`, the API fetches every service file under
+`REASON_CODE_DOCS_S3_PREFIX` into `REASON_CODE_DOCS_DIR` at start-up, and
+again every `REASON_CODE_DOCS_REFRESH_SECONDS`:
+
+- the download is staged, validated, and only then swapped in, so a broken or
+  empty upload leaves the copy that was serving in place;
+- `/ready` fails until the first copy is on disk, and a refresh never unreadies
+  a pod that was ready;
+- `REASON_CODE_DOCS_DIR` must be set to a writable directory outside `src/`, or
+  the API refuses to boot: the swap would otherwise replace the files shipped
+  in the image.

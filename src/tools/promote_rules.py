@@ -1,10 +1,14 @@
 """Promote Reviewer-proposed learning rules into the Investigator prompt.
 
-Every rule approved here is appended to InvestigatorAgent.md and becomes part
-of the system prompt for every future investigation. That text originates from
-an LLM reading log content, and log content is influenced by upstream request
-data -- so this is the last gate on a path that runs from a log line to a
-permanent, privileged instruction (G19).
+Every rule approved here is appended to the `learned_rules.md` of the service
+pack it was learned under, and becomes part of the Investigator's system
+prompt for every future packet analysed with that pack
+(MULTI_SERVICE_PLAN.md D11). Not to InvestigatorAgent.md: that prompt is shared
+by every service, and a rule learned under one service's policy can be wrong
+under another's. That text originates from an LLM reading log content, and
+log content is influenced by upstream request data -- so this is the last
+gate on a path that runs from a log line to a permanent, privileged
+instruction (G19).
 
 The gate is therefore deliberately awkward:
   - each rule is re-validated here, not only when it was proposed;
@@ -19,16 +23,36 @@ import subprocess
 
 from filelock import FileLock
 
+from src.utils import service_registry
 from src.utils.runbook_validator import validate_learning_rule
+
+
+def target_pack_for(entry: dict) -> str:
+    """The pack a pending rule is promoted into: the one it was learned under.
+
+    An entry queued before rules recorded their pack was learned under the
+    pre-registry pack, the only one that existed, so it goes there -- and so
+    does one naming a pack this registry no longer has, rather than being
+    promoted somewhere it was not learned.
+    """
+    pack = entry.get("service_pack")
+    if isinstance(pack, str) and pack in service_registry.load().packs:
+        return pack
+    return service_registry.PRE_REGISTRY_PACK
+
+
+def target_file_for(entry: dict) -> str:
+    return str(service_registry.packs_dir() / target_pack_for(entry)
+               / service_registry.LEARNED_RULES_FILE)
 
 
 def promote_rules(auto_commit: bool = False):
     base_dir = os.path.dirname(os.path.dirname(__file__))
     prompts_dir = os.path.join(base_dir, "prompts")
+    packs_dir = str(service_registry.packs_dir())
     pending_file = os.path.join(prompts_dir, "pending_rules.jsonl")
     file_lock_path = pending_file + ".lock"
     promo_lock_path = os.path.join(prompts_dir, "promotion.lock")
-    target_file = os.path.join(prompts_dir, "InvestigatorAgent.md")
     
     # 1. Top-level lock to prevent concurrent promotions by multiple humans/scripts
     promo_lock = FileLock(promo_lock_path, timeout=0)
@@ -39,10 +63,12 @@ def promote_rules(auto_commit: bool = False):
         return
         
     try:
-        # 2. Git status check
-        result = subprocess.run(["git", "status", "--porcelain", prompts_dir], capture_output=True, text=True)
+        # 2. Git status check, over both places a promotion reads or writes.
+        result = subprocess.run(["git", "status", "--porcelain", prompts_dir, packs_dir],
+                                capture_output=True, text=True)
         if result.stdout.strip():
-            print(f"Refusing to promote: uncommitted changes exist in {prompts_dir}")
+            print(f"Refusing to promote: uncommitted changes exist in {prompts_dir} "
+                  f"or {packs_dir}")
             print(result.stdout)
             return
 
@@ -86,13 +112,18 @@ def promote_rules(auto_commit: bool = False):
                     continue
 
                 # The exact diff, so approval is informed rather than nominal.
+                pack = target_pack_for(entry)
+                target_file = target_file_for(entry)
                 addition = f"\n- CRITICAL RULE: {proposed}\n"
-                print(f"\nThis will append to {os.path.basename(target_file)}:")
+                print(f"Learned under service {entry.get('service') or 'unrecorded'}, "
+                      f"pack {pack}.")
+                print(f"\nThis will append to {pack}/{os.path.basename(target_file)}:")
                 print("-" * 70)
                 for diff_line in addition.strip("\n").splitlines():
                     print(f"+ {diff_line}")
                 print("-" * 70)
-                print("It becomes part of the system prompt for EVERY future packet.")
+                print(f"It becomes part of the Investigator's system prompt for "
+                      f"EVERY future packet analysed with the {pack} pack.")
 
                 choice = input("Type 'promote' to apply, anything else to skip: ").strip()
                 if choice == "promote":

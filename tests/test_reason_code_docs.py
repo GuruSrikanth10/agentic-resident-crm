@@ -168,7 +168,7 @@ def test_lookup_never_raises(tmp_path, monkeypatch):
     def explode(*_args, **_kwargs):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(rcd, "_entries_for", explode)
+    monkeypatch.setattr(rcd, "_file_entries", explode)
     state = rcd.lookup("FIXTURE_ANY_CODE", "E", root=FIXTURE_ROOT)
     assert state["outcome"] == "error"
     assert state["detail"] == "RuntimeError: boom"
@@ -313,7 +313,7 @@ def test_provenance_tolerates_the_disabled_shorthand():
     assert rcd.provenance({"outcome": "disabled"}) == {
         "outcome": "disabled", "reason_code": None, "requested_type": None,
         "matched_type": None, "refs": [], "sha256": None, "truncated": False,
-        "detail": None}
+        "detail": None, "scope": None}
 
 
 # ---------------------------------------------------------------------------
@@ -569,6 +569,45 @@ def test_the_api_boots_on_a_store_that_only_warns(tmp_path, monkeypatch):
     validate_reason_code_docs()
 
 
+def test_the_api_does_not_check_the_disk_when_it_will_download(tmp_path,
+                                                              monkeypatch):
+    """There is nothing valid on disk yet at boot: the fetch runs in the
+    background and validates what it fetched before swapping it in, and /ready
+    waits for the first copy."""
+    from src.main_api import validate_reason_code_docs
+
+    monkeypatch.setenv("REJECTION_REASON_CODE_DOCS_ENABLED", "true")
+    monkeypatch.setenv(rcd.ENV_S3_DOWNLOAD, "true")
+    monkeypatch.setenv("REASON_CODE_DOCS_DIR", str(tmp_path / "store"))
+    monkeypatch.setenv("CASEBOOK_S3_BUCKET", "b")
+    monkeypatch.setattr(paths, "REASON_CODE_DOCS_DIR", _store(tmp_path, "{ broken"))
+
+    validate_reason_code_docs()  # must not raise or exit
+
+
+@pytest.mark.parametrize("missing", ["REASON_CODE_DOCS_DIR", "bucket"])
+def test_the_api_refuses_to_boot_on_a_download_it_cannot_do(tmp_path, monkeypatch,
+                                                           missing):
+    """Left at the default directory the swap would replace the copy shipped
+    inside `src/`; with no bucket there is nothing to fetch, and the store
+    would silently stay empty."""
+    from src.main_api import validate_reason_code_docs
+
+    monkeypatch.setenv("REJECTION_REASON_CODE_DOCS_ENABLED", "true")
+    monkeypatch.setenv(rcd.ENV_S3_DOWNLOAD, "true")
+    if missing == "REASON_CODE_DOCS_DIR":
+        monkeypatch.delenv("REASON_CODE_DOCS_DIR", raising=False)
+        monkeypatch.setenv("CASEBOOK_S3_BUCKET", "b")
+    else:
+        monkeypatch.setenv("REASON_CODE_DOCS_DIR", str(tmp_path / "store"))
+        monkeypatch.delenv("CASEBOOK_S3_BUCKET", raising=False)
+        monkeypatch.delenv("S3_LOGS_BUCKET", raising=False)
+
+    with pytest.raises(SystemExit) as exit_info:
+        validate_reason_code_docs()
+    assert exit_info.value.code == 1
+
+
 # ---------------------------------------------------------------------------
 # The switch and the S3 placeholder.
 # ---------------------------------------------------------------------------
@@ -592,7 +631,332 @@ def test_the_s3_prefix_is_configurable(monkeypatch):
     assert rcd.s3_prefix() == "other/place"
 
 
-def test_the_s3_download_is_a_placeholder_that_does_nothing():
-    """It reserves the entry point. Returning False says "no download
-    happened", which is exactly what is true today."""
+def test_the_download_does_nothing_while_it_is_switched_off():
+    """Off by default: the files ship in the image, and a deployment that
+    fetches them another way only points REASON_CODE_DOCS_DIR at them."""
     assert rcd.download_service_docs() is False
+
+
+@pytest.mark.parametrize("raw,expected", [
+    (None, False), ("false", False), ("true", True),
+])
+def test_the_download_switch(monkeypatch, raw, expected):
+    if raw is None:
+        monkeypatch.delenv(rcd.ENV_S3_DOWNLOAD, raising=False)
+    else:
+        monkeypatch.setenv(rcd.ENV_S3_DOWNLOAD, raw)
+    assert rcd.s3_download_enabled() is expected
+
+
+@pytest.mark.parametrize("raw,expected", [
+    (None, 0.0), ("", 0.0), ("not a number", 0.0), ("-5", 0.0), ("900", 900.0),
+])
+def test_the_refresh_interval(monkeypatch, raw, expected):
+    """An unusable value means "only at start-up" rather than an error: a typo
+    in a tunable must not stop the API booting."""
+    if raw is None:
+        monkeypatch.delenv(rcd.ENV_REFRESH, raising=False)
+    else:
+        monkeypatch.setenv(rcd.ENV_REFRESH, raw)
+    assert rcd.refresh_seconds() == expected
+
+
+# ---------------------------------------------------------------------------
+# The download from S3 (MULTI_SERVICE_PLAN.md D10).
+# ---------------------------------------------------------------------------
+
+def _download_on(monkeypatch, tmp_path, fake, prefix="reason_code_docs"):
+    """The download switched on, writing into `tmp_path`, reading from `fake`."""
+    from tests import s3_fakes
+
+    s3_fakes.install(monkeypatch, fake)
+    monkeypatch.setenv(rcd.ENV_S3_DOWNLOAD, "true")
+    monkeypatch.setenv("REASON_CODE_DOCS_S3_PREFIX", prefix)
+    monkeypatch.setattr(paths, "REASON_CODE_DOCS_DIR", tmp_path / "store")
+    return tmp_path / "store"
+
+
+def _uploaded(fake, prefix, name, document):
+    fake._store(f"{prefix}/{name}.json", json.dumps(document))
+
+
+def test_a_downloaded_store_replaces_the_one_on_disk(tmp_path, monkeypatch):
+    from tests.s3_fakes import FakeS3
+
+    fake = FakeS3()
+    root = _download_on(monkeypatch, tmp_path, fake)
+    _uploaded(fake, "reason_code_docs", "svc", _valid_document())
+
+    assert rcd.download_service_docs() is True
+    assert (root / rcd.SERVICES_DIRNAME / "svc.json").is_file()
+    assert rcd.lookup("SOME_CODE", "E")["outcome"] == "hit"
+
+
+def test_a_store_uploaded_with_its_services_directory_downloads(tmp_path,
+                                                                monkeypatch):
+    """Either layout works: the files under the prefix, or under
+    `<prefix>/services/` as the store keeps them on disk."""
+    from tests.s3_fakes import FakeS3
+
+    fake = FakeS3()
+    root = _download_on(monkeypatch, tmp_path, fake)
+    _uploaded(fake, "reason_code_docs/services", "svc", _valid_document())
+
+    assert rcd.download_service_docs() is True
+    assert (root / rcd.SERVICES_DIRNAME / "svc.json").is_file()
+
+
+def test_objects_that_are_not_service_files_are_ignored(tmp_path, monkeypatch):
+    from tests.s3_fakes import FakeS3
+
+    fake = FakeS3()
+    root = _download_on(monkeypatch, tmp_path, fake)
+    _uploaded(fake, "reason_code_docs", "svc", _valid_document())
+    fake._store("reason_code_docs/README.md", "not a service file")
+    fake._store("reason_code_docs/nested/deeper/svc2.json", "{}")
+
+    assert rcd.download_service_docs() is True
+    assert [path.name for path in
+            sorted((root / rcd.SERVICES_DIRNAME).iterdir())] == ["svc.json"]
+
+
+def _last_good(root, monkeypatch):
+    """A valid copy already on disk, as an earlier run would have left."""
+    services = root / rcd.SERVICES_DIRNAME
+    services.mkdir(parents=True, exist_ok=True)
+    (services / "svc.json").write_text(
+        json.dumps(_valid_document(
+            codes=[{"numeric_code": 1, "reason_code": "SOME_CODE",
+                    "description": "The copy that was already on disk.",
+                    "category": "Technical", "is_retryable": True}])),
+        encoding="utf-8")
+
+
+@pytest.mark.parametrize("break_it,reason", [
+    ("invalid", "the downloaded files do not validate"),
+    ("empty", "the bucket holds no service files"),
+    ("unreadable", "the objects cannot be read"),
+])
+def test_a_failed_download_keeps_the_last_good_copy(tmp_path, monkeypatch,
+                                                   break_it, reason):
+    """The whole point of staging: a bad or missing download costs the packets
+    nothing, because the copy that was serving keeps serving."""
+    from tests.s3_fakes import FakeS3
+
+    fake = FakeS3(fail_reads=(break_it == "unreadable"))
+    root = _download_on(monkeypatch, tmp_path, fake)
+    _last_good(root, monkeypatch)
+    if break_it == "invalid":
+        _uploaded(fake, "reason_code_docs", "svc",
+                  _valid_document(schema_version=99))
+    elif break_it == "unreadable":
+        _uploaded(fake, "reason_code_docs", "svc", _valid_document())
+
+    assert rcd.download_service_docs() is False, reason
+    state = rcd.lookup("SOME_CODE", "E")
+    assert state["outcome"] == "hit"
+    assert "already on disk" in state["text"]
+
+
+def test_the_download_needs_a_bucket(tmp_path, monkeypatch):
+    from tests.s3_fakes import FakeS3
+
+    _download_on(monkeypatch, tmp_path, FakeS3())
+    monkeypatch.delenv("CASEBOOK_S3_BUCKET", raising=False)
+    monkeypatch.delenv("S3_LOGS_BUCKET", raising=False)
+
+    assert rcd.download_service_docs() is False
+
+
+def test_two_objects_naming_one_service_keep_the_last_good_copy(tmp_path,
+                                                               monkeypatch):
+    """The two layouts must not be mixed for one service: whichever won would
+    depend on the listing order."""
+    from tests.s3_fakes import FakeS3
+
+    fake = FakeS3()
+    root = _download_on(monkeypatch, tmp_path, fake)
+    _last_good(root, monkeypatch)
+    _uploaded(fake, "reason_code_docs", "svc", _valid_document())
+    _uploaded(fake, "reason_code_docs/services", "svc", _valid_document())
+
+    assert rcd.download_service_docs() is False
+    assert "already on disk" in rcd.lookup("SOME_CODE", "E")["text"]
+
+
+def test_docs_available_is_true_unless_the_download_has_nothing_yet(tmp_path,
+                                                                   monkeypatch):
+    """What /ready waits on: the first copy only. A refresh serves the copy it
+    has, so it never unreadies a pod that was ready."""
+    from tests.s3_fakes import FakeS3
+
+    fake = FakeS3()
+    root = _download_on(monkeypatch, tmp_path, fake)
+    assert rcd.docs_available() is False
+
+    _uploaded(fake, "reason_code_docs", "svc", _valid_document())
+    assert rcd.download_service_docs() is True
+    assert rcd.docs_available() is True
+
+    monkeypatch.delenv(rcd.ENV_S3_DOWNLOAD, raising=False)
+    monkeypatch.setattr(paths, "REASON_CODE_DOCS_DIR", tmp_path / "nothing here")
+    assert rcd.docs_available() is True, "with the download off, the disk is all "\
+                                        "there is and /ready must not wait"
+
+
+def test_the_readiness_probe_waits_for_the_first_copy(tmp_path, monkeypatch):
+    from fastapi import HTTPException
+
+    from src.api import routes
+    from tests.s3_fakes import FakeS3
+
+    fake = FakeS3()
+    _download_on(monkeypatch, tmp_path, fake)
+    monkeypatch.setattr(routes, "_check_kafka_producer_ready", lambda: True)
+    monkeypatch.setattr("src.core.checkpointer.health_check", lambda: True)
+
+    with pytest.raises(HTTPException) as raised:
+        routes.readiness_check()
+    assert raised.value.status_code == 503
+    assert "reason-code" in str(raised.value.detail).lower()
+
+    _uploaded(fake, "reason_code_docs", "svc", _valid_document())
+    assert rcd.download_service_docs() is True
+    assert routes.readiness_check() == {"status": "ready"}
+
+
+def test_the_background_download_is_not_started_while_it_is_off(monkeypatch):
+    monkeypatch.delenv(rcd.ENV_S3_DOWNLOAD, raising=False)
+    assert rcd.start_background_download() is None
+
+
+# ---------------------------------------------------------------------------
+# Whose file answered: the packet's own service first (MULTI_SERVICE_PLAN.md
+# D10).
+# ---------------------------------------------------------------------------
+
+def _two_service_store(tmp_path):
+    """A store where both services document SHARED_CODE, and only `other`
+    documents OTHER_ONLY."""
+    _store(tmp_path, _valid_document(
+        service="mine",
+        codes=[{"numeric_code": 1, "reason_code": "SHARED_CODE",
+                "description": "Raised by mine when the packet is unreadable.",
+                "category": "Technical", "is_retryable": True}]),
+        name="mine.json")
+    _store(tmp_path, _valid_document(
+        service="other",
+        codes=[{"numeric_code": 2, "reason_code": "SHARED_CODE",
+                "description": "Raised by other when the index is absent.",
+                "category": "Technical", "is_retryable": True},
+               {"numeric_code": 3, "reason_code": "OTHER_ONLY",
+                "description": "Raised by other when the operator is unknown.",
+                "category": "Technical", "is_retryable": False}]),
+        name="other.json")
+    return tmp_path
+
+
+def test_the_packets_own_service_file_answers_alone(tmp_path):
+    """Two services document the same code, and the packet gets its own
+    service's account of it -- not both, which would ask the model to choose."""
+    root = _two_service_store(tmp_path)
+
+    state = rcd.lookup("SHARED_CODE", "E", root=root, service_file="mine")
+
+    assert state["outcome"] == "hit"
+    assert state["scope"] == rcd.SCOPE_OWN
+    assert "unreadable" in state["text"]
+    assert "index is absent" not in state["text"]
+    assert [ref["source"] for ref in state["refs"]] == ["services/mine.json"]
+
+
+def test_another_services_file_answers_only_when_the_own_file_is_silent(tmp_path):
+    """A code the packet's own service does not document is still worth
+    showing -- it may come from a shared library -- but never silently: the
+    text says whose it is."""
+    root = _two_service_store(tmp_path)
+
+    state = rcd.lookup("OTHER_ONLY", "E", root=root, service_file="mine")
+
+    assert state["outcome"] == "hit"
+    assert state["scope"] == rcd.SCOPE_OTHER_SERVICE
+    assert rcd.OTHER_SERVICE_NOTE.format(service="mine") in state["text"]
+    assert "operator is unknown" in state["text"]
+
+
+def test_without_a_service_file_every_file_answers_together(tmp_path):
+    """The shape before services were known, kept for a caller that has no
+    pack: both accounts, and the scope says so."""
+    root = _two_service_store(tmp_path)
+
+    state = rcd.lookup("SHARED_CODE", "E", root=root)
+
+    assert state["scope"] == rcd.SCOPE_ALL
+    assert {ref["source"] for ref in state["refs"]} == {"services/mine.json",
+                                                       "services/other.json"}
+
+
+def test_a_code_nobody_documents_is_a_miss_with_no_scope(tmp_path):
+    root = _two_service_store(tmp_path)
+
+    state = rcd.lookup("NOT_DOCUMENTED", "E", root=root, service_file="mine")
+
+    assert state["outcome"] == "miss"
+    assert state["scope"] is None
+
+
+def test_the_own_file_documenting_another_type_stays_a_miss(tmp_path):
+    """`own` covers the code, so the other services' files are not consulted:
+    "documented, but not for this enrolment type" is the store's answer, and
+    another service's rule would not fix it."""
+    _store(tmp_path, _valid_document(
+        service="mine", codes=[],
+        rules={"total_rules": 1, "rules": [
+            {"rule_id": "R1", "reject_reason_code": "TYPED_CODE",
+             "module": "MAN_DEDUP",
+             "condition_description": "the enrolment type is 'UPDATE'",
+             "description": "Rejected when the enrolment type is 'UPDATE'."}]}),
+        name="mine.json")
+    _store(tmp_path, _valid_document(
+        service="other",
+        codes=[{"numeric_code": 9, "reason_code": "TYPED_CODE",
+                "description": "Raised by other for any type.",
+                "category": "Technical", "is_retryable": False}]),
+        name="other.json")
+
+    state = rcd.lookup("TYPED_CODE", "E", root=tmp_path, service_file="mine")
+
+    assert state["outcome"] == "miss"
+    assert state["requested_type"] == "E"
+
+
+def test_the_pack_supplies_the_enrolment_type_words(tmp_path):
+    """The labels in the rendered text are the service's own, so one service's
+    "Update" is never printed in another's words."""
+    _store(tmp_path, _valid_document(
+        service="mine", codes=[],
+        rules={"total_rules": 1, "rules": [
+            {"rule_id": "R1", "reject_reason_code": "TYPED_CODE",
+             "module": "MAN_DEDUP",
+             "condition_description": "the enrolment type is 'UPDATE'",
+             "description": "Rejected when the enrolment type is 'UPDATE'."}]}),
+        name="mine.json")
+
+    state = rcd.lookup("TYPED_CODE", "U", root=tmp_path, service_file="mine",
+                       type_labels={"U": "Biometric Update (U)"},
+                       type_families={"U": "U"})
+
+    assert state["matched_type"] == "U"
+    assert "Biometric Update (U)" in state["text"]
+    # Without the pack's words, the neutral default.
+    plain = rcd.lookup("TYPED_CODE", "U", root=tmp_path, service_file="mine")
+    assert "Update (U)" in plain["text"]
+    assert "Biometric" not in plain["text"]
+
+
+def test_a_file_not_named_after_its_service_is_an_error(tmp_path):
+    """The file name is how a packet's own file is found, so a mismatch would
+    silently make every one of that service's codes another service's."""
+    errors = _errors(tmp_path, _valid_document(service="svc"), name="other.json")
+
+    assert any("must be named after its service" in error for error in errors)

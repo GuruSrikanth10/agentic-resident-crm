@@ -41,13 +41,15 @@ def test_packet_metrics_record_the_status_the_caller_sets():
     from src.api.routes import _packet_metrics
 
     before = _label_values(metrics.PACKETS_TOTAL,
-                           status="FAILED_TIMEOUT", resolution_source="agent")
+                           status="FAILED_TIMEOUT", resolution_source="agent",
+                           service="unknown")
 
     with _packet_metrics() as outcome:
         outcome["status"] = "FAILED_TIMEOUT"
 
     after = _label_values(metrics.PACKETS_TOTAL,
-                          status="FAILED_TIMEOUT", resolution_source="agent")
+                          status="FAILED_TIMEOUT", resolution_source="agent",
+                          service="unknown")
     assert after == before + 1, "the timeout path must be counted (G15)"
 
 
@@ -57,14 +59,16 @@ def test_packet_metrics_record_even_when_the_body_raises():
     from src.api.routes import _packet_metrics
 
     before = _label_values(metrics.PACKETS_TOTAL,
-                           status="unknown", resolution_source="agent")
+                           status="unknown", resolution_source="agent",
+                           service="unknown")
 
     with pytest.raises(RuntimeError):
         with _packet_metrics() as outcome:
             raise RuntimeError("boom")
 
     after = _label_values(metrics.PACKETS_TOTAL,
-                          status="unknown", resolution_source="agent")
+                          status="unknown", resolution_source="agent",
+                          service="unknown")
     assert after == before + 1
 
 
@@ -74,14 +78,16 @@ def test_runbook_source_collapses_to_a_bounded_label():
     from src.api.routes import _packet_metrics
 
     before = _label_values(metrics.PACKETS_TOTAL,
-                           status="COMPLETED", resolution_source="runbook")
+                           status="COMPLETED", resolution_source="runbook",
+                           service="unknown")
 
     with _packet_metrics() as outcome:
         outcome["status"] = "COMPLETED"
         outcome["source"] = "runbook:SOME_CODE__U@v7"
 
     after = _label_values(metrics.PACKETS_TOTAL,
-                          status="COMPLETED", resolution_source="runbook")
+                          status="COMPLETED", resolution_source="runbook",
+                          service="unknown")
     assert after == before + 1
 
 
@@ -187,7 +193,8 @@ def _runbook_node():
 
 @requires_prometheus
 def test_a_failed_llm_call_is_counted():
-    before = _label_values(metrics.LLM_CALLS, node="investigator", outcome="error")
+    before = _label_values(metrics.LLM_CALLS, node="investigator", outcome="error",
+                           service="unknown")
 
     def boom():
         raise RuntimeError("model unreachable")
@@ -195,7 +202,8 @@ def test_a_failed_llm_call_is_counted():
     with pytest.raises(RuntimeError):
         orch._counted("investigator", boom)
 
-    after = _label_values(metrics.LLM_CALLS, node="investigator", outcome="error")
+    after = _label_values(metrics.LLM_CALLS, node="investigator", outcome="error",
+                          service="unknown")
     assert after == before + 1
 
 
@@ -222,8 +230,6 @@ def test_prompt_fingerprint_is_stable_and_sensitive(tmp_path):
     for name in orch.PROMPT_FILES:
         (prompts / name).parent.mkdir(parents=True, exist_ok=True)
         (prompts / name).write_text("original", encoding="utf-8")
-    (tmp_path.parent / "agent_policy_context.md").write_text("policy",
-                                                             encoding="utf-8")
 
     first = orch.compute_prompt_fingerprint(str(tmp_path))
     assert first == orch.compute_prompt_fingerprint(str(tmp_path)), "must be stable"

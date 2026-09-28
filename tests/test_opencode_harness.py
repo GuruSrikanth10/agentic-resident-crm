@@ -248,9 +248,11 @@ def test_every_payload_enrolment_code_has_one_description():
     two different descriptions of "U"."""
     import src.core.agent_orchestrator as orch
     from src.tools.tool_registry import _ENROLMENT_TYPE_ALIASES
+    from src.utils import service_registry
 
+    # One map now lives in the enu-biometric pack, and both paths read it.
     payload_codes = {code for code in _ENROLMENT_TYPE_ALIASES if len(code) == 1}
-    assert payload_codes <= set(orch.ENROLMENT_TYPE_DISPLAY)
+    assert payload_codes <= set(service_registry.enrolment_labels("enu-biometric"))
 
     def display(code):
         return orch.enrolment_type_display({"packetMetaData": {"enrolmentType": code}})
@@ -282,7 +284,7 @@ def _rejection_reviewer(monkeypatch, agent):
     import src.core.agent_orchestrator as orch
 
     monkeypatch.setattr(orch, "_agent", None)
-    monkeypatch.setattr(orch, "_prompt_fingerprint", orch._prompt_fingerprint)
+    monkeypatch.setattr(orch, "_prompt_fingerprints", orch._prompt_fingerprints)
     monkeypatch.setattr(orch, "get_llm", lambda _tier: MagicMock())
     monkeypatch.setattr(orch, "build_agent", lambda *a, **k: agent)
     monkeypatch.setattr(orch, "get_checkpointer", lambda: None)

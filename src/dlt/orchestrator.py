@@ -276,7 +276,8 @@ def _build_dlt_agent():
 
         res, calls = invoke()
         metrics.record_llm_usage("dlt_investigator", res)
-        metrics.LLM_CALLS.labels(node="dlt_investigator", outcome="ok").inc()
+        metrics.LLM_CALLS.labels(node="dlt_investigator", outcome="ok",
+                                  service="unknown").inc()
         return {"investigation": res["messages"][-1].content,
                 "tool_evidence": mcp_client.merge_evidence(
                     state.get("tool_evidence"), calls)}
@@ -352,7 +353,8 @@ def _build_dlt_agent():
 
         res = invoke()
         metrics.record_llm_usage("dlt_reviewer", res)
-        metrics.LLM_CALLS.labels(node="dlt_reviewer", outcome="ok").inc()
+        metrics.LLM_CALLS.labels(node="dlt_reviewer", outcome="ok",
+                                  service="unknown").inc()
         return {"reviewer_feedback": res["messages"][-1].content,
                 "retry_count": state.get("retry_count", 0) + 1}
 
@@ -390,7 +392,8 @@ def _build_dlt_agent():
 
         res = invoke()
         metrics.record_llm_usage("dlt_synthesis", res)
-        metrics.LLM_CALLS.labels(node="dlt_synthesis", outcome="ok").inc()
+        metrics.LLM_CALLS.labels(node="dlt_synthesis", outcome="ok",
+                                  service="unknown").inc()
         raw = res["messages"][-1].content
 
         finding, error = parse_finding(raw)

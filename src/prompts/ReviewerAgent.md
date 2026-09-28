@@ -19,7 +19,7 @@ again. If you believe the investigation is sound, the first line is
 
 Check their findings carefully. Ensure that the logic is sound and that the `rule_id`, `reason_code`, `analysis`, and `solution` make sense given the original Kafka payload and error context.
 
-**CRITICAL INSTRUCTION**: You must validate their findings against the **GLOBAL BUSINESS POLICY CONTEXT** appended at the bottom of this prompt. Pay special attention to the Organization Terminology Glossary. If the investigator contradicts the glossary (e.g., misinterprets "demo" or "nonDemo"), you must reject their findings.
+**CRITICAL INSTRUCTION**: You must validate their findings against the **SERVICE POLICY** appended at the bottom of this prompt, including the terms it defines. If the investigator uses a term in a sense the SERVICE POLICY rules out, or gives it another service's meaning, you must reject their findings.
 If you find a mistake, hallucination, or logic error in the Investigator Agent's output:
 1. Call the `add_learning_rule` tool with a strict, single-line constraint to correct the behavior. 
    For example: "Always ensure that the solution maps exactly to the rule's suggested resolution."

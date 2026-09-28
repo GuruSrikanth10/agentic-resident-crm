@@ -3,12 +3,12 @@ import json
 import contextvars
 import threading
 import time
-from typing import TypedDict
+from typing import Optional, TypedDict
 from langgraph.graph import StateGraph, START, END
 from langchain_core.messages import HumanMessage
 
-from src.utils import metrics, reason_code_docs
-from src.core import rejection_context
+from src.utils import metrics, reason_code_docs, service_registry
+from src.core import prompt_composer, rejection_context
 from src.core.agent_factory import build_agent
 from src.tools import mcp_client
 from src.utils.llm_utils import get_llm
@@ -46,8 +46,13 @@ logger = get_logger(__name__)
 # reviewer_node is safe under concurrent packets.
 _current_event_id: contextvars.ContextVar[str] = contextvars.ContextVar("current_event_id", default="unknown")
 _current_investigation: contextvars.ContextVar[str] = contextvars.ContextVar("current_investigation", default="")
+#: The packet's service and the pack its agents were built from. Recorded with
+#: a proposed learning rule: a rule learned under one service's policy is that
+#: service's rule until someone decides otherwise.
+_current_service: contextvars.ContextVar[str] = contextvars.ContextVar("current_service", default="unknown")
+_current_pack: contextvars.ContextVar[str] = contextvars.ContextVar("current_pack", default="unknown")
 
-def _counted(node: str, invoke):
+def _counted(node: str, invoke, service: str = "unknown"):
     """Run an LLM invocation, counting failures as well as successes.
 
     Every LLM_CALLS call site recorded a success-shaped outcome (ok, invalid,
@@ -59,7 +64,7 @@ def _counted(node: str, invoke):
     try:
         return invoke()
     except Exception:
-        metrics.LLM_CALLS.labels(node=node, outcome="error").inc()
+        metrics.LLM_CALLS.labels(node=node, outcome="error", service=service).inc()
         raise
 
 
@@ -88,24 +93,19 @@ def is_reviewer_approved(feedback: str) -> bool:
     return False
 
 
-#: How each payload `enrolmentType` is described to the Investigator. One map
-#: for both Investigator paths: the harness and direct paths each carried
-#: their own, and they disagreed -- the harness path had no "Z", the direct
-#: path had no "E" (the code the runbooks are keyed on), and they described
-#: "U" differently. The descriptions follow InvestigatorAgent.md and
-#: agent_policy_context.md: an update is checked 1:N against other residents
-#: as well as 1:1 against its own parent.
-ENROLMENT_TYPE_DISPLAY = {
-    "N": "New Enrolment (1:N deduplication)",
-    "E": "New Enrolment (1:N deduplication)",
-    "U": "Biometric Update (1:N deduplication and 1:1 authentication and append)",
-    "Z": "Reactivation (1:N deduplication and 1:1 authentication and append)",
-}
+def enrolment_type_display(payload: dict, pack: Optional[str] = None) -> str:
+    """How the packet's `enrolmentType` is described to the agents.
 
-
-def enrolment_type_display(payload: dict) -> str:
+    From the pack's `enrolment_types.payload` -- one map per service, read by
+    both Investigator paths. The harness and direct paths each used to carry
+    their own copy, and they disagreed (no "Z" on one, no "E" on the other,
+    two descriptions of "U"). `pack` defaults to the pre-registry pack, whose
+    map is the one both paths used before packs existed. A type the pack does
+    not describe is shown as it arrived, never with another service's words.
+    """
     raw = (payload.get("packetMetaData") or {}).get("enrolmentType", "")
-    return ENROLMENT_TYPE_DISPLAY.get(str(raw).strip().upper(), raw or "Unknown")
+    labels = service_registry.enrolment_labels(pack or service_registry.PRE_REGISTRY_PACK)
+    return labels.get(str(raw).strip().upper(), raw or "Unknown")
 
 
 def _reason_code_of(payload: dict):
@@ -154,8 +154,13 @@ def _resolve_reason_code_doc(state: dict, payload: dict, log):
 
     reason_code = _reason_code_of(payload)
     raw_type = (payload.get("packetMetaData") or {}).get("enrolmentType")
+    service = _service_of(state)
     try:
-        doc_state = reason_code_docs.lookup(reason_code, raw_type)
+        # The pack's own documentation file first, and its enrolment-type
+        # families and labels (MULTI_SERVICE_PLAN.md D10).
+        doc_state = reason_code_docs.lookup(
+            reason_code, raw_type,
+            **service_registry.docs_lookup_options(_pack_of(state)))
     except Exception as e:
         # `lookup` never raises; this guards a bug in it, because a
         # documentation problem must not be able to fail a packet.
@@ -164,9 +169,11 @@ def _resolve_reason_code_doc(state: dict, payload: dict, log):
         doc_state = reason_code_docs.error_state(
             reason_code, f"{type(e).__name__}: {e}")
 
+    scope = str(doc_state.get("scope") or "none")
     metrics.REASON_CODE_DOC_LOOKUPS.labels(
         outcome=doc_state.get("outcome", "error"),
-        match=_doc_match_label(doc_state)).inc()
+        match=_doc_match_label(doc_state),
+        service=service, scope=scope).inc()
     # The sha256, never the text: the text is large, identical for every
     # packet with this reason code, and the digest already says which version
     # the model was shown.
@@ -174,6 +181,7 @@ def _resolve_reason_code_doc(state: dict, payload: dict, log):
              outcome=doc_state.get("outcome"), reason_code=reason_code,
              requested_type=doc_state.get("requested_type"),
              matched_type=doc_state.get("matched_type"),
+             service=service, scope=scope,
              doc_sha256=doc_state.get("sha256"),
              detail=doc_state.get("detail"))
     return doc_state
@@ -235,8 +243,65 @@ def _project_payload(payload: dict) -> dict:
     }
 
 
+def _service_update(state, event_id: str) -> dict:
+    """The service keys to add to graph state, or {} when it already has them.
+
+    The route passes the resolution and the pack in with the payload. A graph
+    invoked without them -- directly, as tests and tools do -- gets them
+    here: the stored artifact first, so the answer agrees with what
+    /fetch-logs decided, and otherwise resolved now (MULTI_SERVICE_PLAN.md
+    D1). The pack is decided here once, so every node and every retry of one
+    packet uses the same one even if the settings change mid-flight.
+    """
+    update = {}
+    resolution = state.get("service_resolution")
+    if not (isinstance(resolution, dict) and resolution.get("service")):
+        resolution, fresh = service_registry.load_or_resolve(
+            get_casebook_storage(), event_id, state.get("payload") or {})
+        if fresh:
+            metrics.record_service_resolution(resolution)
+        update.update(service=resolution["service"], service_resolution=resolution)
+    if not state.get("service_pack"):
+        update["service_pack"] = service_registry.pack_for(resolution)
+    return update
+
+
+def _service_resolution_of(state) -> dict:
+    """The packet's service resolution, from state or -- for a checkpoint
+    written before it was part of the state -- resolved from the payload.
+    Not counted and not stored: this is a re-reading, not an intake."""
+    resolution = state.get("service_resolution")
+    if isinstance(resolution, dict) and resolution.get("service"):
+        return resolution
+    return service_registry.resolve(state.get("payload") or {}).as_dict()
+
+
+def _service_of(state) -> str:
+    return _service_resolution_of(state)["service"]
+
+
+def _pack_of(state) -> str:
+    """The pack this packet's agents are built from (MULTI_SERVICE_PLAN.md D4)."""
+    pack = state.get("service_pack")
+    if isinstance(pack, str) and pack:
+        return pack
+    return service_registry.pack_for(_service_resolution_of(state))
+
+
+def _harness_rule_doc(doc_state) -> str:
+    """What reason_code_doc.md holds for a pack with no rules database: the
+    documentation when the lookup hit, and otherwise the note saying there is
+    no account of the rule -- never an empty file, which would read as one
+    that failed to write."""
+    if (doc_state or {}).get("outcome") == "hit" and doc_state.get("text"):
+        return doc_state["text"]
+    return rejection_context.no_rules_db_note(doc_state)
+
+
 def _write_harness_case_files(case_dir, payload: dict, logs: str, db_rule: str,
-                              tool_evidence: str = "") -> None:
+                              tool_evidence: str = "",
+                              pack: Optional[str] = None,
+                              doc_state: Optional[dict] = None) -> None:
     """Write the evidence the harness Investigator and Reviewer read from disk.
 
     Written to the LOCAL filesystem directly -- not through the storage
@@ -250,6 +315,11 @@ def _write_harness_case_files(case_dir, payload: dict, logs: str, db_rule: str,
     retry always runs direct, and so does a harness failure's fallback -- and
     without this file it would reject every finding that rests on a tool
     result as unsupported.
+
+    For a pack with no rules database (MULTI_SERVICE_PLAN.md Phase 3),
+    context.json has no `db_rule` and the documentation goes to
+    reason_code_doc.md, which the task's RULE SOURCE section names. A pack
+    with a rules database gets exactly the files it always did.
     """
     case_dir.mkdir(parents=True, exist_ok=True)
     if logs and logs != "Log fetching disabled.":
@@ -260,12 +330,19 @@ def _write_harness_case_files(case_dir, payload: dict, logs: str, db_rule: str,
     else:
         # A file from an earlier pass must not outlive the evidence it held.
         evidence_file.unlink(missing_ok=True)
+    context = {
+        "payload": _project_payload(payload),
+        "enrolment_type": enrolment_type_display(payload, pack),
+    }
+    rule_doc_file = case_dir / prompt_composer.HARNESS_RULE_DOC_FILE
+    if service_registry.rule_source_of(pack or service_registry.PRE_REGISTRY_PACK) \
+            == service_registry.RULES_DB:
+        context["db_rule"] = db_rule
+        rule_doc_file.unlink(missing_ok=True)
+    else:
+        rule_doc_file.write_text(_harness_rule_doc(doc_state), encoding="utf-8")
     with open(case_dir / "context.json", "w", encoding="utf-8") as f:
-        json.dump({
-            "payload": _project_payload(payload),
-            "enrolment_type": enrolment_type_display(payload),
-            "db_rule": db_rule,
-        }, f, indent=2, ensure_ascii=False)
+        json.dump(context, f, indent=2, ensure_ascii=False)
 
 
 #: What the Investigator's tools returned: a local file for the harness
@@ -283,6 +360,20 @@ def _with_tools_section(prompt: str, role: str) -> str:
     """
     section = mcp_client.prompt_section(role, opencode=True)
     return f"{prompt.rstrip()}\n\n{section}\n" if section else prompt
+
+
+def _with_service_context(prompt: str, role: str, state) -> str:
+    """A harness prompt with the packet's SERVICE CONTEXT appended.
+
+    Appended after the template rather than through a placeholder, the way
+    the tools section is: the templates stay renderable without a pack, and
+    what each service adds sits in one place at the end, which is where the
+    templates tell the agent to look for it (MULTI_SERVICE_PLAN.md 5.5).
+    """
+    event_id = (state.get("payload") or {}).get("eventId", "unknown")
+    block = prompt_composer.harness_service_context(
+        role, _service_resolution_of(state), _pack_of(state), event_id=event_id)
+    return f"{prompt.rstrip()}\n\n{block}\n"
 
 
 def _persist_tool_evidence(event_id: str, records: list, log) -> None:
@@ -341,6 +432,17 @@ class GraphState(TypedDict):
     #: is given it as evidence -- it sees what the Investigator saw (D8) -- and
     #: a retry is given it so a lookup is not repeated for nothing.
     tool_evidence: list
+    #: Which service the packet belongs to, and how that was decided
+    #: (`utils/service_registry`, MULTI_SERVICE_PLAN.md D1). Passed in by the
+    #: route with the payload; `fetch_logs_node` fills it for an invocation
+    #: that did not.
+    service: str
+    service_resolution: dict
+    #: The pack the packet's agents are built from, decided once per packet
+    #: (`service_registry.pack_for`). Usually the service itself; `_default`
+    #: for an unresolved packet let through; the pre-registry pack for a packet
+    #: the gate would skip, when it is only recording.
+    service_pack: str
 
 _agent = None
 
@@ -359,13 +461,16 @@ _agent_catalog = None
 #: `core/checkpointer.py` and `sources/k8s/client.py`.
 _agent_lock = threading.Lock()
 
-#: Hash of the prompts and policy the cached graph was built from.
-#: Written into every casebook so an accuracy movement can be attributed to a
-#: prompt change rather than merely coinciding with one. The rule side of this
-#: is already solved by `rule_fingerprint`; the prompt side had no equivalent,
-#: so after Phase D there was an accuracy figure per reason code and no way to
-#: tell what moved it (G23).
-_prompt_fingerprint = "unknown"
+#: Hash of the prompts, pack and tools each pack's agents are built from,
+#: {pack: "sha256:..."}. Written into every casebook so an accuracy movement
+#: can be attributed to a prompt change rather than merely coinciding with
+#: one. The rule side of this is already solved by `rule_fingerprint`; the
+#: prompt side had no equivalent, so after Phase D there was an accuracy
+#: figure per reason code and no way to tell what moved it (G23). Per pack
+#: because an edit to one service's pack changes only that service's prompts
+#: (MULTI_SERVICE_PLAN.md D13). Emptied whenever the graph is rebuilt, since
+#: the tool catalog it was built from is part of every fingerprint.
+_prompt_fingerprints: dict = {}
 
 PROMPT_FILES = (
     "InvestigatorAgent.md",
@@ -383,12 +488,19 @@ PROMPT_FILES = (
     # either is a prompt change and has to move the fingerprint too.
     "harness/rules/rejection.md",
     "harness/rules/dlt.md",
+    # Learned rules that hold for every service; absent until one is promoted.
+    prompt_composer.GENERIC_LEARNED_RULES,
 )
 
 
-def compute_prompt_fingerprint(base_dir: str) -> str:
+def compute_prompt_fingerprint(base_dir: str, pack: Optional[str] = None) -> str:
     """SHA256 over the agent system prompts, harness templates and rules,
-    the policy, AGENTS.md, and the tool configuration the agents are given.
+    AGENTS.md, the service pack, and the tool configuration the agents are
+    given.
+
+    `pack` names the service pack whose text is composed into the prompts;
+    its digest covers its service.json and every text file. None hashes no
+    pack at all.
 
     Sorted and length-prefixed so the digest cannot be changed by reordering
     or by content shifting across a boundary.
@@ -397,7 +509,6 @@ def compute_prompt_fingerprint(base_dir: str) -> str:
 
     digest = hashlib.sha256()
     paths = [os.path.join(base_dir, "prompts", name) for name in PROMPT_FILES]
-    paths.append(os.path.join(os.path.dirname(base_dir), "agent_policy_context.md"))
     # opencode loads the root AGENTS.md into every harness session.
     paths.append(os.path.join(os.path.dirname(base_dir), "AGENTS.md"))
 
@@ -413,13 +524,21 @@ def compute_prompt_fingerprint(base_dir: str) -> str:
         digest.update(str(len(body)).encode("utf-8"))
         digest.update(body)
 
-    # What the agents are told on top of those files: each role's tools, their
-    # descriptions and argument schemas, the AVAILABLE TOOLS sections, and the
-    # operating note every agent gets. Switching a toolset on or off changes
-    # what the agents can see, so it moves the fingerprint like a prompt edit.
+    # What the agents are told on top of those files: the service pack, each
+    # role's tools, their descriptions and argument schemas, the AVAILABLE
+    # TOOLS sections, and the operating note every agent gets. Switching a
+    # toolset on or off changes what the agents can see, so it moves the
+    # fingerprint like a prompt edit.
     from src.core.agent_factory import OPERATING_MODE
-    for name, body in (("agent_tools", mcp_client.fingerprint_material()),
-                       ("operating_mode", OPERATING_MODE)):
+    extras = []
+    if pack:
+        found = service_registry.pack(pack)
+        # A pack that is not in the registry is hashed as missing rather than
+        # skipped, so it can never share a fingerprint with no pack at all.
+        extras.append(("service_pack", f"{pack}\t{found.sha256 if found else 'missing'}"))
+    extras += [("agent_tools", mcp_client.fingerprint_material()),
+               ("operating_mode", OPERATING_MODE)]
+    for name, body in extras:
         encoded = body.encode("utf-8")
         digest.update(name.encode("utf-8"))
         digest.update(str(len(encoded)).encode("utf-8"))
@@ -428,12 +547,20 @@ def compute_prompt_fingerprint(base_dir: str) -> str:
     return "sha256:" + digest.hexdigest()
 
 
-def prompt_fingerprint() -> str:
-    return _prompt_fingerprint
+def prompt_fingerprint(pack: Optional[str] = None) -> str:
+    """The fingerprint of the prompts `pack`'s agents are built with -- the
+    pre-registry pack's when none is named. Computed on first use and kept
+    until the graph is rebuilt."""
+    pack = pack or service_registry.PRE_REGISTRY_PACK
+    found = _prompt_fingerprints.get(pack)
+    if found is None:
+        found = compute_prompt_fingerprint(os.path.dirname(os.path.dirname(__file__)), pack)
+        _prompt_fingerprints[pack] = found
+    return found
 
 
 def get_agent():
-    global _agent, _prompt_fingerprint
+    global _agent
 
     # Fast path without the lock: a built graph is only ever replaced, never
     # mutated, and an unsynchronised read of a published reference is safe.
@@ -450,15 +577,20 @@ def get_agent():
 
 def _build_agent():
     """Construct the graph. Caller must hold `_agent_lock`."""
-    global _agent, _prompt_fingerprint, _agent_catalog
+    global _agent, _prompt_fingerprints, _agent_catalog
 
     logger.info("Building the agent graph")
-    # Fetched before anything reads it, so the fingerprint and all four
-    # agents describe the same tools.
+    # Fetched before anything reads it, so the fingerprints and every agent
+    # describe the same tools.
     _agent_catalog = mcp_client.current_catalog()
     base_dir = os.path.dirname(os.path.dirname(__file__))
-    _prompt_fingerprint = compute_prompt_fingerprint(base_dir)
-    logger.info("Prompt fingerprint computed", prompt_fingerprint=_prompt_fingerprint)
+    # The packs whose agents are built now rather than on first use: every
+    # enabled service's, and the pre-registry pack in record mode.
+    prebuilt_packs = service_registry.packs_to_prebuild()
+    _prompt_fingerprints = {}
+    for pack in prebuilt_packs:
+        logger.info("Prompt fingerprint computed", service_pack=pack,
+                    prompt_fingerprint=prompt_fingerprint(pack))
     llm = get_llm("complex")
     # DELIBERATE DEVIATION (ENHANCEMENT_PLAN section 7.1, AUDIT_2026_08 G6).
     # This reads "complex" on purpose. The Reviewer is a bounded verdict task
@@ -471,35 +603,13 @@ def _build_agent():
     # fix turns that test green again and the xfail marker must then come off.
     simple_llm = get_llm("complex")
     
-    def load_prompt(filename, with_policy: bool = True):
-        """Read an agent prompt, optionally appending the business policy.
+    # The LogFilter is the one agent with no service pack. It strips log lines
+    # not belonging to a target event id -- a mechanical text operation with
+    # no use for business policy, which it has never been given (G24).
+    with open(os.path.join(base_dir, "prompts", "LogFilterAgent.md"), "r",
+              encoding="utf-8") as f:
+        log_filter_prompt = f.read()
 
-        `with_policy` exists because the policy document was appended to every
-        prompt including the LogFilter's. That agent strips log lines not
-        belonging to a target event id -- a mechanical text operation with no
-        use for business policy -- so the whole document rode along in the
-        context window of every filter call for nothing (G24).
-        """
-        with open(os.path.join(base_dir, "prompts", filename), "r", encoding="utf-8") as f:
-            prompt = f.read()
-
-        if not with_policy:
-            return prompt
-
-        policy_path = os.path.join(os.path.dirname(base_dir), "agent_policy_context.md")
-        if os.path.exists(policy_path):
-            with open(policy_path, "r", encoding="utf-8") as f:
-                policy = f.read()
-            # Inject policy context directly into the prompt so the LLM sees it.
-            prompt += "\n\n### GLOBAL BUSINESS POLICY CONTEXT\n" + policy
-
-        return prompt
-
-    investigator_prompt = load_prompt("InvestigatorAgent.md")
-    reviewer_prompt = load_prompt("ReviewerAgent.md")
-    synthesis_prompt = load_prompt("SynthesisAgent.md")
-    log_filter_prompt = load_prompt("LogFilterAgent.md", with_policy=False)
-    
     def fetch_logs_node(state: GraphState):
         payload = state.get("payload", {})
         event_id = payload.get("eventId", "")
@@ -520,10 +630,12 @@ def _build_agent():
         # this split, or /analyze-rejection racing ahead of /fetch-logs)
         # working exactly as before -- the graph's node set, edges, and
         # thread_id=event_id checkpoint keying are unchanged either way.
+        service_update = _service_update(state, event_id)
         cached = get_casebook_storage().load_artifact(event_id, "fetched_logs.txt")
         if cached is not None:
             log.info("Using logs persisted by the fast consumer", state="LOG_FETCHER")
-            return {"logs": cached, "logs_artifact": "fetched_logs.txt"}
+            return {"logs": cached, "logs_artifact": "fetched_logs.txt",
+                    **service_update}
 
         log.info("No persisted logs found; fetching live", state="LOG_FETCHER")
         logs = fetch_and_persist_logs(event_id, payload)
@@ -531,7 +643,8 @@ def _build_agent():
         # Both branches name the same artifact: `fetch_and_persist_logs` writes
         # `fetched_logs.txt` on the live path, which is the object the cache
         # branch above just read.
-        return {"logs": logs, "logs_artifact": "fetched_logs.txt"}
+        return {"logs": logs, "logs_artifact": "fetched_logs.txt",
+                **service_update}
 
     def runbook_lookup_node(state: GraphState):
         mode = os.environ.get("RUNBOOK_MODE", "off").lower()
@@ -557,6 +670,14 @@ def _build_agent():
         # to fail agent.invoke() outright and DLQ every runbook-matching
         # packet (F2).
         try:
+            # A runbook is derived from a rules-table rule and checked against
+            # it below, and runbooks are not yet kept per service
+            # (MULTI_SERVICE_PLAN.md Phase 5). A pack with no rules database
+            # therefore never uses one: it could only be another service's.
+            pack = _pack_of(state)
+            if service_registry.rule_source_of(pack) != service_registry.RULES_DB:
+                return _miss("rule_source_none")
+
             exec_summary = payload.get("packetExecutionSummary") or {}
             error_data = exec_summary.get("errorData") or []
             reason_code = None
@@ -579,7 +700,8 @@ def _build_agent():
             # Staleness check: serve the runbook only while the DB rule it was
             # derived from is unchanged. Fingerprint the *parsed* rows, not the
             # raw to_json string (F2).
-            rules = lookup_rule_for(reason_code, packet_type)
+            rules = lookup_rule_for(reason_code, packet_type,
+                                    type_filter=service_registry.rule_type_filter(pack))
             if rules:
                 current_fp = generate_rule_fingerprint(rules)
                 if current_fp != runbook["rule_fingerprint"]:
@@ -620,15 +742,51 @@ def _build_agent():
             return "filter"
         return "investigate"
 
-    # Create agents once during graph construction, not per invocation. Each
-    # is a deep agent (core/agent_factory.py), which also gives it the tools
-    # its role gets from the MCP tool servers. The system prompt is
-    # fixed here, so every node below sends only its user message.
-    investigator_agent = build_agent("investigator", llm, investigator_prompt)
+    # Agents are built once, not per invocation. Each is a deep agent
+    # (core/agent_factory.py), which also gives it the tools its role gets
+    # from the MCP tool servers. Its system prompt is fixed when it is built,
+    # so every node below sends only its user message.
+    #
+    # The Investigator, the Reviewer and Synthesis each have one agent per
+    # service pack, because the pack is part of the system prompt
+    # (MULTI_SERVICE_PLAN.md D4). The pool lives in this closure, so a graph
+    # rebuilt for a stale tool catalog rebuilds its agents with it. The
+    # prebuilt packs are built here, in the order the agents always were;
+    # any other pack is built the first time a packet needs it.
+    pool: dict = {}
+    pool_lock = threading.Lock()
+
+    def _new_agent(role: str, pack: str):
+        system_prompt = prompt_composer.compose_system_prompt(role, pack)
+        if role == "investigator":
+            return build_agent("investigator", llm, system_prompt)
+        if role == "synthesis":
+            return build_agent("synthesis", llm, system_prompt, tools=[queue_tool])
+        # 2.2: the Reviewer would be a natural fit for the cheaper "simple"
+        # tier. It is NOT on that tier today -- `simple_llm` is bound to
+        # "complex" by the deliberate deviation documented at its assignment
+        # above. The name is kept so the one-word fix stays a one-word fix.
+        return build_agent("reviewer", simple_llm, system_prompt,
+                           tools=[add_learning_rule])
+
+    def agent_for(role: str, pack: str):
+        """The `role` agent built from `pack`, built on first use and kept."""
+        key = (role, pack)
+        agent = pool.get(key)
+        if agent is None:
+            with pool_lock:
+                agent = pool.get(key)
+                if agent is None:
+                    agent = _new_agent(role, pack)
+                    pool[key] = agent
+        return agent
+
+    for pack in prebuilt_packs:
+        agent_for("investigator", pack)
     log_filter_agent = build_agent("log_filter", llm, log_filter_prompt)
     queue_tool = get_tool_by_name("queue_for_replay")
-    synthesis_agent = build_agent("synthesis", llm, synthesis_prompt,
-                                  tools=[queue_tool])
+    for pack in prebuilt_packs:
+        agent_for("synthesis", pack)
 
     from langchain_core.tools import tool
     from datetime import datetime
@@ -671,6 +829,10 @@ def _build_agent():
             "proposed_rule": rule_text,
             "reviewer_reasoning": reasoning,
             "investigator_original_output": _current_investigation.get(),
+            # Where the rule was learned: promote_rules.py writes it to this
+            # pack's learned_rules.md, not to a prompt every service reads.
+            "service": _current_service.get(),
+            "service_pack": _current_pack.get(),
         }
         try:
             with FileLock(lock_file, timeout=10):
@@ -685,17 +847,13 @@ def _build_agent():
         """Propose a new permanent rule to fix Investigator mistakes."""
         return queue_learning_rule(rule_text, reasoning)
 
-    # 2.1: built once here (not per-review) now that the tool reads its
+    # 2.1: built once per pack (not per review) now that the tool reads its
     # per-packet context from contextvars instead of a closure over
     # event_id/investigation -- rebuilding a React agent (with the tool
     # schema binding that implies) on every single review call, and every
     # retry loop, was pure waste.
-    # 2.2: the Reviewer would be a natural fit for the cheaper "simple" tier.
-    # It is NOT on that tier today -- `simple_llm` is bound to "complex" by the
-    # deliberate deviation documented at its assignment above. The name is kept
-    # so the one-word fix stays a one-word fix.
-    reviewer_agent = build_agent("reviewer", simple_llm, reviewer_prompt,
-                                 tools=[add_learning_rule])
+    for pack in prebuilt_packs:
+        agent_for("reviewer", pack)
 
     def filter_logs_node(state: GraphState):
         event_id = state.get("payload", {}).get("eventId", "unknown")
@@ -720,7 +878,7 @@ def _build_agent():
                 HumanMessage(content=prompt)
             ]})
             
-        res = _counted("log_filter", invoke_filter)
+        res = _counted("log_filter", invoke_filter, _service_of(state))
         filtered_logs = res["messages"][-1].content
 
         # On a failed save the pointer stays on `fetched_logs.txt`: that object
@@ -747,19 +905,29 @@ def _build_agent():
         feedback = state.get("reviewer_feedback", "")
         db_rule = state.get("db_rule", "")
         investigation = state.get("investigation", "")
+        # The pack whose agent investigates this packet, and the service it
+        # was placed in -- equal unless the gate is only recording.
+        pack = _pack_of(state)
+        service = _service_of(state)
+        # Where this pack's rule lives (MULTI_SERVICE_PLAN.md D6). Only a
+        # `rules_db` pack is looked up in the rules table; for a `none` pack
+        # the rule is in its documentation, and db_rule stays empty.
+        rule_source = service_registry.rule_source_of(pack)
 
         # Optimize DB Calls: Fetch rule in Python if not already fetched
-        if not db_rule:
+        if not db_rule and rule_source == rejection_context.RULES_DB:
             reason_code = _reason_code_of(payload)
 
             if reason_code:
                 # Lookup + enrolment-type filtering now live together in
                 # tool_registry.lookup_rule_text; this node previously carried
                 # its own copy of the filter, which drifted from the three
-                # runbook call sites' copy (F2).
+                # runbook call sites' copy (F2). The filter is the pack's.
                 packet_type = payload.get("packetMetaData", {}).get("enrolmentType", "")
                 try:
-                    db_rule = lookup_rule_text(reason_code, packet_type)
+                    db_rule = lookup_rule_text(
+                        reason_code, packet_type,
+                        type_filter=service_registry.rule_type_filter(pack))
                     # If db_rule is empty or indicates failure, fallback to hardcoded description
                     if db_rule.startswith("Rule not found") or db_rule == "[]":
                         fallback_desc = get_error_description(reason_code)
@@ -811,18 +979,19 @@ def _build_agent():
             # storage backend — always on disk).
             from src.utils.paths import LOCAL_CASESHEETS_DIR
             case_dir = LOCAL_CASESHEETS_DIR / f"casebook_{event_id}"
-            _write_harness_case_files(case_dir, payload, logs, db_rule)
-            etype_display = enrolment_type_display(payload)
+            _write_harness_case_files(case_dir, payload, logs, db_rule, pack=pack,
+                                      doc_state=doc_state)
+            etype_display = enrolment_type_display(payload, pack)
 
             output_path = str(case_dir / "investigation.json")
 
             from src.utils.prompt_loader import render as render_prompt
-            harness_prompt = _with_tools_section(render_prompt(
+            harness_prompt = _with_tools_section(_with_service_context(render_prompt(
                 "RejectionInvestigator",
                 event_id=event_id,
                 etype_display=etype_display,
                 output_path=output_path,
-            ), "investigator")
+            ), "investigator", state), "investigator")
 
             try:
                 # No `timeout=` here: opencode_runner._task_timeout() is the
@@ -851,6 +1020,9 @@ def _build_agent():
                 # it explores the corpus itself, and leaving its prompt alone
                 # keeps the two paths comparable. The state is carried anyway
                 # so the Reviewer and the casebook see the same shape on both.
+                # A pack with no rules database is the exception: its
+                # documentation is the only rule there is, so it is written
+                # to reason_code_doc.md (MULTI_SERVICE_PLAN.md Phase 3).
                 return {"investigation": investigation, "db_rule": db_rule,
                         "reason_code_doc": doc_state,
                         "investigator_path": "harness",
@@ -868,17 +1040,20 @@ def _build_agent():
             # Assembled in rejection_context, in a fixed order and under
             # REJECTION_PROMPT_MAX_CHARS. Both branches send the same
             # document: the retry reuses the one already in state.
+            note = prompt_composer.service_note(_service_resolution_of(state), pack)
             if is_retry:
                 prompt, log_trimmed = rejection_context.build_retry_prompt(
                     previous_investigation=investigation, feedback=feedback,
                     doc_state=doc_state, db_rule=db_rule,
-                    enrolment_display=enrolment_type_display(payload),
-                    logs=logs, tool_evidence=prior_tool_evidence)
+                    enrolment_display=enrolment_type_display(payload, pack),
+                    logs=logs, tool_evidence=prior_tool_evidence,
+                    service_note=note, rule_source=rule_source)
             else:
                 prompt, log_trimmed = rejection_context.build_investigation_prompt(
                     doc_state=doc_state, db_rule=db_rule,
-                    enrolment_display=enrolment_type_display(payload),
-                    payload_projection=_project_payload(payload), logs=logs)
+                    enrolment_display=enrolment_type_display(payload, pack),
+                    payload_projection=_project_payload(payload), logs=logs,
+                    service_note=note, rule_source=rule_source)
             if log_trimmed:
                 metrics.REJECTION_PROMPT_TRIMS.labels(node="investigator").inc()
                 log.warning("Trimmed the logs to fit REJECTION_PROMPT_MAX_CHARS",
@@ -910,14 +1085,21 @@ def _build_agent():
             prompt = f"Kafka Payload: {json.dumps(_project_payload(payload))}\n\n"
 
             # Enrolment type is the single most important framing fact for a
-            # rejection: New Enrolment (N) follows 1:N dedup rules, Biometric
-            # Update (U) follows 1:1 auth-and-append rules. Stating it
-            # explicitly prevents the LLM from missing it inside the JSON.
-            prompt += f"Enrolment Type: {enrolment_type_display(payload)}\n\n"
+            # rejection, and each service's pack says what each type means.
+            # Stating it explicitly prevents the LLM from missing it inside
+            # the JSON.
+            prompt += f"Enrolment Type: {enrolment_type_display(payload, pack)}\n\n"
 
             if logs and logs != "Log fetching disabled.":
                 prompt += f"Elasticsearch Logs: {logs}\n\n"
-            prompt += f"Database Rule Configuration:\n{db_rule}\n\n"
+            if rule_source == rejection_context.RULES_DB:
+                prompt += f"Database Rule Configuration:\n{db_rule}\n\n"
+            else:
+                # No rules database, and (on this branch) the documentation
+                # is off: say so, rather than send an empty rule section that
+                # would read as a lookup that failed.
+                prompt += (f"{rejection_context.RULE_SOURCE}: "
+                           f"{rejection_context.no_rules_db_note(doc_state)}\n\n")
 
         @llm_breaker
         @retry_transient
@@ -926,14 +1108,15 @@ def _build_agent():
             # lookups of an attempt that raised never pose as the evidence of
             # the run that produced the answer.
             with mcp_client.recording() as calls:
-                result = investigator_agent.invoke({"messages": [
+                result = agent_for("investigator", pack).invoke({"messages": [
                     HumanMessage(content=prompt)
                 ]})
             return result, calls
 
-        res, calls = _counted("investigator", invoke_investigator)
+        res, calls = _counted("investigator", invoke_investigator, service)
         metrics.record_llm_usage("investigator", res)
-        metrics.LLM_CALLS.labels(node="investigator", outcome="ok").inc()
+        metrics.LLM_CALLS.labels(node="investigator", outcome="ok",
+                                 service=service).inc()
         tool_evidence = mcp_client.merge_evidence(state.get("tool_evidence"), calls)
         if calls:
             _persist_tool_evidence(event_id, tool_evidence, log)
@@ -949,11 +1132,16 @@ def _build_agent():
         log = logger.bind(event_id=event_id)
         log.info("Reviewer node started", state="REVIEWING")
 
+        pack = _pack_of(state)
+        service = _service_of(state)
+
         # Set the per-packet context the module-scope add_learning_rule tool
         # reads (see its definition above) instead of closing over these
         # values directly.
         _current_event_id.set(event_id)
         _current_investigation.set(investigation)
+        _current_service.set(service)
+        _current_pack.set(pack)
 
         # Check if the rejection lane runs on the opencode harness. Per lane,
         # not global: the DLT lane can stay on opencode while this one moves
@@ -973,11 +1161,11 @@ def _build_agent():
             output_path = str(case_dir / "review.json")
 
             from src.utils.prompt_loader import render as render_prompt
-            harness_prompt = _with_tools_section(render_prompt(
+            harness_prompt = _with_tools_section(_with_service_context(render_prompt(
                 "RejectionReviewer",
                 event_id=event_id,
                 output_path=output_path,
-            ), "reviewer")
+            ), "reviewer", state), "reviewer")
 
             try:
                 # Inside the try, and the evidence rewritten rather than
@@ -988,7 +1176,9 @@ def _build_agent():
                 _write_harness_case_files(case_dir, state.get("payload", {}),
                                           state.get("logs", ""),
                                           state.get("db_rule", ""),
-                                          tool_evidence=tool_evidence)
+                                          tool_evidence=tool_evidence,
+                                          pack=pack,
+                                          doc_state=state.get("reason_code_doc"))
                 (case_dir / "investigation_text.txt").write_text(
                     investigation, encoding="utf-8")
 
@@ -1040,9 +1230,12 @@ def _build_agent():
                 investigation=investigation,
                 doc_state=state.get("reason_code_doc"),
                 db_rule=state.get("db_rule", ""),
-                enrolment_display=enrolment_type_display(payload),
+                enrolment_display=enrolment_type_display(payload, pack),
                 payload_projection=_project_payload(payload),
-                logs=state.get("logs"), tool_evidence=tool_evidence)
+                logs=state.get("logs"), tool_evidence=tool_evidence,
+                service_note=prompt_composer.service_note(
+                    _service_resolution_of(state), pack),
+                rule_source=service_registry.rule_source_of(pack))
             if log_trimmed:
                 metrics.REJECTION_PROMPT_TRIMS.labels(node="reviewer").inc()
                 log.warning("Trimmed the logs to fit REJECTION_PROMPT_MAX_CHARS",
@@ -1053,13 +1246,13 @@ def _build_agent():
         @llm_breaker
         @retry_transient
         def invoke_reviewer():
-            return reviewer_agent.invoke({"messages": [
+            return agent_for("reviewer", pack).invoke({"messages": [
                 HumanMessage(content=prompt)
             ]})
 
-        res = _counted("reviewer", invoke_reviewer)
+        res = _counted("reviewer", invoke_reviewer, service)
         metrics.record_llm_usage("reviewer", res)
-        metrics.LLM_CALLS.labels(node="reviewer", outcome="ok").inc()
+        metrics.LLM_CALLS.labels(node="reviewer", outcome="ok", service=service).inc()
         feedback = res["messages"][-1].content
         # The verdict text, truncated. Without it a rejection loop is
         # undiagnosable from the logs alone -- "Reviewer REJECTED findings"
@@ -1128,19 +1321,21 @@ def _build_agent():
         log = logger.bind(event_id=event_id)
         log.info("Synthesis node started", state="SYNTHESIZING")
         investigation = state.get("investigation", "")
+        pack = _pack_of(state)
+        service = _service_of(state)
         prompt = f"Create the final JSON casebook based strictly on this approved investigation:\n{investigation}"
         prompt += _synthesis_doc_guidance(state.get("reason_code_doc"))
 
         @llm_breaker
         @retry_transient
         def invoke_synthesis():
-            return synthesis_agent.invoke({"messages": [
+            return agent_for("synthesis", pack).invoke({"messages": [
                 HumanMessage(content=prompt)
             ]})
 
-        res = _counted("synthesis", invoke_synthesis)
+        res = _counted("synthesis", invoke_synthesis, service)
         metrics.record_llm_usage("synthesis", res)
-        metrics.LLM_CALLS.labels(node="synthesis", outcome="ok").inc()
+        metrics.LLM_CALLS.labels(node="synthesis", outcome="ok", service=service).inc()
         synthesis_content = res["messages"][-1].content
 
         # Validate against the declared contract, and repair once. A malformed
@@ -1151,7 +1346,8 @@ def _build_agent():
         if parsed is None:
             log.warning("Synthesis output failed validation; requesting a repair",
                         error=error)
-            metrics.LLM_CALLS.labels(node="synthesis", outcome="invalid").inc()
+            metrics.LLM_CALLS.labels(node="synthesis", outcome="invalid",
+                                     service=service).inc()
 
             repair_prompt = (
                 f"Your previous response was rejected: {error}\n\n"
@@ -1164,11 +1360,11 @@ def _build_agent():
             @llm_breaker
             @retry_transient
             def invoke_repair():
-                return synthesis_agent.invoke({"messages": [
+                return agent_for("synthesis", pack).invoke({"messages": [
                     HumanMessage(content=repair_prompt)
                 ]})
 
-            res = _counted("synthesis", invoke_repair)
+            res = _counted("synthesis", invoke_repair, service)
             metrics.record_llm_usage("synthesis", res)
             synthesis_content = res["messages"][-1].content
             parsed, error = parse_synthesis(synthesis_content)
@@ -1178,7 +1374,8 @@ def _build_agent():
             # validated action, and inventing one would be worse than saying so.
             log.error("Synthesis output invalid after repair; escalating",
                       error=error)
-            metrics.LLM_CALLS.labels(node="synthesis", outcome="unrepairable").inc()
+            metrics.LLM_CALLS.labels(node="synthesis", outcome="unrepairable",
+                                     service=service).inc()
             synthesis_content = json.dumps({
                 "rejection_description": (
                     "ESCALATED: the Synthesis agent did not produce a valid "
@@ -1189,14 +1386,19 @@ def _build_agent():
                 "resident_action": "PENDING",
             })
         else:
+            # A packet analysed with the `_default` pack had no service
+            # policy applied, which caps its confidence (MULTI_SERVICE_PLAN.md
+            # D5) the way incomplete logs do.
             parsed, abstained, reason = apply_confidence_policy(
-                parsed, logs=state.get("logs", "")
+                parsed, logs=state.get("logs", ""),
+                default_pack=pack == service_registry.DEFAULT_PACK,
             )
             if reason:
                 log.warning("Confidence policy applied", detail=reason,
                             abstained=abstained)
             if abstained:
-                metrics.LLM_CALLS.labels(node="synthesis", outcome="abstained").inc()
+                metrics.LLM_CALLS.labels(node="synthesis", outcome="abstained",
+                                         service=service).inc()
             synthesis_content = parsed.model_dump_json()
 
         log.info("Synthesis finished")

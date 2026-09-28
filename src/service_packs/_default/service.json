@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "service": "_default",
+  "display_name": "Unregistered service (default pack)",
+  "match": {
+    "stages": [],
+    "sub_stages": [],
+    "source_topics": []
+  },
+  "rule_source": {"type": "none"},
+  "tools": {"include": [], "exclude": []}
+}

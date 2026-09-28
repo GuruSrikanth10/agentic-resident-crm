@@ -6,6 +6,7 @@ Read the investigation:
 Read the case evidence:
 - local_casesheets/casebook_{{event_id}}/context.json (payload, enrolment type, DB rule)
 - local_casesheets/casebook_{{event_id}}/supported_logs.txt (the log trace — may be absent or incomplete)
+- local_casesheets/casebook_{{event_id}}/reason_code_doc.md (the reason code documentation — present only for a service with no rules database, and then it is the rule)
 - local_casesheets/casebook_{{event_id}}/tool_evidence.txt (what the Investigator's tools returned — present only when it used tools)
 
 ## Reasoning hierarchy
@@ -38,10 +39,10 @@ lacking log citations when no logs were available.
 
 1. Reason code misapplication: verify the investigation's explanation of the
    reason code matches what the DB rule and service documentation say.
-2. Glossary violations: 'demo' = face modality, 'nonDemo' = fingerprints and
-   iris. 'TD' = all nonDemo matched.
-3. Enrolment type misapplication: N / E = 1:N dedup, U = 1:N dedup plus 1:1
-   auth and append against its own parent, MBU = treated as 1:N.
+2. Terminology violations: a term used contrary to the SERVICE CONTEXT and
+   SERVICE POLICY at the end of this task, or given another service's meaning.
+3. Enrolment type misapplication: rules applied that the SERVICE CONTEXT gives
+   for a different enrolment type.
 4. Claims not grounded in docs: verify service behaviour claims against the
    documentation. Every claim about what the code does must cite the doc.
 5. Claims not grounded in logs (when logs ARE available): if logs were
