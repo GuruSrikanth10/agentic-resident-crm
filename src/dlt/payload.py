@@ -15,8 +15,11 @@ source and the payload the corroborating one, not the other way round --
 * the key is one scalar with no path to misconfigure, where the payload path
   differs per `__TypeId__` and is the thing most likely to go stale.
 
-Four layers, in order: the record key, a configured path, the path registered
-for the payload's `__TypeId__`, then a bounded search. Every result carries the
+A payload in the rejection lane's contract -- which every service's DLT record
+carries from MULTI_SERVICE_PLAN.md Phase 8 on -- is read first, from its typed
+`packetMetaData.refId`. For any other payload there are four layers, in
+order: the record key, a configured path, the path registered for the
+payload's `__TypeId__`, then a bounded search. Every result carries the
 layer it came from, so a case that fell through to the search is visible as
 such instead of looking identical to one read straight off the key.
 
@@ -279,6 +282,43 @@ def key_as_ref_id(key: Optional[str]) -> Optional[str]:
     return key if _KEY_SHAPE.match(key) else None
 
 
+# ---------------------------------------------------------------------------
+# The rejection-lane contract (MULTI_SERVICE_PLAN.md Phase 8)
+# ---------------------------------------------------------------------------
+# Every service dead-letters its records with the rejection lane's payload and
+# key; only the headers differ, carrying the exception and the stack trace. A
+# payload in that contract has a typed home for the refId --
+# `packetMetaData.refId`, the field the rejection lane reads -- so nothing has
+# to be searched for and the record key does not have to be trusted over it.
+# The older payload structures (`__TypeId__`-registered, or unknown) still go
+# through the layers below, unchanged.
+
+def rejection_contract(payload: Any):
+    """The payload as the rejection lane's `MessagePayload`, or None when it
+    is not one. Never raises."""
+    if not isinstance(payload, dict):
+        return None
+    from src.models.schemas import MessagePayload
+
+    try:
+        return MessagePayload.model_validate(payload)
+    except Exception:
+        return None
+
+
+def contract_identifiers(contract) -> tuple:
+    """Every identifier a rejection-contract payload carries: eventId, refId,
+    srn and sid, in that order, without blanks or repeats."""
+    meta = contract.packetMetaData
+    values = []
+    for value in (contract.eventId, meta.refId if meta else None,
+                  meta.srn if meta else None, contract.sid):
+        text = _scalar(value)
+        if text and text not in values:
+            values.append(text)
+    return tuple(values)
+
+
 @dataclass(frozen=True)
 class RefIdExtraction:
     """Where the refId came from, and whether the sources agreed.
@@ -292,7 +332,8 @@ class RefIdExtraction:
 
     ref_id: Optional[str] = None
 
-    #: "record_key" | "configured_path" | "type_path" | "search" | "none"
+    #: "contract" | "record_key" | "configured_path" | "type_path" | "search"
+    #: | "none"
     source: str = "none"
 
     #: What the payload said, independently of the key. Kept even when the key
@@ -314,7 +355,25 @@ def resolve_ref_id(payload: Any,
     recorded and surfaces as an evidence gap -- silently picking one of two
     identifiers that should have been equal is how a misconfigured path stays
     invisible for months.
+
+    A payload in the rejection-lane contract is the exception: its refId is
+    a typed field, not a configured path, so it wins (source `contract`). The
+    key follows the rejection lane's key contract, which names no field, so
+    it is only checked: it is a mismatch when it equals none of the payload's
+    identifiers (`contract_identifiers`).
     """
+    contract = rejection_contract(payload)
+    contract_ref_id = _scalar(contract.packetMetaData.refId) \
+        if contract is not None and contract.packetMetaData else None
+    if contract_ref_id:
+        text = decode_key(key)
+        return RefIdExtraction(
+            ref_id=contract_ref_id,
+            source="contract",
+            payload_ref_id=contract_ref_id,
+            mismatch=bool(text) and text not in contract_identifiers(contract),
+        )
+
     from_key = key_as_ref_id(key)
 
     from_payload = extract_by_path(payload, refid_path())

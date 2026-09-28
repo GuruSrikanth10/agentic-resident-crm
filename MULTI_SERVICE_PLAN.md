@@ -1,7 +1,8 @@
 # Multi-Service Rejection Lane -- Implementation Plan
 
 - **Date:** 2026-09-25
-- **Status:** Phases 1, 2, 3, 4, 5 and 6 implemented on 2026-09-28; `ARCHITECTURE.md`
+- **Status:** Phases 1 to 8 implemented on 2026-09-28 (Phase 7 as its pilot
+  mechanism only; no service has been onboarded); `ARCHITECTURE.md`
   sections 3.2.2, 3.2.3 and 3.5.1 describe what was built. Phase 0 needs production access and is the
   owner's; of it, only 0.6 (the failing-test baseline: 56 pre-existing
   failures) has been done. Implementing Phase 1 corrected four points of this
@@ -83,6 +84,40 @@
     enu-biometric's pack; callers with no service still match them.
   - **`_project_payload` is unchanged**: the plan makes narrowing it
     conditional on Phase 0, which has not been run.
+
+  Phase 7's one-time addition, pilot mode, was implemented on 2026-09-28
+  too; see its own "As built" section. It settled four points the plan left
+  open:
+  - **The pilot decision is made once per packet, with the pack**, and
+    carried in `GraphState.pilot`. The Synthesis agent and the casebook flag
+    therefore always agree, even across a checkpoint resume.
+  - **A pilot Synthesis prompt gains a `### PILOT MODE` section.** The
+    generic prompt tells Synthesis to call `queue_for_replay` before
+    answering REPLAY. Without the section, the pilot agent would reach for a
+    tool it does not have.
+  - **A service named in both lists is a boot error**, and a pilot where
+    validation has not run.
+  - **Accuracy is grouped by service everywhere**, not only under
+    `--service`, so one reason code raised by two services is reported as
+    two rows.
+
+  Phase 8 was implemented on 2026-09-28 too, once the owner settled the DLT
+  contract: **every service dead-letters its records with the rejection
+  lane's Kafka payload and key, and only the headers differ, carrying the
+  stack trace.** See Phase 8's own "As built" section. It settled five points
+  the plan left open:
+  - **The DLT lane has its own gate**, `DLT_SERVICE_GATE` and
+    `DLT_SERVICES_ENABLED`, since a service's crashes are onboarded apart
+    from its rejections. It has no `_default` pack: an unresolved record is a
+    skip reason, and in `record` mode it is analysed with no pack, as before.
+  - **The consumer group decides first**, before the stage: it is the failing
+    consumer's own identity.
+  - **Cases are stored per record**, `<refId>__<digest of case_id>`, which
+    fixes section 10's refId dedupe and keeps the refId findable as a prefix.
+  - **Only services other than enu-biometric get namespaced fingerprints**,
+    so its groups and cached recommendations are unchanged.
+  - **The DLT agents get a pack's optional `dlt.md`, not its `policy.md`**,
+    which is written for rejections.
 - **Scope:** the rejection lane. Every service publishes its rejection events
   to one Kafka topic, in the structure the lane already parses. The DLT lane
   is deferred until its message contract is final (section 10); the registry
@@ -92,19 +127,19 @@
 
 ### Where a new session resumes (2026-09-28)
 
-**Done:** Phases 1 to 6, each with an "As built" section (Phases 1
-and 2 describe theirs under "Changes, as built") under its own heading in
-section 6. Read them before Phase 7: they record where the implementation
+**Done:** Phases 1 to 6, and Phase 7's pilot mechanism, each with an "As
+built" section (Phases 1 and 2 describe theirs under "Changes, as built")
+under its own heading in section 6. They record where the implementation
 differs from what the phase text says, and the later phases build on the
 differences, not on the original text.
 
-**Next:** Phase 7 (onboarding a service), which needs Phase 0's values first.
-Of Phase 6, only the `_project_payload` narrowing waits, on Phase 0's answer
-to question 11.9.
+**Next:** onboarding the first service other than enu-biometric (section 7),
+which needs Phase 0's values and a pack from the service's experts -- its
+`dlt` section too, for the DLT lane. Of Phase 6, only the `_project_payload`
+narrowing waits, on Phase 0's answer to question 11.9.
 
-**State of the branch:** Phases 1-4 are committed on `feature/multi-service`.
-Phases 5 and 6 are in the working tree, not committed (the 39 draft moves are
-staged by `git mv`).
+**State of the branch:** Phases 1-6 are committed on `feature/multi-service`.
+Phases 7 and 8 are in the working tree, not committed.
 
 **Baseline to compare against:** 56 pre-existing failures on the full suite,
 re-measured before Phase 4 and unchanged after it. Re-measure before the next
@@ -120,8 +155,9 @@ values Phase 0 produces.
 
 **Deliberately not built yet, so do not read its absence as an oversight:**
 per-service rules tables (there is one table, and it is enu-biometric's --
-D6), the named-field payload projection (Phase 6, waiting on Phase 0), and
-the DLT lane (Phase 8, blocked on its contract).
+D6), the named-field payload projection (Phase 6, waiting on Phase 0), pilot
+mode for the DLT lane, and a change of the DLT replay identity from the refId
+to the eventId (unconfirmed with OIS).
 
 ---
 
@@ -927,7 +963,10 @@ Errors:
   name. Also, when a pack is loaded: `_default` has a `tools.include`, or a
   service is named `default`. `validate_config` checks every database that is
   on has its connection settings.
-- Phase 7: a name in `REJECTION_SERVICES_PILOT` is not registered.
+- Phase 7 (implemented): a name in `REJECTION_SERVICES_PILOT` is not
+  registered, is `_default` or `_unresolved`, or is also in
+  `REJECTION_SERVICES_ENABLED`. The Phase 3 rule-source errors cover pilot
+  services too.
 
 Warnings:
 - Phase 1:
@@ -969,7 +1008,7 @@ Warnings:
   `RUNBOOK_LOOKUPS` (Phase 5). The registry and the documentation files bound
   the label's cardinality: a resolution never names anything else.
 - `accuracy_report.py` gains `--service`, and outcome records a `service`
-  field, in Phase 7.
+  field, in Phase 7 (implemented).
 
 ---
 
@@ -984,8 +1023,8 @@ Warnings:
 | 4 | Tools per service | The biometric tools are renamed `bio_` | Large |
 | 5 | Runbooks and learned rules per service (implemented) | Runbook paths move | Medium |
 | 6 | Logs and privacy (implemented) | Wider redaction; logs searched per packet | Large |
-| 7 | Onboarding a service (repeat for each) | No | Small each, plus SME time |
-| 8 | DLT lane | -- | After its contract is final |
+| 7 | Onboarding a service (repeat for each; pilot mode implemented) | No | Small each, plus SME time |
+| 8 | DLT lane (implemented) | No: its fingerprints, version read and prompts are unchanged; its logs follow Phase 6 | Large |
 
 - Phases 3 to 6 depend on 1 and 2, but not on each other. They can run in
   parallel, each with its own checkpoint.
@@ -1762,9 +1801,167 @@ the first time:
 - The owner moves the service from `REJECTION_SERVICES_PILOT` to
   `REJECTION_SERVICES_ENABLED` once it meets the agreed bar (question 11.7).
 
-### Phase 8 -- DLT lane (after its contract is final)
+#### As built (2026-09-28)
 
-Out of scope here. See section 10 for what it will need.
+The one-time addition above, with these details. No service has been
+onboarded: that needs Phase 0's `match` values and a pack from the service's
+experts (section 7, items 1 and 2).
+
+- **The registry.** `ENV_PILOT`, `pilot_services()` (blank means none; there
+  is no default), `is_pilot(pack)` and `analysed_services()`, which is
+  enabled or pilot.
+  - `skip_reason` lets an analysed service through.
+  - `packs_to_prebuild` and `missing_corpus_dirs` cover pilot services.
+  - `validate()` adds the Phase 7 errors in 5.7, and applies the Phase 3
+    rule-source errors to every analysed service.
+  - A service in both lists is a pilot wherever validation has not run: the
+    more cautious reading.
+- **The graph.**
+  - `GraphState.pilot` is decided with the pack: by the route
+    (`is_pilot(service_pack)`), or by `_service_update` for an invocation
+    that did not pass it. `_pilot_of(state)` reads it, and falls back to the
+    pack for a checkpoint written before the key existed.
+  - The pool's key is (role, pack, pilot), where pilot is only ever true for
+    Synthesis. A pilot Synthesis is built with no tools
+    (`tools=[] if pilot else [queue_tool]`).
+  - Its system prompt gains `prompt_composer.PILOT_SYNTHESIS_SECTION`
+    (`compose_system_prompt(role, pack, pilot=)`, `--pilot` on the CLI).
+    Without it the generic instruction to call `queue_for_replay` before
+    answering REPLAY would send the agent after a tool it does not have.
+- **The fingerprint.** `compute_prompt_fingerprint(base_dir, pack, pilot=)`
+  hashes the PILOT MODE section when pilot. `prompt_fingerprint(pack,
+  pilot=None)` defaults to the pack's setting now and caches a pilot's under
+  `<pack>+pilot`. An enabled pack's fingerprint is unchanged.
+- **The casebook.** The top-level `pilot: true` appears only on a pilot's
+  casebook. The fingerprint recorded with it is the pilot one.
+- **Outcomes.** `record_outcome` records `service` (from
+  `packet_metadata.service`) and `pilot`. `outcome_service(outcome)` reads a
+  missing service as the pre-registry pack. `for_service(outcomes, service)`
+  filters. `summarise` and `summarise_shadow` group by service first, and
+  each row carries `service`.
+- **`accuracy_report`** gained `--service`, and a SERVICE column in both
+  tables. The `--shadow` readiness line now names the whole
+  `<service>:<CODE>` allowlist entry, where Phase 5 left `<service>` for the
+  operator.
+- **Settings:** `REJECTION_SERVICES_PILOT`, isolated in `tests/conftest.py`,
+  and documented in `.env.example`.
+- **Documentation:** `ARCHITECTURE.md` (section 3.2.3's new "Pilot mode and
+  accuracy per service", 3.3, 4, the tree and a section 5 entry),
+  `SYSTEM_OVERVIEW.md` sections 8 and 11, and `src/service_packs/README.md`.
+- **Tests:** `tests/test_service_pilot.py` (29) is new. It covers:
+  - the setting, and the gate letting a pilot through;
+  - prebuilding and the corpus check;
+  - every validation error;
+  - the prompt section, which only a pilot Synthesis gets;
+  - the fingerprint;
+  - a pilot Synthesis built without the tool;
+  - the casebook flag, present and absent;
+  - the per-packet decision;
+  - outcomes recording the service, the legacy reading, grouping and
+    filtering;
+  - the report's `--service` and its allowlist line.
+- **Full suite:** the same 56 failures as the baseline, no new ones.
+
+### Phase 8 -- DLT lane (implemented 2026-09-28)
+
+The contract, as the owner settled it on 2026-09-28: a DLT record's payload
+and key are the rejection lane's Kafka payload and key; its headers carry the
+exception and the stack trace. Section 10 lists what the lane needed.
+
+#### As built (2026-09-28)
+
+- **The contract** (`dlt/payload.py`).
+  - `rejection_contract(payload)` validates a payload as `MessagePayload`.
+  - `resolve_ref_id` reads such a payload's refId from
+    `packetMetaData.refId`, with source `contract`, ahead of the key. The key
+    is only checked: it is a mismatch when it equals none of
+    `contract_identifiers` (eventId, refId, srn, sid).
+  - `DltMessage.event_id` carries the eventId.
+  - `summarise_rejection_contract` describes the payload by the fields the
+    rejection Investigator is shown, and labels its identifiers.
+  - Other payloads keep the four older layers.
+- **Identity** (`dlt/identity.py`).
+  - `derive_case_id(..., consumer_group)` appends `-g<digest>`.
+  - `storage_key(ref_id, case_id)` = `<refId>__<digest of case_id>`, or the
+    case id without a usable refId.
+  - Both routes, `DltAdapter.identity_of` and the claim's finished check use
+    the storage key. The claim is still taken under the delivery's refId.
+  - `case_storage.keys_for_ref_id` finds a packet's cases, and
+    `dlt_report --case` takes a key, a refId or a case id.
+- **The registry.**
+  - The `dlt` section is parsed into `ServicePack.consumer_groups`,
+    `original_topics` (compiled) and `java_packages`.
+  - Boot errors: a malformed topic or package; a group or package shared by
+    two services; any `dlt` signal on `_default`.
+  - `resolve_dlt` resolves: consumer group, stage, original topic, Java
+    package (longest prefix, first claimed frame), source topic, reason code.
+    Later disagreeing steps go in `conflict`, keyed by source.
+  - `load_or_resolve` takes a `resolver`.
+  - `dlt_gate_mode`, `dlt_enabled_services`, `dlt_skip_reason`, `dlt_gate`,
+    `dlt_pack_for` and `fingerprint_service`.
+  - Validation of the two settings. A warning is logged for an enabled
+    service nothing can place.
+  - The shipped enu-biometric pack names `com.uidai.enu.biometric`.
+- **The routes** (`api/dlt_routes.py`).
+  - `/fetch-dlt-logs` parses and classifies first, then resolves and gates,
+    before the claim and before any evidence is written. It stores
+    `service_resolution.json`.
+  - Logs are fetched for `log_scope.service_to_search(resolution, pack)`,
+    and the running version through `deployed.for_service`, which keeps
+    enu-biometric's default read.
+  - `/analyze-dlt` reads the stored resolution, gates again, and passes
+    `service_resolution` and `service_pack` to the orchestrator.
+  - `fingerprinted(failure, resolution)` recomputes the fingerprint with the
+    service, for services other than enu-biometric only
+    (`compute_fingerprint(service=)`, appended last).
+  - Casebook schema 1.3.
+- **The agents** (`dlt/orchestrator.py`).
+  - One agent per (role, pack). The no-pack agents are prebuilt, in the
+    order they always were.
+  - The system prompt is `prompt_composer.compose_dlt_system_prompt`, with
+    the pack's `dlt.md` when there is one.
+  - The evidence block opens with `dlt_service_note`.
+  - Harness tasks append `dlt_harness_service_context`, then the tools
+    section, and run as the pack's opencode agent. The two DLT harness
+    templates gained a sentence pointing at the context.
+  - `LLM_CALLS` carries the resolved service.
+- **Tools** (`mcp_client`).
+  - A DLT role may take a service, and is then scoped by it; with none it
+    keeps the role-only selection; `_default` is refused.
+  - `opencode_agent(dlt_role, service)` is `crm_<role>__<slug>`.
+    `opencode_config` builds one per registered service, plus the unscoped
+    one. `_task_agent` does not fall back from a service's DLT agent to the
+    wider unscoped one.
+  - `deployed.running_version` and `discovery.list_pods_for_service` take a
+    pod `match`.
+- **Metrics:** `DLT_SERVICE_RESOLUTIONS` and `DLT_SKIPPED`.
+- **Settings:** `DLT_SERVICE_GATE` and `DLT_SERVICES_ENABLED`, isolated in
+  `tests/conftest.py` and documented in `.env.example`.
+- **Documentation:**
+  - `ARCHITECTURE.md`: section 3.2.3's new "The DLT lane per service", 4.4,
+    4.4.2, the tree, and a section 5 entry;
+  - `SYSTEM_OVERVIEW.md` section 12;
+  - `src/service_packs/README.md`.
+- **Tests:**
+  - `tests/test_service_dlt.py` (48) is new. It covers:
+    - the contract, the key check, the summary and the adapter;
+    - the case id and the storage key;
+    - the `dlt` section's parsing and boot errors;
+    - resolution in every order, with conflicts;
+    - the gate, the pack and the fingerprint rule;
+    - the settings' validation;
+    - the prompts, the service note and the harness context;
+    - tool scoping, and the agents built per pack;
+    - the routes: a skip leaves nothing; `record` mode analyses as before;
+      an enabled service gets its own pack, logs and pods; enu-biometric
+      keeps its fingerprint; a second record of one packet is analysed; the
+      stored resolution is acted on.
+  - Updated to the new contract: `test_dlt_abis_payload.py` (the case id),
+    `test_dlt_flow_fixes.py` (per-record keys, and the `investigate` fakes),
+    `test_dlt_analysis.py` (its `investigate` fake), `test_service_tools.py`
+    and `test_mcp_client.py` (the DLT opencode agents and scoping).
+- **Full suite:** 54 failures, all from the 56-failure baseline, none new.
+  Two baseline failures in `test_dlt_analysis.py` now pass.
 
 ---
 
@@ -1820,6 +2017,8 @@ Out of scope here. See section 10 for what it will need.
 | `RUNBOOK_SERVE_ALLOWLIST` | unchanged | 5 | Entries become `service:CODE`; a bare `CODE` means enu-biometric |
 | `REDACT_JSON_KEYS` | the default list | 6 | JSON keys whose values are redacted |
 | `REJECTION_SERVICES_PILOT` | empty | 7 | Services analysed in pilot mode |
+| `DLT_SERVICE_GATE` | `record` | 8 | The DLT lane's gate: `record` or `enforce` |
+| `DLT_SERVICES_ENABLED` | `enu-biometric` | 8 | Services whose dead-lettered records are analysed with their pack. Blank means the default |
 
 Changed meaning: from Phase 6, `ES_APP_NAMES` and `K8S_APP_NAMES` are only a
 fallback, for callers with no service.
@@ -1845,9 +2044,9 @@ fallback, for callers with no service.
 
 ## 10. Out of scope, and the DLT lane
 
-- **DLT lane.** When its contract is final, it can resolve services from
-  `dlt.consumer_groups`, `dlt.original_topics` and `dlt.java_packages`, then
-  reuse the packs and the tool scoping. Known issues to address then:
+- **DLT lane.** Built in Phase 8, against the contract the owner settled on
+  2026-09-28. Each issue listed here was addressed there, as its "As built"
+  section says. Known issues it had to address:
   - Terminal dedupe is keyed on the refId (`DltAdapter.identity_of` and the
     terminal check in `/fetch-dlt-logs`, which runs before the per-record
     claim). A second dead-lettered record for the same refId, from another

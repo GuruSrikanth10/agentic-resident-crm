@@ -179,9 +179,12 @@ def _task_agent(node: Optional[str], service: Optional[str],
     from src.utils.service_registry import DEFAULT_PACK
 
     agents = config.get("agent") or {}
-    candidates = [mcp_client.opencode_agent(node, service if node in SERVICE_ROLES else None)]
+    candidates = [mcp_client.opencode_agent(node, service)]
     if node in SERVICE_ROLES:
         candidates.append(mcp_client.opencode_agent(node, DEFAULT_PACK))
+    # A DLT role scoped to a service has no narrower agent to fall back to:
+    # its unscoped agent has every DLT tool, so a server started before the
+    # service was registered is refused instead, below (Phase 8).
     for name in candidates:
         if name in agents:
             return name

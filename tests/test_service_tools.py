@@ -309,6 +309,7 @@ def test_service_slugs():
     assert mcp_client.opencode_agent("reviewer", BIO) == "crm_reviewer__enu_biometric"
     assert mcp_client.opencode_agent("reviewer", None) == "crm_reviewer__default"
     assert mcp_client.opencode_agent("dlt_reviewer") == "crm_dlt_reviewer"
+    assert mcp_client.opencode_agent("dlt_reviewer", BIO) == "crm_dlt_reviewer__enu_biometric"
 
 
 # ======================================================================
@@ -367,7 +368,11 @@ def test_opencode_gives_each_per_service_agent_exactly_its_tools(served):
         "crm_investigator__enu_biometric", "crm_investigator__svc_demo",
         "crm_investigator__default", "crm_reviewer__enu_biometric",
         "crm_reviewer__svc_demo", "crm_reviewer__default",
-        "crm_dlt_investigator", "crm_dlt_reviewer"}
+        # The DLT roles: one per registered service, and one with no service
+        # for a record analysed with no pack (MULTI_SERVICE_PLAN.md Phase 8).
+        "crm_dlt_investigator", "crm_dlt_reviewer",
+        "crm_dlt_investigator__enu_biometric", "crm_dlt_investigator__svc_demo",
+        "crm_dlt_reviewer__enu_biometric", "crm_dlt_reviewer__svc_demo"}
     assert allowed("crm_investigator__enu_biometric") == {
         "agent_tools_common_probe", "agent_tools_bio_probe"}
     assert allowed("crm_investigator__svc_demo") == {
@@ -375,6 +380,7 @@ def test_opencode_gives_each_per_service_agent_exactly_its_tools(served):
     assert allowed("crm_investigator__default") == {"agent_tools_common_probe"}
     assert allowed("crm_reviewer__svc_demo") == {"agent_tools_common_probe"}
     assert allowed("crm_dlt_investigator") == set()
+    assert allowed("crm_dlt_investigator__enu_biometric") == set()
     for agent in config["agent"].values():
         assert agent["tools"]["agent_tools_*"] is False
 

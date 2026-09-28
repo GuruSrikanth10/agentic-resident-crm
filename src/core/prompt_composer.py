@@ -19,6 +19,8 @@ puts the two together, in one fixed order, for one role and one pack:
     ### LEARNED RULES                        (the Investigator only)
     <src/prompts/learned_rules.md, then the pack's learned_rules.md>
 
+    ### PILOT MODE                           (Synthesis, for a pilot service)
+
 `agent_factory.build_agent` then appends the AVAILABLE TOOLS section -- the
 tools in scope for the same pack -- and the operating note, as it always has.
 
@@ -53,6 +55,9 @@ _PLACED_BY = {
     service_registry.SOURCE_SOURCE_TOPIC: "its sourceTopic",
     service_registry.SOURCE_REASON_CODE_DOCS:
         "its reason code, which only this service's documentation documents",
+    service_registry.SOURCE_CONSUMER_GROUP: "the consumer group that dead-lettered it",
+    service_registry.SOURCE_ORIGINAL_TOPIC: "its original topic",
+    service_registry.SOURCE_JAVA_PACKAGE: "the Java package of its failure site",
 }
 
 
@@ -106,9 +111,28 @@ def service_context(role: str, pack_name: str, lead: Optional[str] = None) -> st
     return "\n\n".join(sections)
 
 
-def compose_system_prompt(role: str, pack_name: str) -> str:
-    """The system prompt `role` is built with for packets using `pack_name`."""
-    return f"{generic_prompt(role).rstrip()}\n\n{service_context(role, pack_name)}"
+#: Appended to a pilot service's Synthesis prompt (MULTI_SERVICE_PLAN.md
+#: Phase 7). That agent is built without `queue_for_replay`, and the generic
+#: prompt tells it to call that tool before answering REPLAY; without this it
+#: would try a tool it does not have.
+PILOT_SYNTHESIS_SECTION = (
+    "### PILOT MODE\n"
+    "This packet's service is being piloted: the service's experts check its "
+    "casebooks before anything is acted on. You have no `queue_for_replay` "
+    "tool, so the instruction to call it before answering does not apply: do "
+    "not stage a replay and do not try to. Still choose the `action` the "
+    "approved investigation supports, REPLAY and QC_REPLAY included. That "
+    "choice is what the experts judge.")
+
+
+def compose_system_prompt(role: str, pack_name: str, pilot: bool = False) -> str:
+    """The system prompt `role` is built with for packets using `pack_name`.
+    `pilot` adds the PILOT MODE section to the Synthesis prompt; the other
+    roles are the same in pilot mode."""
+    prompt = f"{generic_prompt(role).rstrip()}\n\n{service_context(role, pack_name)}"
+    if pilot and role == "synthesis":
+        prompt += f"\n\n{PILOT_SYNTHESIS_SECTION}"
+    return prompt
 
 
 def _placed(resolution: dict, pack_name: str) -> Optional[str]:
@@ -202,13 +226,86 @@ def main(argv=None) -> int:
                     "note, which build_agent adds).")
     parser.add_argument("role", choices=sorted(ROLE_PROMPTS))
     parser.add_argument("--pack", default=service_registry.PRE_REGISTRY_PACK)
+    parser.add_argument("--pilot", action="store_true",
+                        help="The prompt as a pilot service's agent gets it.")
     args = parser.parse_args(argv)
     try:
-        print(compose_system_prompt(args.role, args.pack))
+        print(compose_system_prompt(args.role, args.pack, pilot=args.pilot))
     except Exception as error:
         print(f"{type(error).__name__}: {error}", file=sys.stderr)
         return 1
     return 0
+
+
+# ======================================================================
+# The DLT lane (MULTI_SERVICE_PLAN.md Phase 8)
+# ======================================================================
+# A dead-lettered record's agents are built for its service's pack when the
+# DLT gate lets it through. The pack's `dlt.md` is their SERVICE CONTEXT; its
+# `policy.md` is not given to them -- it is written for business-rule
+# rejections, and a dead-lettered record is a code failure. A pack with no
+# `dlt.md` leaves the DLT system prompts exactly as they were.
+
+def dlt_service_context(pack_name: Optional[str], lead: Optional[str] = None) -> str:
+    """The DLT SERVICE CONTEXT section for `pack_name`, or "" when there is
+    nothing to say: no pack, or neither a lead nor a `dlt.md`."""
+    if not pack_name:
+        return ""
+    found = _require_pack(pack_name)
+    text = found.texts.get(service_registry.DLT_FILE, "").strip()
+    parts = [part for part in ((lead or "").strip(), text) if part]
+    if not parts:
+        return ""
+    return "\n\n".join([f"### SERVICE CONTEXT -- {found.display_name} [{found.name}]",
+                        *parts])
+
+
+def compose_dlt_system_prompt(generic: str, pack_name: Optional[str]) -> str:
+    """A DLT role's system prompt: the generic prompt, then the pack's
+    `dlt.md`, when it has one."""
+    section = dlt_service_context(pack_name)
+    return f"{generic.rstrip()}\n\n{section}" if section else generic
+
+
+def _dlt_placed(resolution: dict, pack_name: str) -> Optional[str]:
+    if resolution.get("service") != pack_name:
+        return None
+    phrase = _PLACED_BY.get(str(resolution.get("source") or ""), "its evidence")
+    placed = f"placed there by {phrase} '{resolution.get('matched')}'"
+    others = sorted(set((resolution.get("conflict") or {}).values()) - {pack_name})
+    if others:
+        placed += (f". Other evidence on this record names {', '.join(others)}: "
+                   f"if the trace or the logs point there, say so")
+    return placed
+
+
+def dlt_service_note(resolution: Optional[dict], pack_name: Optional[str]) -> Optional[str]:
+    """The `### Service` section of a direct DLT prompt, or None when the
+    record was analysed with no pack."""
+    if not pack_name:
+        return None
+    placed = _dlt_placed(resolution or {}, pack_name)
+    if placed is None:
+        return None
+    found = _require_pack(pack_name)
+    return f"This record belongs to {pack_name} ({found.display_name}), {placed}."
+
+
+def dlt_harness_service_context(resolution: Optional[dict],
+                                pack_name: Optional[str]) -> str:
+    """What a DLT harness task appends after its template, or "": where the
+    record's service's documentation is, and the pack's `dlt.md`."""
+    if not pack_name:
+        return ""
+    placed = _dlt_placed(resolution or {}, pack_name)
+    lead = None
+    if placed is not None:
+        found = _require_pack(pack_name)
+        lead = (f"This record belongs to {pack_name}, {placed}. Its documentation "
+                f"is in docs_cache/{found.droa_corpus_dir}/; start there, and read "
+                f"other services' documentation only where the evidence shows "
+                f"the failure involved them.")
+    return dlt_service_context(pack_name, lead=lead)
 
 
 if __name__ == "__main__":

@@ -31,9 +31,10 @@ file has errors is left out of the registry entirely rather than half-used;
 API instead of quietly shrinking the registry.
 
 The gate (D5) decides what happens to a packet whose service is unresolved,
-unregistered or not enabled. With REJECTION_SERVICE_GATE=record (the
-default) the decision is only recorded; with `enforce` the packet is
-acknowledged without analysis.
+unregistered, or neither enabled nor piloted. With
+REJECTION_SERVICE_GATE=record (the default) the decision is only recorded;
+with `enforce` the packet is acknowledged without analysis. A pilot service
+(REJECTION_SERVICES_PILOT, Phase 7) is let through like an enabled one.
 """
 import hashlib
 import json
@@ -81,7 +82,12 @@ POLICY_FILE = "policy.md"
 LEARNED_RULES_FILE = "learned_rules.md"
 ROLE_FILES = {"investigator": "investigator.md", "reviewer": "reviewer.md",
               "synthesis": "synthesis.md"}
-PACK_TEXT_FILES = (POLICY_FILE, *ROLE_FILES.values(), LEARNED_RULES_FILE)
+#: What the DLT lane's three agents are told about this service
+#: (MULTI_SERVICE_PLAN.md Phase 8). Optional; without it their prompts are
+#: the generic ones. `policy.md` is not given to them: it is written for
+#: business-rule rejections, and a dead-lettered record is a code failure.
+DLT_FILE = "dlt.md"
+PACK_TEXT_FILES = (POLICY_FILE, *ROLE_FILES.values(), LEARNED_RULES_FILE, DLT_FILE)
 
 ENV_PACK_MAX_CHARS = "SERVICE_PACK_MAX_CHARS"
 DEFAULT_PACK_MAX_CHARS = 20000
@@ -95,6 +101,11 @@ SOURCE_FLOW_STAGE = "flow_stage"
 SOURCE_SOURCE_TOPIC = "source_topic"
 SOURCE_REASON_CODE_DOCS = "reason_code_docs"
 SOURCE_NONE = "none"
+#: How a dead-lettered record's service was resolved, beyond the above
+#: (MULTI_SERVICE_PLAN.md Phase 8, from the pack's reserved `dlt` fields).
+SOURCE_CONSUMER_GROUP = "consumer_group"
+SOURCE_ORIGINAL_TOPIC = "original_topic"
+SOURCE_JAVA_PACKAGE = "java_package"
 
 #: Why the gate would skip a packet.
 SKIP_UNRESOLVED = "service_unresolved"
@@ -121,7 +132,13 @@ RULE_SOURCE_TYPES = (RULES_DB, NO_RULES_DB)
 
 ENV_GATE = "REJECTION_SERVICE_GATE"
 ENV_ENABLED = "REJECTION_SERVICES_ENABLED"
+ENV_PILOT = "REJECTION_SERVICES_PILOT"
 ENV_UNRESOLVED = "REJECTION_UNRESOLVED_SERVICE"
+#: The DLT lane's own gate (MULTI_SERVICE_PLAN.md Phase 8). Its own settings,
+#: because a service's rejections and its crashes are onboarded apart: the
+#: DLT lane needs the pack's `dlt` fields, and its source mappings, first.
+ENV_DLT_GATE = "DLT_SERVICE_GATE"
+ENV_DLT_ENABLED = "DLT_SERVICES_ENABLED"
 
 #: A service name is also a directory name, a documentation file stem and a
 #: metric label value, so it is kept to what all of them accept.
@@ -129,6 +146,8 @@ _SERVICE_NAME = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _TOOL_PREFIX = re.compile(r"^[a-z][a-z0-9]{1,11}$")
 _DIR_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _SLUG_UNSAFE = re.compile(r"[^a-z0-9]")
+#: A Java package prefix: dotted identifiers, e.g. `com.uidai.enu.biometric`.
+_JAVA_PACKAGE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
 
 _FILE_KEYS = {"schema_version", "service", "display_name", "tool_prefix",
               "match", "enrolment_types", "rule_source",
@@ -173,6 +192,12 @@ class ServicePack:
     #: Digest of service.json and every text file, recorded with each
     #: casebook so it says which version of the pack its agents were shown.
     sha256: str = ""
+    #: The `dlt` section (MULTI_SERVICE_PLAN.md D15, read from Phase 8):
+    #: consumer groups compared exactly, original topics compiled and matched
+    #: against the whole topic, Java package prefixes.
+    consumer_groups: tuple = ()
+    original_topics: tuple = ()
+    java_packages: tuple = ()
 
     def matches_stage(self, stage: str, sub_stage: Optional[str]) -> bool:
         if stage not in self.stages:
@@ -182,6 +207,16 @@ class ServicePack:
 
     def matches_topic(self, topic: str) -> bool:
         return any(pattern.fullmatch(topic) for pattern in self.source_topics)
+
+    def matches_original_topic(self, topic: str) -> bool:
+        return any(pattern.fullmatch(topic) for pattern in self.original_topics)
+
+    def package_match(self, frame: str) -> int:
+        """The length of the longest of this pack's Java packages `frame`
+        (a fully qualified method) sits in, or 0."""
+        return max((len(package) for package in self.java_packages
+                    if frame == package or frame.startswith(package + ".")),
+                   default=0)
 
 
 @dataclass(frozen=True)
@@ -209,6 +244,27 @@ class Registry:
     def by_topic(self, topic: str) -> list:
         return [name for name in self.services()
                 if self.packs[name].matches_topic(topic)]
+
+    def by_consumer_group(self, group: str) -> list:
+        return [name for name in self.services()
+                if group in self.packs[name].consumer_groups]
+
+    def by_original_topic(self, topic: str) -> list:
+        return [name for name in self.services()
+                if self.packs[name].matches_original_topic(topic)]
+
+    def by_java_package(self, frames) -> tuple:
+        """(services, frame): the services owning the first application frame
+        any pack's Java packages claim, by longest prefix. The frames are the
+        failure site's, innermost first, so the first claimed frame is the
+        code that failed rather than a caller of it."""
+        for frame in frames or ():
+            lengths = {name: self.packs[name].package_match(str(frame))
+                       for name in self.services()}
+            best = max(lengths.values(), default=0)
+            if best:
+                return [name for name, length in lengths.items() if length == best], frame
+        return [], None
 
     def service_for_docs_file(self, stem: str) -> str:
         """The service whose documentation file is `stem`.
@@ -419,7 +475,11 @@ def _parse_pack(dir_name: str, label: str, document, errors: list,
         errors.append(f"{label}: the default pack takes no tools.include; an "
                       f"unresolved packet gets only the tools for every "
                       f"service ({ALL_SERVICES!r}).")
-    _parse_lists(f"{label} dlt", document.get("dlt"), _DLT_KEYS, errors)
+    consumer_groups, original_topics, java_packages = _parse_dlt(
+        label, document.get("dlt"), errors)
+    if is_default and (consumer_groups or original_topics or java_packages):
+        errors.append(f"{label}: the default pack must match nothing, so its "
+                      f"dlt section must be empty.")
 
     return ServicePack(
         name=name,
@@ -436,7 +496,38 @@ def _parse_pack(dir_name: str, label: str, document, errors: list,
             f"{label}: 'droa_corpus_dir'", document.get("droa_corpus_dir"),
             _DIR_NAME, name, errors),
         document=document,
+        consumer_groups=tuple(consumer_groups),
+        original_topics=tuple(original_topics),
+        java_packages=tuple(java_packages),
     )
+
+
+def _parse_dlt(label: str, value, errors: list) -> tuple:
+    """(consumer groups, compiled original topics, Java packages) from the
+    `dlt` section, reporting what is wrong with it."""
+    where = f"{label} dlt"
+    if value is None:
+        return [], [], []
+    if not _check_keys(where, value, _DLT_KEYS, errors):
+        return [], [], []
+    groups = _string_list(f"{where}.consumer_groups", value.get("consumer_groups"), errors)
+    topics = []
+    for pattern in _string_list(f"{where}.original_topics",
+                                value.get("original_topics"), errors):
+        try:
+            topics.append(re.compile(pattern))
+        except re.error as error:
+            errors.append(f"{where}.original_topics entry {pattern!r} is not a "
+                          f"valid regular expression: {error}")
+    packages = []
+    for package in _string_list(f"{where}.java_packages",
+                                value.get("java_packages"), errors):
+        if _JAVA_PACKAGE.match(package):
+            packages.append(package)
+        else:
+            errors.append(f"{where}.java_packages entry {package!r} is not a "
+                          f"Java package name.")
+    return groups, topics, packages
 
 
 def _parse_match(label: str, match, errors: list) -> tuple:
@@ -592,6 +683,9 @@ def _read_pack_texts(directory: Path, errors: list) -> dict:
                       f"needs one.")
 
     limit = pack_max_chars()
+    if len(texts.get(DLT_FILE, "")) > limit:
+        errors.append(f"{name}/{DLT_FILE} is {len(texts[DLT_FILE])} characters, "
+                      f"over {ENV_PACK_MAX_CHARS} ({limit}).")
     shared = len(texts.get(POLICY_FILE, ""))
     for role, filename in ROLE_FILES.items():
         size = shared + len(texts.get(filename, ""))
@@ -641,6 +735,21 @@ def _check_registry(packs: dict, errors: list) -> None:
             owners.setdefault(value, []).append(name)
         for value, names in sorted(owners.items(), key=lambda item: str(item[0])):
             if value is not None and len(names) > 1:
+                errors.append(f"Services {names} share the {describe} "
+                              f"{value!r}; each must have its own.")
+
+    # A consumer group or a Java package claimed by two services would decide
+    # nothing for a dead-lettered record (MULTI_SERVICE_PLAN.md Phase 8).
+    # Nested packages are allowed -- the longest prefix decides -- but one
+    # package named by two services is not.
+    for field_name, describe in (("consumer_groups", "DLT consumer group"),
+                                 ("java_packages", "Java package")):
+        owners = {}
+        for name in services:
+            for value in getattr(packs[name], field_name):
+                owners.setdefault(value, []).append(name)
+        for value, names in sorted(owners.items()):
+            if len(names) > 1:
                 errors.append(f"Services {names} share the {describe} "
                               f"{value!r}; each must have its own.")
 
@@ -745,13 +854,7 @@ def resolve(payload, registry: Optional[Registry] = None,
                          "the topic decides nothing", source_topic=topic,
                          services=found)
 
-    documented_by = ()
-    if code:
-        from src.utils import reason_code_docs
-
-        documented_by = tuple(sorted({
-            registry.service_for_docs_file(stem)
-            for stem in reason_code_docs.services_for_code(code, root=docs_root)}))
+    documented_by = _documented_by(code, registry, docs_root)
 
     conflict = None
     if candidate is None:
@@ -767,6 +870,95 @@ def resolve(payload, registry: Optional[Registry] = None,
         matched=matched,
         conflict=conflict,
         detail=detail,
+        registry_sha256=registry.sha256,
+    )
+
+
+def _documented_by(code: Optional[str], registry: Registry, docs_root=None) -> tuple:
+    """The registered services whose documentation file documents `code`."""
+    if not code:
+        return ()
+    from src.utils import reason_code_docs
+
+    return tuple(sorted({
+        registry.service_for_docs_file(stem)
+        for stem in reason_code_docs.services_for_code(code, root=docs_root)}))
+
+
+def resolve_dlt(payload, *, consumer_group: Optional[str] = None,
+                original_topic: Optional[str] = None, frames=(),
+                business_code: Optional[str] = None,
+                registry: Optional[Registry] = None,
+                docs_root=None) -> ServiceResolution:
+    """Which service a dead-lettered record belongs to (MULTI_SERVICE_PLAN.md
+    Phase 8, D15), and how that was decided.
+
+    The record's payload is in the rejection lane's contract, so every step
+    `resolve` takes is available; the DLT headers and the stack trace add
+    three more. In order, the first step that names exactly one service
+    decides:
+
+    1. the consumer group that gave up on the record, against each pack's
+       `dlt.consumer_groups` -- the failing consumer's own identity, as the
+       stage is the rejecting producer's;
+    2. `flowMetaData.stage` (and `subStage`), as for a rejection;
+    3. the original topic, against `dlt.original_topics`;
+    4. the failure site's first application frame claimed by any pack's
+       `dlt.java_packages`, longest prefix first;
+    5. `sourceTopic`, against `match.source_topics`;
+    6. the reason code -- the payload's, else the one the trace carries --
+       when exactly one documentation file documents it.
+
+    Every later step that names exactly one other service is recorded in
+    `conflict`, keyed by its source, and never overrides the decision.
+    """
+    registry = registry or load()
+    payload = payload if isinstance(payload, dict) else {}
+    flow = payload.get("flowMetaData")
+    flow = flow if isinstance(flow, dict) else {}
+
+    group = _text(consumer_group)
+    origin = _text(original_topic)
+    stage = _text(flow.get("stage"))
+    sub_stage = _text(flow.get("subStage"))
+    topic = _text(payload.get("sourceTopic"))
+    code = _reason_code_of(payload) or _text(business_code)
+    package_services, package_frame = registry.by_java_package(frames)
+
+    steps = [
+        (SOURCE_CONSUMER_GROUP, group,
+         registry.by_consumer_group(group) if group else []),
+        (SOURCE_FLOW_STAGE, stage,
+         registry.by_stage(stage.lower(), sub_stage.lower() if sub_stage else None)
+         if stage else []),
+        (SOURCE_ORIGINAL_TOPIC, origin,
+         registry.by_original_topic(origin) if origin else []),
+        (SOURCE_JAVA_PACKAGE, package_frame, package_services),
+        (SOURCE_SOURCE_TOPIC, topic, registry.by_topic(topic) if topic else []),
+        (SOURCE_REASON_CODE_DOCS, code, list(_documented_by(code, registry, docs_root))),
+    ]
+
+    candidate, source, matched, conflict = None, SOURCE_NONE, None, {}
+    for step_source, value, found in steps:
+        if len(found) > 1 and step_source != SOURCE_REASON_CODE_DOCS:
+            logger.error("Several services match one piece of DLT evidence; it "
+                         "decides nothing", source=step_source, value=value,
+                         services=found)
+        if len(found) != 1:
+            continue
+        if candidate is None:
+            candidate, source, matched = found[0], step_source, value
+        elif found[0] != candidate:
+            conflict[step_source] = found[0]
+
+    return ServiceResolution(
+        service=candidate or UNRESOLVED,
+        source=source,
+        matched=matched,
+        conflict=conflict or None,
+        detail={"consumer_group": group, "original_topic": origin,
+                "stage": stage, "sub_stage": sub_stage, "source_topic": topic,
+                "java_frame": package_frame, "reason_code": code},
         registry_sha256=registry.sha256,
     )
 
@@ -792,6 +984,28 @@ def enabled_services() -> frozenset:
     return frozenset(names or DEFAULT_ENABLED)
 
 
+def pilot_services() -> frozenset:
+    """The services analysed in pilot mode (MULTI_SERVICE_PLAN.md Phase 7):
+    analysed like an enabled service, except that their casebooks carry
+    `pilot: true` and their Synthesis agent cannot stage a replay. Blank
+    means none -- unlike the enabled list, there is no default to fall back
+    to."""
+    raw = os.environ.get(ENV_PILOT, "")
+    return frozenset(name.strip() for name in raw.split(",") if name.strip())
+
+
+def is_pilot(name: Optional[str]) -> bool:
+    """Whether the pack `name` is a pilot service's. A service named in both
+    lists is a pilot -- boot validation refuses that setting, and where it
+    has not run, the more cautious reading wins."""
+    return bool(name) and name in pilot_services()
+
+
+def analysed_services() -> frozenset:
+    """Every service whose packets the gate lets through: enabled or pilot."""
+    return enabled_services() | pilot_services()
+
+
 @dataclass(frozen=True)
 class GateDecision:
     #: Whether to acknowledge the packet without analysing it.
@@ -812,7 +1026,7 @@ def skip_reason(resolution: dict, registry: Optional[Registry] = None) -> Option
         return SKIP_UNRESOLVED
     if not registry.is_registered(service):
         return SKIP_NOT_REGISTERED
-    if service not in enabled_services():
+    if service not in analysed_services():
         return SKIP_NOT_ENABLED
     return None
 
@@ -855,13 +1069,83 @@ def pack_for(resolution: dict, registry: Optional[Registry] = None) -> str:
 
 def packs_to_prebuild(registry: Optional[Registry] = None) -> tuple:
     """The packs whose agents are built with the graph rather than on first
-    use: every enabled service's, and in `record` mode the pre-registry pack
-    that packets the gate would skip are analysed with."""
+    use: every enabled and pilot service's, and in `record` mode the
+    pre-registry pack that packets the gate would skip are analysed with."""
     registry = registry or load()
-    names = {name for name in enabled_services() if registry.is_registered(name)}
+    names = {name for name in analysed_services() if registry.is_registered(name)}
     if gate_mode() == GATE_RECORD and registry.is_registered(PRE_REGISTRY_PACK):
         names.add(PRE_REGISTRY_PACK)
     return tuple(sorted(names))
+
+
+# ======================================================================
+# The DLT lane's gate and pack (MULTI_SERVICE_PLAN.md Phase 8)
+# ======================================================================
+
+def dlt_gate_mode() -> str:
+    raw = os.environ.get(ENV_DLT_GATE, "").strip().lower()
+    return raw if raw in GATE_MODES else GATE_RECORD
+
+
+def dlt_enabled_services() -> frozenset:
+    """The services whose dead-lettered records are analysed. Blank means the
+    default, never "nothing", as for the rejection lane."""
+    raw = os.environ.get(ENV_DLT_ENABLED, "")
+    names = [name.strip() for name in raw.split(",") if name.strip()]
+    return frozenset(names or DEFAULT_ENABLED)
+
+
+def dlt_skip_reason(resolution: dict, registry: Optional[Registry] = None) -> Optional[str]:
+    """Why the DLT gate would skip a record with this resolution, or None.
+
+    An unresolved record is always a skip reason: the DLT lane has no
+    `_default` pack to analyse it with, and in `record` mode it is analysed
+    exactly as before, with no pack at all.
+    """
+    registry = registry or load()
+    service = (resolution or {}).get("service") or UNRESOLVED
+    if service == UNRESOLVED:
+        return SKIP_UNRESOLVED
+    if not registry.is_registered(service):
+        return SKIP_NOT_REGISTERED
+    if service not in dlt_enabled_services():
+        return SKIP_NOT_ENABLED
+    return None
+
+
+def dlt_gate(resolution: dict, registry: Optional[Registry] = None) -> GateDecision:
+    reason = dlt_skip_reason(resolution, registry)
+    mode = dlt_gate_mode()
+    return GateDecision(skip=bool(reason) and mode == GATE_ENFORCE,
+                        reason=reason, mode=mode)
+
+
+def dlt_pack_for(resolution: dict, registry: Optional[Registry] = None) -> Optional[str]:
+    """The pack a dead-lettered record is analysed with: its own service's
+    when the DLT gate lets it through, otherwise none -- which is how every
+    record was analysed before the DLT lane resolved services, so `record`
+    mode changes nothing about analysis here either."""
+    registry = registry or load()
+    if dlt_skip_reason(resolution, registry) is None:
+        return (resolution or {}).get("service")
+    return None
+
+
+def fingerprint_service(resolution: dict, registry: Optional[Registry] = None) -> Optional[str]:
+    """The service a DLT failure fingerprint is namespaced by, or None.
+
+    The resolved service, when it is registered and is not the pre-registry
+    one: so two services' records never share a group, while every
+    enu-biometric and every unresolved fingerprint -- and the groups and
+    recommendations stored under them -- is what it was. Independent of the
+    gate: a group describes a service's failure whether or not that service
+    is analysed yet.
+    """
+    registry = registry or load()
+    service = (resolution or {}).get("service")
+    if registry.is_registered(service) and service != PRE_REGISTRY_PACK:
+        return service
+    return None
 
 
 def enrolment_labels(name: Optional[str], registry: Optional[Registry] = None) -> dict:
@@ -1016,14 +1300,15 @@ def tool_prefix_error(tool_name: str, services, registry: Optional[Registry] = N
 
 
 def missing_corpus_dirs(docs_dir, registry: Optional[Registry] = None) -> list:
-    """Enabled services whose DROA corpus directory is absent from `docs_dir`.
+    """Enabled and pilot services whose DROA corpus directory is absent from
+    `docs_dir`.
 
     Checked once the corpus has been downloaded, not at boot: the download
     runs in the background after the API has started.
     """
     registry = registry or load()
     root = Path(docs_dir)
-    return [name for name in sorted(enabled_services())
+    return [name for name in sorted(analysed_services())
             if registry.is_registered(name)
             and not (root / registry.packs[name].droa_corpus_dir).is_dir()]
 
@@ -1058,15 +1343,32 @@ def validate(root=None, docs_root=None) -> tuple:
             errors.append(f"{ENV_ENABLED} names {name!r}, which has no valid "
                           f"pack in {registry.root}.")
 
+    # MULTI_SERVICE_PLAN.md Phase 7. A service in both lists is a move from
+    # pilot to enabled done halfway: whether its Synthesis may stage replays
+    # would then depend on which list was read, so it is refused.
+    for name in sorted(pilot_services()):
+        if name in (DEFAULT_PACK, UNRESOLVED):
+            errors.append(f"{ENV_PILOT} names {name!r}, which is not a "
+                          f"service. Unresolved packets are governed by "
+                          f"{ENV_UNRESOLVED}.")
+        elif not registry.is_registered(name):
+            errors.append(f"{ENV_PILOT} names {name!r}, which has no valid "
+                          f"pack in {registry.root}.")
+        elif name in enabled_services():
+            errors.append(f"{name} is named in both {ENV_PILOT} and "
+                          f"{ENV_ENABLED}; a service is piloted or enabled, "
+                          f"not both.")
+
     from src.utils import reason_code_docs
     from src.utils.env import get_bool_env
 
-    # Where each enabled service's rules come from has to be a place that
+    # Where each analysed service's rules come from has to be a place that
     # exists (MULTI_SERVICE_PLAN.md 5.7): a service with neither a rules
     # database nor the documentation has no account of the rule at all, and
-    # one with a rules database it cannot reach has no rule either.
+    # one with a rules database it cannot reach has no rule either. A pilot
+    # service is analysed in full, so it is held to the same.
     docs_on = reason_code_docs.docs_enabled()
-    for name in sorted(enabled_services()):
+    for name in sorted(analysed_services()):
         if not registry.is_registered(name):
             continue  # already reported above
         source = registry.packs[name].rule_source_type
@@ -1078,6 +1380,27 @@ def validate(root=None, docs_root=None) -> tuple:
                 and not os.environ.get("DB_HOST", "").strip():
             errors.append(f"{name} has rule_source.type 'rules_db' and "
                           f"USE_MOCK_DB is off, but DB_HOST is not set.")
+
+    for variable in (ENV_DLT_GATE,):
+        raw = os.environ.get(variable, "").strip().lower()
+        if raw and raw not in GATE_MODES:
+            errors.append(f"{variable} must be one of {list(GATE_MODES)}; got "
+                          f"{raw!r}.")
+    for name in sorted(dlt_enabled_services()):
+        if name in (DEFAULT_PACK, UNRESOLVED):
+            errors.append(f"{ENV_DLT_ENABLED} names {name!r}, which is not a "
+                          f"service.")
+        elif not registry.is_registered(name):
+            errors.append(f"{ENV_DLT_ENABLED} names {name!r}, which has no valid "
+                          f"pack in {registry.root}.")
+        elif not (registry.packs[name].consumer_groups
+                  or registry.packs[name].original_topics
+                  or registry.packs[name].java_packages
+                  or registry.packs[name].stages
+                  or registry.packs[name].source_topics):
+            warnings.append(f"{name} is in {ENV_DLT_ENABLED} but neither its dlt "
+                            f"section nor its match section can place a "
+                            f"dead-lettered record in it.")
 
     if unresolved_policy() == UNRESOLVED_DEFAULT_PACK and not docs_on:
         warnings.append(f"{ENV_UNRESOLVED} is {UNRESOLVED_DEFAULT_PACK!r} and "
@@ -1115,8 +1438,11 @@ def validate(root=None, docs_root=None) -> tuple:
 # The stored resolution
 # ======================================================================
 
-def load_or_resolve(storage, event_id: str, payload) -> tuple:
+def load_or_resolve(storage, event_id: str, payload, resolver=None) -> tuple:
     """(resolution dict, fresh) for one packet.
+
+    `resolver(payload)` resolves afresh; `resolve` by default. The DLT lane
+    passes `resolve_dlt` with the record's headers and trace bound.
 
     The stored resolution wins when there is one: it is what the fetch stage
     decided, and the analysis stage must act on the same answer even if the
@@ -1141,7 +1467,7 @@ def load_or_resolve(storage, event_id: str, payload) -> tuple:
             return stored, False
         logger.warning("Ignoring an unreadable stored service resolution",
                        event_id=event_id)
-    return resolve(payload).as_dict(), True
+    return (resolver or resolve)(payload).as_dict(), True
 
 
 def persist(storage, event_id: str, resolution: dict) -> bool:

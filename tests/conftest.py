@@ -141,11 +141,17 @@ ISOLATED_ENV_VARS = (
     # service's agents are offered.
     "AGENT_TOOLS_COMMON",
     # The service registry and the intake gate. The directory selects which
-    # packs exist; the other three decide whether a packet is analysed at all.
+    # packs exist; the other four decide whether a packet is analysed at all,
+    # and the pilot list also whether its Synthesis may stage a replay.
     "SERVICE_PACKS_DIR",
     "REJECTION_SERVICE_GATE",
     "REJECTION_SERVICES_ENABLED",
+    "REJECTION_SERVICES_PILOT",
     "REJECTION_UNRESOLVED_SERVICE",
+    # The DLT lane's own gate (Phase 8): whether a dead-lettered record of a
+    # service is analysed, and with which pack.
+    "DLT_SERVICE_GATE",
+    "DLT_SERVICES_ENABLED",
     # A cap: below a pack's size it turns the pack into a boot error.
     "SERVICE_PACK_MAX_CHARS",
     # LLM provider selection.

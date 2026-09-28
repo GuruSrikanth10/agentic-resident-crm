@@ -377,15 +377,19 @@ def _common_names() -> frozenset:
 
 
 def _check_scope(role: str, service: Optional[str]) -> None:
-    """A rejection role is always scoped by a service; a DLT role never is."""
+    """A rejection role is always scoped by a service. A DLT role is scoped by
+    one when its record was analysed with its service's pack, and keeps the
+    role-only selection otherwise (MULTI_SERVICE_PLAN.md Phase 8); it has no
+    `_default` pack."""
     if role not in AGENT_ROLES:
         raise ValueError(f"Unknown agent role {role!r}; the roles are {list(AGENT_ROLES)}.")
     if role in SERVICE_ROLES and not service:
         raise ValueError(f"The {role} role's tools are scoped by service; name the "
                          f"packet's pack ({service_registry.DEFAULT_PACK} for an "
                          f"unresolved packet).")
-    if role in DLT_ROLES and service is not None:
-        raise ValueError(f"The {role} role is not scoped by service; pass no service.")
+    if role in DLT_ROLES and service == service_registry.DEFAULT_PACK:
+        raise ValueError(f"The {role} role has no {service_registry.DEFAULT_PACK} "
+                         f"pack; pass no service for an unplaced record.")
 
 
 def in_scope(tool: RemoteTool, service: str) -> bool:
@@ -413,8 +417,9 @@ def selection(role: str, service: Optional[str] = None, *,
     """The catalog's tools that `role` gets for a packet analysed with the pack
     `service`, in a stable order.
 
-    `service` is required for the rejection roles and refused for the DLT
-    roles, which keep the role-only selection (MULTI_SERVICE_PLAN.md 5.6).
+    `service` is required for the rejection roles (MULTI_SERVICE_PLAN.md
+    5.6). For the DLT roles it is optional: with one they are scoped the same
+    way; with none they keep the role-only selection (Phase 8).
     """
     _check_scope(role, service)
     catalog = catalog or current_catalog()
@@ -583,12 +588,15 @@ def opencode_agent(role: str, service: Optional[str] = None) -> str:
     """The opencode agent a harness task for `role` runs as.
 
     `crm_<role>__<service_slug>` for a rejection role -- `crm_<role>__default`
-    for the `_default` pack, and for no pack at all -- and `crm_<role>` for a
-    DLT role, which is not scoped by service.
+    for the `_default` pack, and for no pack at all. For a DLT role,
+    `crm_<role>__<service_slug>` for a record analysed with its service's
+    pack, and `crm_<role>` for one analysed with none.
     """
     if role in SERVICE_ROLES:
         slug = service_registry.service_slug(service or service_registry.DEFAULT_PACK)
         return f"{OPENCODE_AGENT_PREFIX}{role}__{slug}"
+    if service:
+        return f"{OPENCODE_AGENT_PREFIX}{role}__{service_registry.service_slug(service)}"
     return OPENCODE_AGENT_PREFIX + role
 
 
@@ -597,7 +605,8 @@ def opencode_config() -> dict:
 
     One opencode agent per harness role and scope, each allowed exactly the
     tools that role gets here for that scope: for a rejection role, one per
-    registered service and one for `_default`; for a DLT role, one. So a
+    registered service and one for `_default`; for a DLT role, one per
+    registered service and one with no service. So a
     harness task can no more reach a tool outside its role and service than a
     deep agent can. opencode deep-merges this with its other config, so the
     provider block it already has is left alone. Built when `opencode serve`
@@ -612,7 +621,8 @@ def opencode_config() -> dict:
                for server in catalog.servers}
     agents = {}
     for role in HARNESS_ROLES:
-        for service in (scopes() if role in SERVICE_ROLES else (None,)):
+        for service in (scopes() if role in SERVICE_ROLES
+                        else (None, *service_registry.load().services())):
             tools = {f"{server.name}_*": False for server in catalog.servers}
             for tool in selection(role, service, catalog=catalog):
                 tools[tool.opencode_name] = True

@@ -216,6 +216,24 @@ DLT_CASES = _counter(
     ("failure_class",),
 )
 
+DLT_SERVICE_RESOLUTIONS = _counter(
+    "agentic_resident_crm_dlt_service_resolutions_total",
+    "Dead-lettered records whose service was resolved (MULTI_SERVICE_PLAN.md "
+    "Phase 8), by service, by how (consumer_group, flow_stage, "
+    "original_topic, java_package, source_topic, reason_code_docs, none) and "
+    "by whether later evidence named a different service (conflict).",
+    ("service", "source", "conflict"),
+)
+
+DLT_SKIPPED = _counter(
+    "agentic_resident_crm_dlt_skipped_total",
+    "Dead-lettered records acknowledged without analysis because their "
+    "service is unresolved, unregistered or not in DLT_SERVICES_ENABLED. "
+    "Counted only with DLT_SERVICE_GATE=enforce; in record mode the same "
+    "decision is logged instead.",
+    ("service", "reason"),
+)
+
 DLT_CORROBORATION = _counter(
     "agentic_resident_crm_dlt_corroboration_total",
     "Trace-vs-log corroboration verdicts.",
@@ -335,6 +353,20 @@ def record_dlt_singleflight(outcome: str) -> None:
 def record_dlt_per_code_violation(pattern: str) -> None:
     if DLT_PER_CODE_VIOLATIONS is not None:
         DLT_PER_CODE_VIOLATIONS.labels(pattern=pattern).inc()
+
+
+def record_dlt_service_resolution(resolution: dict) -> None:
+    """Count one freshly computed DLT resolution, as for the rejection lane."""
+    resolution = resolution or {}
+    DLT_SERVICE_RESOLUTIONS.labels(
+        service=str(resolution.get("service") or "unknown"),
+        source=str(resolution.get("source") or "none"),
+        conflict="true" if resolution.get("conflict") else "false",
+    ).inc()
+
+
+def record_dlt_skipped(service: Optional[str], reason: Optional[str]) -> None:
+    DLT_SKIPPED.labels(service=service or "unknown", reason=reason or "unknown").inc()
 
 
 def record_dlt_case(failure_class: str) -> None:

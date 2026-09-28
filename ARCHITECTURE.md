@@ -782,6 +782,8 @@ agentic-resident-crm/
 │   ├── test_service_rules.py       # Rule source per pack: the rules table, the notes, the case files
 │   ├── test_service_runbooks.py    # Runbooks and learned rules per service: store, binding, allowlist, scope
 │   ├── test_service_logs.py        # Logs per service: routing, catalogs, vocabulary, key redaction, audit
+│   ├── test_service_pilot.py       # Pilot mode: the gate, no replay tool, casebook flag, accuracy per service
+│   ├── test_service_dlt.py         # DLT per service: contract, identity, resolution, gate, packs, fingerprint
 │   ├── fixtures/reason_code_docs/  # A small valid store the pipeline tests look up in
 │   ├── fixtures/prompts_before_service_packs/ # The prompts as they were, for content preservation
 │   ├── fixtures/composed_prompts/  # Snapshots of the composed prompts, per pack (section 3.2.3)
@@ -808,8 +810,8 @@ agentic-resident-crm/
 │   │   ├── stacktrace.py           # `Caused by:` chain parsing, frames, fingerprint, FrameLocation
 │   │   ├── classify.py             # Failure taxonomy A/B/C/U (pure; takes a catalog hook)
 │   │   ├── registry.py             # Reason-code catalog: description, category, failure class
-│   │   ├── identity.py             # case_id = dlt-{topic}-{partition}-{offset}
-│   │   ├── payload.py              # refId resolution: key -> configured -> per-type -> search
+│   │   ├── identity.py             # case_id = dlt-{topic}-{partition}-{offset}[-g{group}]; per-record storage key
+│   │   ├── payload.py              # refId: the rejection contract's, else key -> configured -> per-type -> search
 │   │   ├── window.py               # Log window anchored on the last attempt
 │   │   ├── corroborate.py          # Trace-vs-log check; the mis-cast detector
 │   │   ├── groups.py               # Per-fingerprint occurrence records + recommendations
@@ -892,7 +894,7 @@ agentic-resident-crm/
 │   │   ├── build_catalog.py        # CLI: Stage 0 offline template catalog builder (--service: one service's)
 │   │   ├── redaction_audit.py      # CLI: personal data left in a service's sample logs after redaction
 │   │   ├── eval_harness.py         # CLI: Stage 6 evaluation harness for pipeline accuracy
-│   │   ├── accuracy_report.py      # CLI: resolution accuracy by reason code (Phase E runbook gate)
+│   │   ├── accuracy_report.py      # CLI: resolution accuracy by service and reason code (runbook and pilot gate)
 │   │   ├── prune_checkpoints.py    # CLI: SQLite checkpoint pruning utility
 │   │   ├── prune_casesheets.py     # CLI: Old/orphaned casesheet cleanup
 │   │   ├── probe_s3_cas.py         # CLI: does this S3 endpoint honour conditional writes?
@@ -1310,7 +1312,7 @@ replace the files shipped in `src/` -- or when no bucket is configured.
 Every service publishes its rejections to the one topic the fast consumer
 reads, in one structure. `MULTI_SERVICE_PLAN.md` moves the lane from "every
 packet is enu-biometric" to "every packet is analysed with its own service's
-knowledge". Phases 1 to 6 are built:
+knowledge". Phases 1 to 8 are built:
 
 - **Phase 1** places each packet in a service and can turn away the services
   that are not switched on yet.
@@ -1325,6 +1327,14 @@ knowledge". Phases 1 to 6 are built:
 - **Phase 6** searches each packet's own service's logs, reduces them with
   that service's catalog and vocabulary, and redacts personal data by JSON
   key as well as by pattern, for every packet.
+- **Phase 7** adds pilot mode, in which a service is analysed without being
+  able to trigger a replay, and measures accuracy per service. No second
+  service is onboarded yet: that needs Phase 0's values and a pack written by
+  the service's experts.
+- **Phase 8** takes the DLT lane multi-service. Every service dead-letters its
+  records with the rejection lane's payload and key, so a record is placed in
+  a service the same way, plus three DLT signals. It is gated, stored,
+  fingerprinted, logged and analysed as that service's.
 
 **The registry** (`src/utils/service_registry.py`) is one directory per service
 under `SERVICE_PACKS_DIR` (default `src/service_packs/`), each with a
@@ -1361,8 +1371,8 @@ stage or topic still wins and the resolution records
 records only; nothing is skipped, and what `enforce` would do is logged ("The
 service gate would skip this packet"). With `enforce`, a packet whose service
 is unresolved (`service_unresolved`), has no pack (`service_not_registered`)
-or is not in `REJECTION_SERVICES_ENABLED` (`service_not_enabled`, default list
-`enu-biometric`) gets `200 {"status": "skipped", "reason": ..., "service": ...}`,
+or is in neither `REJECTION_SERVICES_ENABLED` (default `enu-biometric`) nor
+`REJECTION_SERVICES_PILOT` (`service_not_enabled`) gets `200 {"status": "skipped", "reason": ..., "service": ...}`,
 and the consumer commits it like any other 2xx. `REJECTION_UNRESOLVED_SERVICE`
 is `skip` or `default_pack`; the latter lets unresolved packets through.
 
@@ -1802,6 +1812,169 @@ service's payload. Phase 0 has not been run, so the projection is unchanged.
 
 `tests/test_service_logs.py` guards all of this.
 
+#### Pilot mode and accuracy per service (Phase 7)
+
+A service is switched on in two steps. First it is piloted: listed in
+`REJECTION_SERVICES_PILOT` (blank means none). Then, once its experts' verdicts
+meet the agreed bar, it moves to `REJECTION_SERVICES_ENABLED`.
+
+A pilot service is analysed exactly like an enabled one, with two differences:
+
+- **Its casebooks carry `"pilot": true`** at the top level. Every other
+  casebook has no `pilot` key, as before.
+- **Its Synthesis agent is built without `queue_for_replay`**, so nothing a
+  pilot concludes is replayed. The generic Synthesis prompt tells the agent to
+  call that tool before answering REPLAY, so a pilot's prompt ends with a
+  `### PILOT MODE` section (`prompt_composer.PILOT_SYNTHESIS_SECTION`). The
+  section tells it the tool is absent, and to choose the action the evidence
+  supports anyway, because that choice is what the experts judge. The
+  Investigator and the Reviewer are the same as an enabled service's.
+
+The pilot decision is made once per packet, alongside the pack
+(`service_registry.is_pilot(pack)`), and travels in `GraphState.pilot`:
+
+- the route passes it in;
+- `fetch_logs_node` fills it for an invocation that did not;
+- a checkpoint written before the key existed reads it from its pack.
+
+The pool keys the Synthesis agent on (role, pack, pilot). The prompt
+fingerprint hashes the PILOT MODE section for a pilot pack, so a pilot's
+casebooks are never attributed to the same prompts as the enabled service's
+(`prompt_fingerprint(pack, pilot=)`, cached under `<pack>+pilot`).
+
+The gate treats a pilot service as enabled. Its agents are prebuilt with the
+graph, its `docs_cache/` directory is checked, and the Phase 3 rule-source
+checks apply to it. Boot validation refuses a pilot name with no pack,
+`_default`, `_unresolved`, or a service named in both lists: a move from pilot
+to enabled done halfway would leave replays depending on which list was read.
+Where validation has not run, a service in both lists is treated as a pilot.
+
+**Accuracy per service.** `outcomes.record_outcome` copies
+`packet_metadata.service` and the `pilot` flag into each outcome record.
+`outcomes.outcome_service` reads a record with no service, written before this
+existed, as enu-biometric's, the only service analysed until then.
+`accuracy_report` groups its rows by service as well as by reason code, type
+and source. `--service <name>` restricts it to one service; that figure is the
+one the owner reads to move a pilot to enabled. The `--shadow` report names
+each runbook's service and gives the full `<service>:<CODE>` allowlist entry.
+
+`tests/test_service_pilot.py` guards all of this.
+
+#### The DLT lane per service (Phase 8)
+
+**The contract.** Every service dead-letters its records with the rejection
+lane's Kafka payload (`MessagePayload`) and key. Only the headers differ: they
+carry the exception and the stack trace.
+
+- `dlt/payload.rejection_contract` recognises such a payload. The refId comes
+  from `packetMetaData.refId` (`ref_id_source: contract`).
+- The key follows the rejection lane's key contract, which names no field, so
+  it is only checked. It is a mismatch, and a `REFID_KEY_PAYLOAD_MISMATCH`
+  gap, when it equals none of the payload's eventId, refId, srn or sid.
+- `DltMessage.event_id` carries the payload's eventId. The payload summary
+  for the contract lists the stage, source topic, enrolment type, status and
+  reason codes, and labels the refId as the correlation id. It leaves out
+  every other `packetMetaData` field.
+- Payloads outside the contract keep the four older layers.
+
+**Identity.**
+
+- `case_id` gains the consumer group that gave up on the record, as a digest
+  (`dlt-{topic}-{partition}-{offset}-g{digest}`). Two services consuming one
+  topic can each dead-letter one original record.
+- Cases are stored per record, under `identity.storage_key`:
+  `<refId>__<digest of case_id>`, or the case id when there is no usable
+  refId. Keyed on the refId alone, a second record of the same packet (from
+  another service, or another stage) found the first one's terminal casebook
+  and was acknowledged without analysis.
+- The claim's "holder finished" check reads the holder's own record's key.
+- `case_storage.keys_for_ref_id` finds every case of a refId, including one
+  stored under the bare refId before Phase 8. `dlt_report --case` takes a
+  storage key, a refId or a case id.
+
+**Resolution** (`service_registry.resolve_dlt`). The first step that names
+exactly one service decides:
+
+1. the consumer group, against the pack's `dlt.consumer_groups`;
+2. `flowMetaData.stage` and `subStage`, as for a rejection;
+3. the original topic, against `dlt.original_topics` (whole-string regular
+   expressions);
+4. the failure site's first application frame that any pack's
+   `dlt.java_packages` claims, longest prefix first;
+5. `sourceTopic`;
+6. the reason code -- the payload's, else the trace's business code -- when
+   exactly one documentation file documents it.
+
+Every later step that names exactly one other service is recorded in
+`conflict`, keyed by its source. The consumer group comes first because it is
+the failing consumer's own identity, as the stage is the rejecting
+producer's. Boot validation refuses:
+
+- a consumer group, or a Java package, named by two services;
+- a malformed pattern or package;
+- any `dlt` signal on `_default`.
+
+The shipped enu-biometric pack names `com.uidai.enu.biometric`, which places
+the reference record.
+
+**The gate** has its own settings, because a service's crashes are onboarded
+apart from its rejections:
+
+- `DLT_SERVICE_GATE` is `record` (default) or `enforce`.
+- `DLT_SERVICES_ENABLED` defaults to `enu-biometric`; blank means the default.
+- Under `enforce`, `/fetch-dlt-logs` acknowledges a record whose service is
+  unresolved, unregistered or not enabled with
+  `{"status": "skipped", ...}`. This happens before the claim and before any
+  evidence is written, so the record leaves nothing behind.
+- `/analyze-dlt` checks again, for a service switched off while its records
+  waited.
+- There is no `_default` pack in this lane: an unresolved record is a skip
+  reason.
+- The resolution is stored as `service_resolution.json` beside the case, and
+  the analysis stage acts on it.
+
+**The pack** (`dlt_pack_for`) is the record's own service when the gate lets
+it through, and none otherwise. A record with no pack is analysed exactly as
+before: `record` mode changes nothing about analysis here either. With a pack:
+
+- **Agents.** One per (role, pack), built on first use; the no-pack agents
+  are built with the graph. The pack's optional `dlt.md` is appended as a
+  `### SERVICE CONTEXT`. A pack without one leaves the system prompts as they
+  were. `policy.md` is not given to the DLT agents: it is written for
+  business-rule rejections.
+- **User message.** It opens with a `### Service` section naming the service,
+  how the record was placed there, and any conflicting evidence.
+- **Harness.** The task ends with the service context, pointing the agent at
+  `docs_cache/<droa_corpus_dir>/`, and runs as `crm_dlt_<role>__<slug>`. The
+  two DLT templates tell the agent to use it.
+- **Tools.** Scoped by the service, as for a rejection. `selection(dlt_role,
+  None)` keeps the role-only selection, and `_default` is refused.
+- **Logs.** The record's own service's apps are searched, following Phase 6's
+  rule.
+- **Running version.** It is read from the service's first app, with its pod
+  match (`deployed.for_service`). enu-biometric keeps the environment's
+  default read, which `K8S_DEFAULT_APP` has always named.
+- **Metrics.** `LLM_CALLS` for the DLT nodes carries the resolved service.
+
+**The fingerprint** gains the service (`compute_fingerprint(service=)`,
+appended last). This happens only for a registered service other than
+enu-biometric (`fingerprint_service`), and whatever the gate decides: two
+services sharing a failure mode through a common library never share a group.
+Every enu-biometric and unresolved fingerprint, and the groups and
+recommendations under them, is unchanged.
+
+**The casebook** is schema 1.3. It adds:
+
+- `packet.event_id`, `packet.service` and `packet.service_resolution`;
+- `failure.fingerprint_service`;
+- `provenance.service_pack` (`{"service", "sha256"}`, or nulls).
+
+**Metrics:** `agentic_resident_crm_dlt_service_resolutions_total{service,
+source, conflict}` and `agentic_resident_crm_dlt_skipped_total{service,
+reason}`.
+
+`tests/test_service_dlt.py` guards all of this.
+
 ### 3.3 Core Pipeline (Deterministic StateGraph)
 Instead of relying on an unpredictable LLM to orchestrate the subagents, the system uses a highly robust, strictly deterministic Python `StateGraph` (via `langgraph`) in `src/core/agent_orchestrator.py`. This ensures the exact sequential execution of every step.
 
@@ -1810,7 +1983,7 @@ Instead of relying on an unpredictable LLM to orchestrate the subagents, the sys
 3. **Investigator Node**: A deep agent (section 3.5.1). For a service whose pack names the rules table as its rule source, the rule is still fetched deterministically in Python before the call: `lookup_rule_by_reason_code` is invoked by the node itself, the result is filtered by `enrolmentType` using the pack's own filter, and the rule text is injected into the prompt. If the rule lookup fails or returns nothing, it falls back to `get_error_description` (from `tool_registry.py`) to inject hardcoded error definitions (e.g., for `RESIDENT_BIOMETRIC_UPDATE_IDENTIFY_FAILURE`). For a service with no rules table nothing here queries one, and the prompt carries a `Rule source` note instead (section 3.2.3). On top of that the agent gets the MCP tools the `investigator` role is given (section 3.5.1) -- the process DB tools when `PROCESS_DB_ENABLED=true`, otherwise none -- and every call it makes, including one inside a `task` subagent, is recorded into the `tool_evidence` state field (merged across retries), saved as the `tool_evidence.json` artifact, and listed in the casebook's `resolution.provenance.tool_calls`. The harness path appends the same AVAILABLE TOOLS section to its prompt, runs as the `crm_investigator` opencode agent, and keeps the MCP calls it made -- read off the task's event stream -- as evidence the same way. A retry is shown the earlier attempts' tool results under `Evidence retrieved with tools`. The prompt is projected down to only the fields the Investigator needs (`eventId`, `packetMetaData`, `packetExecutionSummary`, `flowMetaData.stage`) rather than the full raw Kafka message, and on a retry it sends only the delta -- the prior investigation plus the Reviewer's feedback -- instead of resending the full payload/logs/rule context again. When `REJECTION_REASON_CODE_DOCS_ENABLED=true` the node additionally resolves the reason-code documentation for this packet (section 3.2.2) before anything else, stores it in graph state as `reason_code_doc` so every later node reuses the same version, counts the outcome on `reason_code_doc_lookups_total`, and builds both its prompts through `core/rejection_context.py` -- documentation and rule first, logs last, task restated after them, and only the logs trimmed when `REJECTION_PROMPT_MAX_CHARS` binds. With that switch off the prompts are byte-for-byte the ones described above. Either way it returns `investigator_path` (`harness` or `direct`), because a harness task that fails falls back silently and a comparison of the two paths would otherwise score the wrong one. When `USE_OPENCODE_HARNESS_REJECTION=true`, the node writes `context.json` and `supported_logs.txt` to the local casebook directory, renders the `RejectionInvestigator` harness prompt template, and calls `opencode_runner.run_task_json()` -- giving the agent Glob/Grep/Read access to the `docs_cache/` DROA corpus. It falls back to the direct LLM path on harness failure (section 3.2.1).
 4. **Reviewer Node**: A distinct deep agent, built once at graph-construction time (not per review) and bound to the `simple` LLM tier, that acts as a strict QC validator holding one tool (`add_learning_rule`). The tool no longer closes over the current `event_id`/investigation text per call -- it reads them from a pair of `contextvars.ContextVar`s that `reviewer_node` sets before each invocation, since each packet already runs on its own dedicated thread. `REJECTION_REVIEWER_EVIDENCE` defaults to **true**, so on the direct path it is now given the same evidence the Investigator had -- including what the Investigator's tools returned, as an `Evidence retrieved with tools` section (and, for a harness Reviewer, as `tool_evidence.txt`), without which every finding resting on a tool result could only be rejected -- the rule, the enrolment type, the projected payload, the logs, and the stored document -- through `build_review_prompt`, rather than the investigation text alone. It could not otherwise check the citation it most often rejects for, while `ReviewerAgent.md` asked it to do exactly that; setting the variable to false restores the older prompt character for character. It returns `reviewer_path` alongside its verdict. When `USE_OPENCODE_HARNESS_REJECTION=true`, the node rewrites `context.json`/`supported_logs.txt` from graph state (the same `_write_harness_case_files` the Investigator uses), writes `investigation_text.txt`, and renders the `RejectionReviewer` harness prompt template, giving the reviewer agent the same corpus access to verify the investigator's claims against service documentation. The harness reviewer has no tools, so a rejection returns its proposed rule as an optional `learning_rule` object in its JSON, which is passed to the same `queue_learning_rule` function behind `add_learning_rule` -- one validated path to `pending_rules.jsonl` either way. All file writes sit inside the harness `try`, so a missing or unwritable case directory falls back to the direct LLM like any other harness failure.
 5. **Conditional Router & Loop Guard**: A pure Python control edge that checks the Reviewer's output via `is_reviewer_approved()`: the (markdown/whitespace-stripped) feedback must *start with* the literal token `APPROVED`, not merely contain it -- this closes the "NOT APPROVED"/"DISAPPROVED" false-positive that a substring match would produce. Otherwise it increments `retry_count`; once `retry_count >= MAX_INVESTIGATION_RETRIES` it routes to the `escalate` node (preventing infinite LLM loops), else it loops back to the Investigator Node. A fresh (non-resumed) invocation always starts `retry_count` at 0, so a redelivered packet can never resume a stale checkpoint with the retry budget already exhausted.
-6. **Synthesis Node**: The final agent that takes the approved, heavily vetted technical diagnosis and translates it into a human-readable JSON `Casebook`. It holds the `queue_for_replay` tool. In shadow mode, it also compares its output to the runbook's pre-built resolution and logs a warning on any `action` divergence. When `REJECTION_SYNTHESIS_DOC_GUIDANCE=true` **and** the stored document both hit and carries `resolution_guidance`, the prompt gains a `### Resolution guidance from the reason code documentation` section holding those `- action: X | resident_action: Y | when: Z` lines; the validator has already checked the values against `ACTIONS` and `RESIDENT_ACTIONS`, so the model is never offered an action the contract would then reject. It has its own switch, **off by default**, so its effect on the chosen action can be measured apart from everything else the documentation changes. The repair prompt is untouched.
+6. **Synthesis Node**: The final agent that takes the approved, heavily vetted technical diagnosis and translates it into a human-readable JSON `Casebook`. It holds the `queue_for_replay` tool, except for a pilot service's packet, whose Synthesis is built without it (section 3.2.3, Phase 7). In shadow mode, it also compares its output to the runbook's pre-built resolution and logs a warning on any `action` divergence. When `REJECTION_SYNTHESIS_DOC_GUIDANCE=true` **and** the stored document both hit and carries `resolution_guidance`, the prompt gains a `### Resolution guidance from the reason code documentation` section holding those `- action: X | resident_action: Y | when: Z` lines; the validator has already checked the values against `ACTIONS` and `RESIDENT_ACTIONS`, so the model is never offered an action the contract would then reject. It has its own switch, **off by default**, so its effect on the chosen action can be measured apart from everything else the documentation changes. The repair prompt is untouched.
 7. **Log Processor**: After the graph completes, `routes.py` structures the final casebook's `packet_status.rejection_data.rejection_logs` field into an object containing `path` and `gaps`. `path` records the **relative** name of the artifact that already holds the trace, so the evidence travels with the casebook and resolves identically on local disk and on S3. That name comes from the graph's `logs_artifact` state field: `fetch_logs_node` sets it to `"fetched_logs.txt"` and `filter_logs_node` overwrites it with `"filtered_logs.txt"` once that artifact is successfully written (on a failed write the pointer stays on `fetched_logs.txt`, which exists and holds a superset, rather than naming a key nothing wrote). A checkpoint resumed from state serialised before the field existed falls back to `"fetched_logs.txt"`. There is no size threshold and no truncation: whatever was fetched is persisted whole. When no logs were obtained (or `ENABLE_LOG_FETCHING=false`), `path` is the literal string `"No logs found"` and `gaps` is `null`.
 
    > **Nothing is written here.** This step used to `save_artifact(event_id, "supported_logs.txt", ...)` from the final graph state. That state is only ever the content of `fetched_logs.txt`, or of `filtered_logs.txt` when the LogFilter replaced it, so the write produced a byte-for-byte duplicate of an object already in the store -- and nothing ever read the duplicate back. `reduce_logs` had the same shape: it wrote `reduced_logs.txt` and then returned the identical string, which both production callers persist themselves as `fetched_logs.txt` (`fetch_and_persist_logs` in the rejection lane, `dlt_routes` in the DLT lane). Both writes are gone. A rejected packet's S3 prefix therefore holds `fetched_logs.txt` as the single canonical reduced trace, `raw_logs.txt` as the pre-noise-floor audit copy, and `filtered_logs.txt` only when `ENABLE_LOG_FILTER_AGENT=true` -- five log objects down to three. `reduced_logs.txt` is deliberately still listed in `prune_casesheets.LOG_ARTEFACTS` so cases written before this change are still cleaned up. The field was always a locator rather than the text, so no reader changes. The `gaps` field carries the evidence-gap banner lifted out of the raw trace (matched on `BANNER_HEADER`/`BANNER_FOOTER` from `k8s/gaps.py`) so operators retain the incompleteness warning without inline clutter.
@@ -2272,7 +2445,8 @@ python3 -m src.tools.check_drift            # detect rules.csv schema drift
 
 # Ground truth & accuracy (the loop that gates runbook promotion)
 python3 -m src.tools.record_outcome         # attach a verdict to a completed investigation
-python3 -m src.tools.accuracy_report        # accuracy by reason code
+python3 -m src.tools.accuracy_report        # accuracy by service and reason code
+python3 -m src.tools.accuracy_report --service <name>  # one service's (a pilot's promotion gate)
 python3 -m src.tools.accuracy_report --shadow  # would the shadowed runbook have been right?
 
 # Runbooks
@@ -2364,14 +2538,19 @@ Ten things are worth knowing without reading the whole plan:
    mis-cast detector -- the system's highest-value output -- live on every
    occurrence.
 
-4. **The refId comes from the Kafka record key first.** The record is keyed on
-   it, and the key survives a payload we cannot deserialise -- which is exactly
-   the case the DLT adapter exists to keep alive. Four layers are tried (key,
-   configured path, path registered for the payload's `__TypeId__`, bounded
-   search) and the casebook records which one answered, because a value that
-   fell through to the search is a guess that landed and one read off the key
-   is not. A key/payload disagreement is surfaced as an evidence gap, never
-   silently resolved.
+4. **The refId comes from the payload's contract, then the Kafka record key.**
+   Since Phase 8 of `MULTI_SERVICE_PLAN.md`, every service's DLT record carries
+   the rejection lane's payload and key; only the headers differ. A payload
+   that validates as that contract (`MessagePayload`) gives its refId from
+   `packetMetaData.refId` (source `contract`). The key is then only checked:
+   it is a mismatch when it equals none of the payload's identifiers (eventId,
+   refId, srn, sid). Any other payload goes through the four older layers: the
+   key, which survives a payload we cannot deserialise; a configured path; the
+   path registered for the payload's `__TypeId__`; and a bounded search. The
+   casebook records which one answered, because a value that fell through to
+   the search is a guess that landed and one read off the key is not. A
+   key/payload disagreement is surfaced as an evidence gap, never silently
+   resolved.
 
 5. **`event_id` on the payload is not the `refId`.** They are different UUIDs.
    This project's own vocabulary calls refId "the event id", so the field
@@ -2622,9 +2801,12 @@ The API probes the endpoint once at startup and logs an ERROR if overwrites
 are refused. Run `python -m src.tools.probe_s3_cas` to check an endpoint
 directly.
 
-**One analysis per DLT record (`src/dlt/claims.py`).** Storage is keyed on
+**One analysis per DLT record (`src/dlt/claims.py`).** Storage was keyed on
 the refId, deliberately, so an operator can find a casebook by the id they
-have. But the refId comes from the record key, and one DLT record delivered
+have. Since Phase 8 it is keyed per record, `<refId>__<digest of case_id>`
+(`identity.storage_key`), which keeps that property through the prefix
+(`case_storage.keys_for_ref_id`, `dlt_report --case <refId>`). But the refId
+could come from the record key, and one DLT record delivered
 under two keys got two refIds, two casebooks and two LLM runs. The fetch lane
 now claims `case_id` (topic-partition-offset, the record's own identity)
 create-only. A later delivery under a different refId is skipped. The same
@@ -2696,6 +2878,57 @@ first means group state is not accumulating.
 
 This section records where the running code diverges from the design intent above.
 It is maintained deliberately so the document stays a truthful source of truth.
+
+**Update 2026-09-28 (g):** Phase 8 of `MULTI_SERVICE_PLAN.md` -- the DLT lane
+per service (section 3.2.3, "The DLT lane per service"). What to know:
+
+1. **DLT cases are stored per record**, under `<refId>__<digest>`, no longer
+   under the bare refId. Cases written earlier stay where they are and are
+   still found by `dlt_report --case <refId>`. A DLT record redelivered
+   across this deploy has a new storage key and, when it names a consumer
+   group, a new case id. It is analysed once more, and counted once more in
+   its group.
+2. **Every `case_id` with a consumer-group header changes** (`-g<digest>` is
+   appended). Cases already on the analysis queue carry theirs in the message
+   body and keep it.
+3. **A DLT record in the rejection lane's contract takes its refId from the
+   payload, not the key.** Which field the key carries is not known here. A
+   key equal to none of the payload's identifiers is reported as
+   `REFID_KEY_PAYLOAD_MISMATCH`. If that gap appears on every record, the key
+   carries something else, and the check should be revisited.
+4. **enu-biometric's DLT records now search enu-biometric's apps** (its pack's
+   `logs.app_names`), not `ES_APP_NAMES`. This follows the rejection lane
+   since Phase 6. Its fingerprints, its version read and its prompts are
+   unchanged, except for the new `### Service` line in the user message.
+5. **A tool from another team's server that names the DLT roles but no
+   services** now reaches only records analysed with no pack, unless
+   `AGENT_TOOLS_COMMON` lists it. No shipped tool is affected.
+6. **The replay identity is unchanged.** `queue_for_replay` still gets the
+   refId (`DLT_REPLAY_ID_TYPE`), although the payload now carries an eventId
+   too. Which one OIS expects for a DLT redrive is still unconfirmed.
+7. **Pilot mode (Phase 7) is not applied to the DLT lane.** Its replays have
+   their own switches (`DLT_AUTO_REPLAY_ENABLED`, off).
+
+**Update 2026-09-28 (f):** Phase 7 of `MULTI_SERVICE_PLAN.md` -- pilot mode
+and accuracy per service (section 3.2.3, "Pilot mode and accuracy per
+service"). What to know:
+
+1. **Nothing changes until `REJECTION_SERVICES_PILOT` names a service.** It
+   ships blank. enu-biometric's prompts, tools and fingerprint are unchanged.
+2. **No service has been onboarded.** Phase 7's code is the pilot mechanism
+   only. Onboarding a service (plan section 7) needs Phase 0's `match` values
+   and a pack its experts write, and neither exists yet.
+3. **`accuracy_report` rows gained a `service` field**, and the table a
+   SERVICE column. The rows are now grouped by service too, so one reason
+   code raised by two services is reported as two rows. An outcome recorded
+   before this change is counted as enu-biometric's. Anything parsing
+   `--json` output should expect the new field.
+4. **Outcome records gained `service` and `pilot`.** Records written earlier
+   lack them; nothing rewrites them.
+5. **A pilot service's casebook is not yet treated differently by any
+   reader.** `pilot: true` is recorded, but no downstream consumer filters on
+   it. The only thing that stops a pilot's REPLAY verdict from being acted on
+   is the missing `queue_for_replay` tool.
 
 **Update 2026-09-28 (e):** Phase 6 of `MULTI_SERVICE_PLAN.md` -- logs and
 privacy per service (section 3.2.3, "Logs and privacy per service"). What to

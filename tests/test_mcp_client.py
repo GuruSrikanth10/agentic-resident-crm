@@ -342,11 +342,16 @@ def test_unknown_roles_are_refused():
         mcp_client.selection("investigatr", BIO, catalog=_catalog_of())
 
 
-def test_a_rejection_role_needs_a_service_and_a_dlt_role_takes_none():
+def test_a_rejection_role_needs_a_service_and_a_dlt_role_takes_one_or_none():
     with pytest.raises(ValueError, match="scoped by service"):
         mcp_client.selection("investigator", catalog=_catalog_of())
-    with pytest.raises(ValueError, match="not scoped by service"):
-        mcp_client.selection("dlt_investigator", BIO, catalog=_catalog_of())
+    # A DLT role is scoped by its record's service when it has one, and by
+    # role alone otherwise (MULTI_SERVICE_PLAN.md Phase 8); it has no
+    # `_default` pack.
+    mcp_client.selection("dlt_investigator", BIO, catalog=_catalog_of())
+    mcp_client.selection("dlt_investigator", catalog=_catalog_of())
+    with pytest.raises(ValueError, match="has no _default pack"):
+        mcp_client.selection("dlt_investigator", "_default", catalog=_catalog_of())
 
 
 # ======================================================================
@@ -359,7 +364,8 @@ def test_opencode_gets_the_servers_and_one_agent_per_harness_role_and_service(se
     assert set(config["agent"]) == {
         "crm_investigator__enu_biometric", "crm_investigator__default",
         "crm_reviewer__enu_biometric", "crm_reviewer__default",
-        "crm_dlt_investigator", "crm_dlt_reviewer"}
+        "crm_dlt_investigator", "crm_dlt_reviewer",
+        "crm_dlt_investigator__enu_biometric", "crm_dlt_reviewer__enu_biometric"}
     investigator = config["agent"]["crm_investigator__enu_biometric"]
     assert investigator["mode"] == "primary"
     assert investigator["tools"]["agent_tools_*"] is False

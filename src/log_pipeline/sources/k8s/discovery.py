@@ -376,7 +376,8 @@ def _list_pods(namespace: str, match_spec: PodMatchSpec, request_timeout: float)
 
 def list_pods_for_service(app: Optional[str] = None,
                           namespace: Optional[str] = None,
-                          request_timeout: Optional[float] = None):
+                          request_timeout: Optional[float] = None,
+                          match: Optional[dict] = None):
     """Raw pods for one service, or None when they cannot be listed.
 
     A read-only view for callers that want pod *metadata* rather than log
@@ -389,8 +390,11 @@ def list_pods_for_service(app: Optional[str] = None,
     "no errors occurred"; here an empty result is simply an unknown version,
     which every caller already has to handle, and the extra RBAC round-trip
     would be paid on the packet path for nothing.
+
+    `match` is the app's pack pod match, as for `discover_for_service`.
     """
-    resolved_namespace, match_spec = resolve_service(app=app, namespace=namespace)
+    resolved_namespace, match_spec = resolve_service(app=app, namespace=namespace,
+                                                     match=match)
     if not resolved_namespace:
         return None
 

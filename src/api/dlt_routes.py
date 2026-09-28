@@ -46,6 +46,7 @@ from src.dlt.case_storage import get_dlt_storage
 from src.dlt.corroborate import corroborate
 from src.dlt.classify import classify
 from src.dlt.headers import parse_headers
+from src.dlt.identity import storage_key
 from src.dlt.stacktrace import (
     build_signature,
     compute_fingerprint,
@@ -55,6 +56,7 @@ from src.dlt.stacktrace import (
 )
 from src.dlt.window import derive_window
 from src.log_pipeline import redaction
+from src.log_pipeline import scope as log_scope
 from src.log_pipeline.pipeline import reduce_logs
 from src.models.dlt_payload_schemas import summarise_payload
 from src.models.dlt_schemas import DltMessage
@@ -64,7 +66,7 @@ from src.storage.base import (
     PROTECTED_TERMINAL_STATUSES,
     TERMINAL_STATUSES,
 )
-from src.utils import metrics
+from src.utils import metrics, service_registry
 from src.utils.analysis_queue_publisher import publish_to_dlt_analysis_queue
 from src.utils.logging_config import get_logger
 
@@ -145,7 +147,10 @@ DEPLOYED_ARTIFACT = "deployed.json"
 #     finding.per_code_violations; recommendation_state now reports what
 #     happened ("unpersisted", "withheld", "none") instead of always "draft".
 #     Additive: every 1.1 field is unchanged.
-DLT_CASEBOOK_SCHEMA_VERSION = "1.2"
+# 1.3 adds packet.event_id, packet.service, packet.service_resolution,
+#     failure.fingerprint_service and provenance.service_pack
+#     (MULTI_SERVICE_PLAN.md Phase 8). Additive.
+DLT_CASEBOOK_SCHEMA_VERSION = "1.3"
 
 
 def build_failure(headers, exception_message: Optional[str]) -> dict:
@@ -204,6 +209,47 @@ def build_failure(headers, exception_message: Optional[str]) -> dict:
     }
 
 
+def resolve_service(storage, key: str, message: DltMessage, headers,
+                    failure: dict) -> tuple:
+    """(resolution, fresh) for one record (MULTI_SERVICE_PLAN.md Phase 8).
+
+    The fetch stage's stored answer when there is one, so both stages act on
+    the same service; otherwise `service_registry.resolve_dlt` from the
+    payload, the headers and the parsed trace.
+    """
+    def resolver(payload):
+        return service_registry.resolve_dlt(
+            payload, consumer_group=headers.consumer_group,
+            original_topic=headers.original_topic, frames=failure["frames"],
+            business_code=failure["business_code"])
+
+    return service_registry.load_or_resolve(storage, key, message.payload,
+                                            resolver=resolver)
+
+
+def fingerprinted(failure: dict, resolution: dict) -> dict:
+    """`failure` with its fingerprint namespaced by the record's service,
+    when `service_registry.fingerprint_service` names one; unchanged
+    otherwise, so enu-biometric's and unresolved records' groups keep their
+    fingerprints. Pure, like `build_failure`: both stages derive the same
+    value."""
+    service = service_registry.fingerprint_service(resolution)
+    if not service:
+        return {**failure, "fingerprint_service": None}
+    return {**failure, "fingerprint_service": service,
+            "fingerprint": compute_fingerprint(
+                failure["root_fqcn"], failure["frames"],
+                failure["business_code"] or "", type_id=failure["type_id"],
+                service=service)}
+
+
+def _log_service(resolution: dict, pack: Optional[str]) -> Optional[str]:
+    """The service whose logs and pods a record reads: its own when it is
+    analysed with its own pack, and the environment's lists otherwise, as
+    before (MULTI_SERVICE_PLAN.md Phase 6's rule, applied to the DLT lane)."""
+    return log_scope.service_to_search(resolution, pack)
+
+
 def _persist_evidence(storage, ref_id: str, message: DltMessage,
                       failure: dict, allowlist: list) -> None:
     """Write the verbatim record and the parsed failure, redacted."""
@@ -248,32 +294,63 @@ def fetch_dlt_logs(message: DltMessage):
     sync-dispatch threadpool.
     """
     case_id = message.case_id
-    ref_id = message.ref_id or case_id  # storage key; falls back to case_id
-    log = logger.bind(case_id=case_id, ref_id=ref_id)
+    # One key per record, led by the refId (identity.storage_key).
+    key = storage_key(message.ref_id, case_id)
+    # The refId this delivery claims the record under -- the case id when
+    # there is none, as before.
+    delivery = message.ref_id or case_id
+    log = logger.bind(case_id=case_id, ref_id=message.ref_id, storage_key=key)
     storage = get_dlt_storage()
 
-    recorded_status = storage.terminal_status(ref_id)
+    recorded_status = storage.terminal_status(key)
     if recorded_status in TERMINAL_STATUSES:
         log.info("Skipping fetch; a terminal DLT case already exists",
                  recorded_status=recorded_status)
         return {"status": "already_processed", "case_id": case_id}
 
-    # The terminal check above is keyed on the refId, which is the storage
-    # key. One DLT record arriving under two record keys has two refIds and
-    # would pass it twice -- two casebooks, two investigations. The claim is
-    # keyed on case_id, which is the record's own idempotent identity.
-    claim = claims.claim_case(case_id, ref_id)
+    headers = parse_headers(message.headers)
+    failure = build_failure(headers, headers.exception_message)
+
+    # Which service this record belongs to, and whether the DLT gate lets it
+    # through (MULTI_SERVICE_PLAN.md Phase 8). Decided before the claim and
+    # before anything is written: a skipped record leaves nothing behind, so
+    # it can still be analysed in full if it is redriven once its service is
+    # enabled.
+    resolution, fresh = resolve_service(storage, key, message, headers, failure)
+    if fresh:
+        metrics.record_dlt_service_resolution(resolution)
+    decision = service_registry.dlt_gate(resolution)
+    if decision.skip:
+        metrics.record_dlt_skipped(resolution["service"], decision.reason)
+        log.info("Skipping; the record's service is not analysed by the DLT lane",
+                 service=resolution["service"], reason=decision.reason,
+                 resolved_by=resolution.get("source"))
+        return {"status": "skipped", "reason": decision.reason,
+                "service": resolution["service"], "case_id": case_id}
+    if decision.reason:
+        log.info("The DLT service gate would skip this record; recording only",
+                 service=resolution["service"], reason=decision.reason,
+                 resolved_by=resolution.get("source"), gate_mode=decision.mode)
+    pack = service_registry.dlt_pack_for(resolution)
+    log_service = _log_service(resolution, pack)
+    failure = fingerprinted(failure, resolution)
+
+    # The terminal check above is keyed on the refId and the record. One DLT
+    # record arriving under two record keys can have two refIds and would pass
+    # it twice -- two casebooks, two investigations. The claim is keyed on
+    # case_id, which is the record's own idempotent identity.
+    claim = claims.claim_case(case_id, delivery)
     if not claim.won:
         log.info("Skipping; another delivery of this DLT record holds the claim",
                  claimed_by_ref_id=claim.holder_ref_id, outcome=claim.outcome)
         return {"status": "already_processed", "case_id": case_id,
                 "claimed_by": claim.holder_ref_id}
 
-    headers = parse_headers(message.headers)
-    failure = build_failure(headers, headers.exception_message)
     allowlist = [v for v in (message.ref_id, case_id) if v]
 
-    _persist_evidence(storage, ref_id, message, failure, allowlist)
+    _persist_evidence(storage, key, message, failure, allowlist)
+    if fresh:
+        service_registry.persist(storage, key, resolution)
     metrics.record_dlt_case(failure["failure_class"])
 
     gaps = []
@@ -287,19 +364,19 @@ def fetch_dlt_logs(message: DltMessage):
         log.warning("Record key and payload disagreed on the refId",
                     record_key=message.record_key)
 
-    if storage.artifact_exists(ref_id, FETCHED_LOGS_ARTIFACT):
+    if storage.artifact_exists(key, FETCHED_LOGS_ARTIFACT):
         log.info("Logs already fetched; reusing the persisted artifact")
     elif not message.ref_id:
         # Header-only is a valid outcome, not a failure. The stacktrace is
         # still the primary evidence; we simply cannot corroborate it.
         gaps.append("NO_CORRELATION_ID")
         log.warning("No refId on the payload; skipping the log fetch")
-        storage.save_artifact(ref_id, FETCHED_LOGS_ARTIFACT,
+        storage.save_artifact(key, FETCHED_LOGS_ARTIFACT,
                               "No refId available; logs were not fetched.")
     elif window is None:
         gaps.append("NO_TIMESTAMP")
         log.warning("No usable timestamp in the headers; skipping the log fetch")
-        storage.save_artifact(ref_id, FETCHED_LOGS_ARTIFACT,
+        storage.save_artifact(key, FETCHED_LOGS_ARTIFACT,
                               "No usable timestamp; logs were not fetched.")
     elif window.too_old:
         # A fetch certain to return nothing still costs a full Kubernetes
@@ -307,7 +384,7 @@ def fetch_dlt_logs(message: DltMessage):
         gaps.append("LOGS_TOO_OLD")
         log.warning("Log window is older than DLT_MAX_LOG_AGE_SECONDS; skipping the fetch",
                      window=window.describe())
-        storage.save_artifact(ref_id, FETCHED_LOGS_ARTIFACT,
+        storage.save_artifact(key, FETCHED_LOGS_ARTIFACT,
                               f"Log window too old to fetch: {window.describe()}")
     else:
         log.info("Fetching logs for the DLT case", window=window.describe())
@@ -315,21 +392,24 @@ def fetch_dlt_logs(message: DltMessage):
         try:
             formatted = reduce_logs(
                 # Search on refId -- the only identifier the service logs --
-                # but persist under ref_id (DLT_PLAN.md 5.5).
+                # but persist under the record's storage key (DLT_PLAN.md 5.5).
                 message.ref_id,
                 extra_identifiers=(case_id,),
-                storage_key=ref_id,
+                storage_key=key,
                 window=window.to_time_window(),
                 storage=storage,
+                # The record's own service's apps, when it is analysed with
+                # its own pack; the environment's lists otherwise.
+                **({"service": log_service} if log_service else {}),
             )
-            storage.save_artifact(ref_id, FETCHED_LOGS_ARTIFACT, formatted)
+            storage.save_artifact(key, FETCHED_LOGS_ARTIFACT, formatted)
         except Exception as e:
             # The stacktrace is already persisted, so a log-fetch failure
             # degrades the case rather than losing it.
             gaps.append("LOG_FETCH_FAILED")
             log.error("Log fetch failed; continuing header-only",
                        error=f"{type(e).__name__}: {e}")
-            storage.save_artifact(ref_id, FETCHED_LOGS_ARTIFACT,
+            storage.save_artifact(key, FETCHED_LOGS_ARTIFACT,
                                   f"Log fetch failed: {type(e).__name__}: {e}")
 
     # Which build was running when this packet failed. Recorded here, in the
@@ -339,19 +419,23 @@ def fetch_dlt_logs(message: DltMessage):
     #
     # Never gated on a feature flag: it answers Open Question 3 and mitigates
     # Risk R4 on its own, independently of the code check that consumes it.
-    baseline = deployed.running_version()
+    #
+    # The record's own service's pods, when it is analysed with its own pack
+    # (MULTI_SERVICE_PLAN.md Phase 8); the environment's default app
+    # otherwise, as before.
+    baseline = deployed.for_service(log_service)
     metrics.record_dlt_deployed_version_read(baseline.ok, baseline.mixed)
     if baseline.ok:
         log.info("Recorded the running build for this case",
                  versions=list(baseline.versions), mixed=baseline.mixed)
-    storage.save_artifact(ref_id, DEPLOYED_ARTIFACT,
+    storage.save_artifact(key, DEPLOYED_ARTIFACT,
                           json.dumps(baseline.as_dict(), indent=2, ensure_ascii=False))
 
-    existing = storage.load(ref_id, filename="status.json")
+    existing = storage.load(key, filename="status.json")
     existing_value = (existing or {}).get("packet_status", {}).get("status")
     if existing_value in (None, LOGS_FETCHED_STATUS):
-        storage.save(ref_id, {
-            "packet_metadata": {"eid": ref_id, "ref_id": message.ref_id,
+        storage.save(key, {
+            "packet_metadata": {"eid": key, "ref_id": message.ref_id,
                                 "started_at": time.time()},
             "packet_status": {"status": LOGS_FETCHED_STATUS},
         }, filename="status.json")
@@ -366,10 +450,12 @@ def fetch_dlt_logs(message: DltMessage):
     publish_to_dlt_analysis_queue(queued)
 
     log.info("Queued DLT case for analysis", state=LOGS_FETCHED_STATUS,
-             failure_class=failure["failure_class"], gaps=gaps)
+             failure_class=failure["failure_class"], gaps=gaps,
+             service=resolution["service"], service_pack=pack)
     return {"status": "queued_for_analysis", "case_id": case_id,
             "failure_class": failure["failure_class"], "gaps": gaps,
-            "baseline_versions": list(baseline.versions)}
+            "baseline_versions": list(baseline.versions),
+            "service": resolution["service"]}
 
 
 # ---------------------------------------------------------------------------
@@ -404,8 +490,12 @@ def _casebook(message: DltMessage, headers, failure: dict, corroboration,
               recommendation_state: str = groups.STATE_NONE,
               group_state: str = "ok",
               single_flight_outcome: Optional[str] = None,
-              per_code_check=None) -> dict:
+              per_code_check=None,
+              service_resolution: Optional[dict] = None,
+              service_pack: Optional[str] = None) -> dict:
     """Assemble the terminal casebook. See DLT_PLAN.md 7.1."""
+    service_resolution = service_resolution or {}
+    pack_spec = service_registry.pack(service_pack) if service_pack else None
     return {
         "schema_version": DLT_CASEBOOK_SCHEMA_VERSION,
         "case_id": message.case_id,
@@ -429,6 +519,12 @@ def _casebook(message: DltMessage, headers, failure: dict, corroboration,
             # agreed or only one of them spoke, not that the check was skipped.
             "payload_ref_id_conflict": (message.payload_ref_id
                                         if message.ref_id_mismatch else None),
+            # The payload's eventId, for a payload in the rejection lane's
+            # contract (MULTI_SERVICE_PLAN.md Phase 8).
+            "event_id": message.event_id,
+            # Which service the record belongs to, and how that was decided.
+            "service": service_resolution.get("service"),
+            "service_resolution": service_resolution or None,
         },
         "failure": {
             "class": failure["failure_class"],
@@ -441,6 +537,10 @@ def _casebook(message: DltMessage, headers, failure: dict, corroboration,
             "registry_stage": failure.get("registry_stage"),
             "signature": failure["signature"],
             "fingerprint": failure["fingerprint"],
+            # The service the fingerprint is namespaced by; null for
+            # enu-biometric and unresolved records, whose fingerprints are
+            # what they always were.
+            "fingerprint_service": failure.get("fingerprint_service"),
             "frames": failure["frames"],
             "truncated": failure["truncated"],
         },
@@ -484,6 +584,10 @@ def _casebook(message: DltMessage, headers, failure: dict, corroboration,
             # "leader", "reused", "waited_then_ran", "timeout", or null when
             # the gate was not needed.
             "single_flight": single_flight_outcome,
+            # The pack the agents were built from; null when the record was
+            # analysed with none, as every record was before Phase 8.
+            "service_pack": {"service": service_pack,
+                             "sha256": pack_spec.sha256 if pack_spec else None},
         },
         # The replay precheck's verdict (DLT_PLAN.md 14). Always present, and
         # always UNKNOWN when the feature is off -- "we did not look" and "we
@@ -533,11 +637,15 @@ async def analyze_dlt(message: DltMessage):
     its whole duration.
     """
     case_id = message.case_id
-    ref_id = message.ref_id or case_id  # storage key; falls back to case_id
-    log = logger.bind(case_id=case_id, ref_id=ref_id)
+    # One key per record, led by the refId (identity.storage_key).
+    key = storage_key(message.ref_id, case_id)
+    # The refId this delivery claims the record under -- the case id when
+    # there is none, as before.
+    delivery = message.ref_id or case_id
+    log = logger.bind(case_id=case_id, ref_id=message.ref_id, storage_key=key)
     storage = get_dlt_storage()
 
-    recorded_status = await _off_loop(storage.terminal_status, ref_id)
+    recorded_status = await _off_loop(storage.terminal_status, key)
     if recorded_status in TERMINAL_STATUSES:
         log.info("Skipping analysis; a terminal DLT case already exists",
                  recorded_status=recorded_status)
@@ -547,7 +655,7 @@ async def analyze_dlt(message: DltMessage):
     # taken over while it sat in the queue, must not be analysed as well. No
     # claim at all (claims disabled, or the claim store was down) proceeds.
     holder = await _off_loop(claims.holder_of, case_id)
-    if holder and holder != ref_id:
+    if holder and holder != delivery:
         log.info("Skipping analysis; another delivery of this DLT record "
                  "holds the claim", claimed_by_ref_id=holder)
         return {"status": "already_processed", "case_id": case_id,
@@ -555,9 +663,28 @@ async def analyze_dlt(message: DltMessage):
 
     headers = parse_headers(message.headers)
     failure = build_failure(headers, headers.exception_message)
+
+    # The service the fetch stage resolved, and the DLT gate again: it
+    # catches a service switched off while its records waited on the
+    # analysis queue (MULTI_SERVICE_PLAN.md Phase 8).
+    resolution, fresh = await _off_loop(resolve_service, storage, key, message,
+                                        headers, failure)
+    if fresh:
+        metrics.record_dlt_service_resolution(resolution)
+    decision = service_registry.dlt_gate(resolution)
+    if decision.skip:
+        metrics.record_dlt_skipped(resolution["service"], decision.reason)
+        log.info("Skipping analysis; the record's service is not analysed by "
+                 "the DLT lane", service=resolution["service"],
+                 reason=decision.reason)
+        return {"status": "skipped", "reason": decision.reason,
+                "service": resolution["service"], "case_id": case_id}
+    pack = service_registry.dlt_pack_for(resolution)
+    log_service = _log_service(resolution, pack)
+    failure = fingerprinted(failure, resolution)
     fingerprint = failure["fingerprint"]
 
-    logs = await _off_loop(storage.load_artifact, ref_id, FETCHED_LOGS_ARTIFACT) or ""
+    logs = await _off_loop(storage.load_artifact, key, FETCHED_LOGS_ARTIFACT) or ""
     # Re-derived from the payload on the queue message rather than read back
     # from the artifact, for the same reason `build_failure` re-parses the
     # trace: the derivation is pure, so recomputing it cannot drift, while a
@@ -576,9 +703,10 @@ async def analyze_dlt(message: DltMessage):
     # touches counts and history, never `recommendation`, so the reuse
     # decision below sees exactly the same cache state either way.
     #
-    # Keyed on case_id, not ref_id: occurrence idempotency must follow the DLT
-    # record, and one record redelivered under a different key has a new
-    # ref_id but the same case_id. ref_id is recorded alongside it.
+    # Keyed on case_id, not the refId: occurrence idempotency must follow the
+    # DLT record, and one record redelivered under a different record key can
+    # have a new refId but the same case_id. The case's storage key is
+    # recorded alongside it, as the refId was, so a member leads to its case.
     #
     # A failed write must not DLQ a packet. The group is read back instead,
     # so a transient error still serves an existing recommendation rather
@@ -592,7 +720,7 @@ async def analyze_dlt(message: DltMessage):
             failure_class=failure["failure_class"],
             business_code=failure["business_code"],
             corroboration=corroboration.verdict.value,
-            ref_id=ref_id,
+            ref_id=key,
         )
         metrics.record_dlt_group_write("occurrence", True)
     except Exception as e:
@@ -618,8 +746,8 @@ async def analyze_dlt(message: DltMessage):
     # the same reason `build_failure` re-parses the trace: the artifact is
     # what the fast lane actually observed, and a queue field can be dropped
     # by a schema change without anyone noticing.
-    baseline_versions = await _off_loop(_recorded_baseline, storage, ref_id)
-    running = await _off_loop(deployed.running_version)
+    baseline_versions = await _off_loop(_recorded_baseline, storage, key)
+    running = await _off_loop(deployed.for_service, log_service)
     code_check_result = await _off_loop(
         code_check.evaluate, failure, headers.last_attempt_ms,
         baseline_versions, running.versions)
@@ -693,8 +821,10 @@ async def analyze_dlt(message: DltMessage):
         else:
             log.info("Running the DLT analysis lane", reason=decision.reason)
             invoke = functools.partial(
-                orchestrator.investigate, ref_id, failure, corroboration, logs,
-                payload_summary=payload_summary)
+                orchestrator.investigate, key, failure, corroboration, logs,
+                payload_summary=payload_summary,
+                **({"service_resolution": resolution, "service_pack": pack}
+                   if pack else {}))
             try:
                 finding, parse_error = await asyncio.wait_for(
                     asyncio.get_running_loop().run_in_executor(
@@ -708,10 +838,10 @@ async def analyze_dlt(message: DltMessage):
                 # instead of leaving this side to finish later and overwrite it.
                 log.error("DLT analysis exceeded the server-side budget",
                           timeout_seconds=llm_budget, state="FAILED_TIMEOUT")
-                await _off_loop(storage.save_terminal, ref_id,
-                                _timeout_casebook(ref_id, message.ref_id, llm_budget))
+                await _off_loop(storage.save_terminal, key,
+                                _timeout_casebook(key, message.ref_id, llm_budget))
                 from src.utils.case_cleanup import cleanup_casebook_dir
-                cleanup_casebook_dir(ref_id)
+                cleanup_casebook_dir(key)
                 return {"status": "failed_timeout", "case_id": case_id}
             provenance = "agent"
             if finding is None:
@@ -780,7 +910,7 @@ async def analyze_dlt(message: DltMessage):
     # the model's raw, uncapped number.
     # May POST to the OIS replay endpoint or append to the pending queue --
     # network or filesystem either way.
-    replay = await _off_loop(auto_replay.maybe_replay, ref_id, message.ref_id,
+    replay = await _off_loop(auto_replay.maybe_replay, key, message.ref_id,
                              finding, code_check_result)
     metrics.record_dlt_auto_replay(
         "queued" if replay["queued"] else
@@ -794,7 +924,7 @@ async def analyze_dlt(message: DltMessage):
     # packet. Parking requires everything a replay requires except the
     # version, so this can never become a second replay path that bypasses
     # DLT_AUTO_REPLAY_ENABLED (DLT_PLAN.md 14, phase C7).
-    park = await _off_loop(parked.maybe_park, ref_id, message.ref_id,
+    park = await _off_loop(parked.maybe_park, key, message.ref_id,
                            code_check_result, finding)
     if park["parked"]:
         log.info("Parked the replay until its fix deploys", reason=park["reason"])
@@ -806,7 +936,8 @@ async def analyze_dlt(message: DltMessage):
                          park=park, recommendation_state=recommendation_state,
                          group_state=group_state,
                          single_flight_outcome=single_flight_outcome,
-                         per_code_check=per_code_check)
+                         per_code_check=per_code_check,
+                         service_resolution=resolution, service_pack=pack)
     if parse_error:
         casebook["finding"]["parse_error"] = parse_error
 
@@ -819,16 +950,16 @@ async def analyze_dlt(message: DltMessage):
     # Both files, for the reason spelled out at the matching guard in
     # routes.py: save_terminal writes casebook.json first, so a writer that
     # died between its two writes is visible only in casebook.json.
-    recorded_status = await _off_loop(storage.terminal_status, ref_id)
+    recorded_status = await _off_loop(storage.terminal_status, key)
     if recorded_status in PROTECTED_TERMINAL_STATUSES:
         log.warning("Discarding late DLT result; a terminal status was already "
                     "recorded by another actor", recorded_status=recorded_status)
         return {"status": "already_processed", "case_id": case_id}
 
-    await _off_loop(storage.save_terminal, ref_id, casebook)
+    await _off_loop(storage.save_terminal, key, casebook)
 
     from src.utils.case_cleanup import cleanup_casebook_dir
-    cleanup_casebook_dir(ref_id)
+    cleanup_casebook_dir(key)
 
     log.info("DLT case analysed", failure_class=failure["failure_class"],
              corroboration=corroboration.verdict.value,

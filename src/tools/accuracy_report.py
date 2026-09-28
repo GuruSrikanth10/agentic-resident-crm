@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 """
-Operator CLI: resolution accuracy by reason code, enrolment type, and source.
+Operator CLI: resolution accuracy by service, reason code, enrolment type, and
+source.
 
     python3 -m src.tools.accuracy_report
     python3 -m src.tools.accuracy_report --json
     python3 -m src.tools.accuracy_report --min-samples 10
+    python3 -m src.tools.accuracy_report --service enu-biometric
 
 This is the figure that gates everything in Phase E: a runbook should not be
 promoted to `serve` for a reason code until its accuracy matches the agents'
-on that same code (ENHANCEMENT_PLAN 4.1, 4.2).
+on that same code (ENHANCEMENT_PLAN 4.1, 4.2). With `--service` it is also
+the figure that moves a pilot service to REJECTION_SERVICES_ENABLED
+(MULTI_SERVICE_PLAN.md Phase 7). An outcome recorded before outcomes carried
+a service is counted as enu-biometric's, the only service analysed then.
 """
 import argparse
 import json
@@ -22,7 +27,16 @@ from dotenv import load_dotenv
 # bucket -- the same G2 symptom iter_outcomes() was rewritten to fix.
 load_dotenv()
 
-from src.utils.outcomes import iter_outcomes, summarise, summarise_shadow  # noqa: E402
+from src.utils.outcomes import (  # noqa: E402
+    for_service,
+    iter_outcomes,
+    summarise,
+    summarise_shadow,
+)
+
+
+def _outcomes(args):
+    return for_service(iter_outcomes(), args.service)
 
 
 def _shadow_report(args) -> int:
@@ -33,7 +47,7 @@ def _shadow_report(args) -> int:
     achieved? Promote a reason code to RUNBOOK_SERVE_ALLOWLIST once this shows
     enough verified samples and no accuracy regression against the agents.
     """
-    summary = summarise_shadow(iter_outcomes())
+    summary = summarise_shadow(_outcomes(args))
     rows = [r for r in summary["rows"] if r["shadowed"] >= args.min_samples]
     if args.reason_code:
         rows = [r for r in rows if r["reason_code"] == args.reason_code]
@@ -49,11 +63,12 @@ def _shadow_report(args) -> int:
         print("  python3 -m src.tools.record_outcome --list-pending")
         return 0
 
-    print(f"{'RUNBOOK':<34} {'TYPE':<6} {'SHADOWED':>8} {'AGREE':>7} "
-          f"{'VERIFIED':>8} {'RUNBOOK':>8} {'AGENT':>7}")
-    print("-" * 88)
+    print(f"{'SERVICE':<18} {'RUNBOOK':<34} {'TYPE':<6} {'SHADOWED':>8} "
+          f"{'AGREE':>7} {'VERIFIED':>8} {'RUNBOOK':>8} {'AGENT':>7}")
+    print("-" * 107)
     for row in rows:
         print(
+            f"{row['service'][:17]:<18} "
             f"{row['runbook_id'][:33]:<34} "
             f"{str(row['enrolment_type'])[:5]:<6} "
             f"{row['shadowed']:>8} "
@@ -62,7 +77,7 @@ def _shadow_report(args) -> int:
             f"{row['would_be_accuracy']:>8.1%} "
             f"{row['agent_accuracy']:>7.1%}"
         )
-    print("-" * 88)
+    print("-" * 107)
     print(f"{summary['total_shadowed']} shadowed resolution(s).")
 
     # The recommendation, stated explicitly rather than left to the reader.
@@ -85,11 +100,9 @@ def _shadow_report(args) -> int:
                        f"need {args.min_verdicts}")
         else:
             # Allowlist entries name the service (MULTI_SERVICE_PLAN.md D11).
-            # Outcome records carry no service until Phase 7, so until then
-            # the operator fills it in.
-            verdict = (f"READY: add {row.get('service') or '<service>'}:"
-                       f"{row['reason_code']} to RUNBOOK_SERVE_ALLOWLIST")
-        print(f"  {row['runbook_id']}: {verdict}")
+            verdict = (f"READY: add {row['service']}:{row['reason_code']} "
+                       f"to RUNBOOK_SERVE_ALLOWLIST")
+        print(f"  {row['service']}/{row['runbook_id']}: {verdict}")
 
     return 0
 
@@ -100,6 +113,9 @@ def main():
     parser.add_argument("--min-samples", type=int, default=1,
                         help="Hide rows with fewer outcomes than this")
     parser.add_argument("--reason-code", help="Filter to one reason code")
+    parser.add_argument("--service",
+                        help="Filter to one service's outcomes (an outcome "
+                             "with no service is enu-biometric's)")
     parser.add_argument("--shadow", action="store_true",
                         help="Report shadowed runbooks: agreement rate and the "
                              "accuracy each would have achieved (promotion gate)")
@@ -111,7 +127,7 @@ def main():
     if args.shadow:
         return _shadow_report(args)
 
-    summary = summarise(iter_outcomes())
+    summary = summarise(_outcomes(args))
     rows = [r for r in summary["rows"] if r["total"] >= args.min_samples]
     if args.reason_code:
         rows = [r for r in rows if r["reason_code"] == args.reason_code]
@@ -126,35 +142,37 @@ def main():
         print("Record some with: python3 -m src.tools.record_outcome --list-pending")
         return 0
 
-    print(f"{'REASON CODE':<34} {'TYPE':<8} {'SOURCE':<10} "
+    print(f"{'SERVICE':<18} {'REASON CODE':<34} {'TYPE':<8} {'SOURCE':<10} "
           f"{'N':>5} {'OK':>5} {'BAD':>5} {'PART':>5} {'ACC':>7}")
-    print("-" * 88)
+    print("-" * 107)
     for row in rows:
         print(
+            f"{row['service'][:17]:<18} "
             f"{row['reason_code'][:33]:<34} "
             f"{str(row['enrolment_type'])[:7]:<8} "
             f"{row['resolution_source'][:9]:<10} "
             f"{row['total']:>5} {row['CORRECT']:>5} {row['INCORRECT']:>5} "
             f"{row['PARTIAL']:>5} {row['accuracy']:>7.1%}"
         )
-    print("-" * 88)
+    print("-" * 107)
     print(f"{summary['total_outcomes']} outcome(s) recorded.")
 
     # Where the same reason code has both agent and runbook results, show them
     # side by side -- that comparison is the runbook promotion gate.
     by_code = {}
     for row in rows:
-        by_code.setdefault((row["reason_code"], row["enrolment_type"]), {})[
+        by_code.setdefault((row["service"], row["reason_code"],
+                            row["enrolment_type"]), {})[
             row["resolution_source"]] = row
     comparisons = {k: v for k, v in by_code.items()
                    if "agent" in v and "runbook" in v}
     if comparisons:
         print("\nAgent vs runbook on the same reason code:")
-        for (code, etype), sources in sorted(comparisons.items()):
+        for (service, code, etype), sources in sorted(comparisons.items()):
             agent, runbook = sources["agent"], sources["runbook"]
             delta = runbook["accuracy"] - agent["accuracy"]
             verdict = "runbook OK" if delta >= 0 else "runbook WORSE"
-            print(f"  {code} ({etype}): agent {agent['accuracy']:.1%} "
+            print(f"  {service}:{code} ({etype}): agent {agent['accuracy']:.1%} "
                   f"(n={agent['total']}) vs runbook {runbook['accuracy']:.1%} "
                   f"(n={runbook['total']})  -> {verdict}")
 

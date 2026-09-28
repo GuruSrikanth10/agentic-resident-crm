@@ -36,6 +36,10 @@ absent, empty, or says "(no logs were fetched)" — proceed without them.
 
 ## STEP 2 — Discover which service(s) are involved
 
+If this task ends with a SERVICE CONTEXT, the record has already been placed
+in a service from its evidence: start with that service, and use the steps
+below to find any other service the failure involved.
+
 - List the available services: Glob docs_cache/*/docs/architecture/components.md
 - Read docs_cache/MANIFEST.json for the full service list with file counts
 - Identify the relevant service(s) from the evidence:

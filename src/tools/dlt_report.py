@@ -8,7 +8,8 @@ stack trace:
     python -m src.tools.dlt_report --group <fingerprint-prefix>
 
 Also:
-    --case <case_id>    one case in full, with its trace
+    --case <id>         cases in full, with their traces: by case id, storage
+                        key, or refId (every case of that packet)
     --unreviewed        recommendations awaiting human review -- the queue a
                         person will eventually work, and the reason nothing
                         writes `final` in v1
@@ -40,7 +41,7 @@ load_dotenv()
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from src.dlt import groups, parked  # noqa: E402
-from src.dlt.case_storage import get_dlt_storage  # noqa: E402
+from src.dlt.case_storage import get_dlt_storage, keys_for_ref_id  # noqa: E402
 from src.dlt.reuse import llm_calls_avoided  # noqa: E402
 
 CLASS_LABELS = {
@@ -148,18 +149,36 @@ def cmd_group(prefix: str) -> None:
         print(f"\nInspect one with --case {members[-1]}")
 
 
-def cmd_case(ref_id: str) -> None:
+def case_keys(identifier: str) -> list:
+    """The storage keys of the cases `identifier` names: its own key, every
+    case of a refId (`<refId>__<digest>` since MULTI_SERVICE_PLAN.md Phase 8,
+    or the bare refId before it), or the one case whose `case_id` it is --
+    which is what a group's member list prints."""
     storage = get_dlt_storage()
-    casebook = storage.load(ref_id)
-    if not casebook:
-        raise SystemExit(f"No casebook for '{ref_id}'.")
+    if storage.load(identifier):
+        return [identifier]
+    keys = keys_for_ref_id(identifier)
+    if keys:
+        return keys
+    return [key for key in storage.list_events()
+            if (storage.load(key) or {}).get("case_id") == identifier]
 
-    print(json.dumps(casebook, indent=2, ensure_ascii=False))
 
-    trace = storage.load_artifact(ref_id, "trace.txt")
-    if trace:
-        print("\n--- trace.txt ---")
-        print(trace[:8000])
+def cmd_case(identifier: str) -> None:
+    storage = get_dlt_storage()
+    keys = case_keys(identifier)
+    if not keys:
+        raise SystemExit(f"No casebook for '{identifier}'.")
+
+    for key in keys:
+        if len(keys) > 1:
+            print(f"=== {key} ===")
+        print(json.dumps(storage.load(key), indent=2, ensure_ascii=False))
+
+        trace = storage.load_artifact(key, "trace.txt")
+        if trace:
+            print("\n--- trace.txt ---")
+            print(trace[:8000])
 
 
 def cmd_unreviewed() -> None:
@@ -396,7 +415,9 @@ def main():
                        help="Failure signatures ranked by volume")
     group.add_argument("--group", metavar="FINGERPRINT",
                        help="One signature in detail (prefix is enough)")
-    group.add_argument("--case", metavar="CASE_ID", help="One case in full")
+    group.add_argument("--case", metavar="ID",
+                       help="Cases in full: by case id, storage key, or refId "
+                            "(every case of that packet)")
     group.add_argument("--unreviewed", action="store_true",
                        help="Draft recommendations awaiting human review")
     group.add_argument("--stats", action="store_true", help="Corpus-level counts")

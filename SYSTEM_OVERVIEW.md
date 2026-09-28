@@ -870,7 +870,9 @@ difference between an evaluation loop and a hope.
 correct, incorrect, partial — to any finished casebook. This is the only
 source of truth the system has about its own accuracy, and everything that
 depends on knowing whether it works well (promoting a runbook, enabling the
-abstention floor, validating the deployment check) depends on it.
+abstention floor, validating the deployment check, moving a piloted service
+to enabled) depends on it. Each verdict records the packet's service, so
+accuracy is measured per service.
 
 ---
 
@@ -987,6 +989,7 @@ and the evidence has to come from running it in a mode where it cannot do harm.
 | Capability | Default | What turning it on does |
 |---|---|---|
 | Rejection analysis | **On** | The core lane |
+| A new service's rejections | Off | Piloted first: analysed in full and judged by its experts, but its findings cannot trigger a replay. Accuracy is measured per service, and the service is enabled only once it meets the agreed bar |
 | Crash (dead-letter) analysis | Off | Adds the second lane entirely |
 | Noise filtering agent | Off | Adds a model call to clean the trace |
 | Tool-using harness | Off | Agents gain documentation search |
@@ -1016,6 +1019,17 @@ These arrive on a dead-letter topic after the producing service has already
 exhausted its own retries. The lane mirrors the rejection lane's two-stage
 split for the same reason, and shares its evidence pipeline, storage and
 confidence policy. It shares neither the data model nor the runbook space.
+
+Every service dead-letters its records in the rejection lane's message shape,
+so each crash is placed in its service the same deterministic way. The
+consumer that gave up and the Java package that threw are extra evidence.
+From there the crash is treated as that service's own:
+
+- it is switched on per service;
+- its logs and its running build are that service's;
+- its agents are built with that service's knowledge;
+- its failure is grouped only with the same service's failures, so one
+  service's cached answer is never served to another's crash.
 
 ```
 collection stage:  parse the failure headers -> classify -> fingerprint

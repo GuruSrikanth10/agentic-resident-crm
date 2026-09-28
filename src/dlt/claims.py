@@ -12,7 +12,9 @@ arrived under two record keys; the key is what `resolve_ref_id` prefers, so
 the two deliveries got two refIds, two storage keys, two casebooks and two
 full LLM investigations.
 
-A claim closes that without moving the storage key. The first delivery of a
+A claim closes that without moving the storage key. (Since
+MULTI_SERVICE_PLAN.md Phase 8 the storage key is per record,
+`identity.storage_key`: the refId followed by a digest of the case id.) The first delivery of a
 record creates `dlt_claims/casebook_<case_id>/claim.json` naming its refId;
 any later delivery under a *different* refId finds the claim and is skipped.
 The claim is create-only, which every S3-compatible store supports -- unlike
@@ -122,7 +124,7 @@ def _claim(case_id: str, ref_id: str) -> Claim:
     if holder == ref_id:
         return Claim(won=True, outcome="same_delivery", holder_ref_id=holder)
 
-    if holder and _is_finished(holder):
+    if holder and _is_finished(holder, case_id):
         return Claim(won=False, outcome="duplicate", holder_ref_id=holder)
 
     age = now - float(existing.get("claimed_at") or 0.0)
@@ -187,11 +189,19 @@ def _record_alias(storage, case_id: str, ref_id: str) -> None:
                      ref_id=ref_id, error=f"{type(e).__name__}: {e}")
 
 
-def _is_finished(ref_id: str) -> bool:
+def _is_finished(ref_id: str, case_id: str) -> bool:
+    """Whether the holder's case of this record is terminal. Looked up under
+    the record's own storage key (`identity.storage_key`), not the bare refId:
+    another record of the same packet being finished says nothing about this
+    one."""
     from src.dlt.case_storage import terminal_status
+    from src.dlt.identity import storage_key
     from src.storage.base import TERMINAL_STATUSES
 
     try:
-        return terminal_status(ref_id) in TERMINAL_STATUSES
+        # A delivery with no refId claims under the case id, which is then
+        # its storage key as well.
+        key = case_id if ref_id == case_id else storage_key(ref_id, case_id)
+        return terminal_status(key) in TERMINAL_STATUSES
     except Exception:
         return False

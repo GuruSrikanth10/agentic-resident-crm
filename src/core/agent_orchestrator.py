@@ -291,6 +291,9 @@ def _service_update(state, event_id: str) -> dict:
         update.update(service=resolution["service"], service_resolution=resolution)
     if not state.get("service_pack"):
         update["service_pack"] = service_registry.pack_for(resolution)
+    if not isinstance(state.get("pilot"), bool):
+        update["pilot"] = service_registry.is_pilot(
+            update.get("service_pack") or state.get("service_pack"))
     return update
 
 
@@ -314,6 +317,16 @@ def _pack_of(state) -> str:
     if isinstance(pack, str) and pack:
         return pack
     return service_registry.pack_for(_service_resolution_of(state))
+
+
+def _pilot_of(state) -> bool:
+    """Whether the packet is analysed in pilot mode (MULTI_SERVICE_PLAN.md
+    Phase 7): as decided with its pack, or -- for a checkpoint written before
+    that was part of the state -- from its pack now."""
+    pilot = state.get("pilot")
+    if isinstance(pilot, bool):
+        return pilot
+    return service_registry.is_pilot(_pack_of(state))
 
 
 def _harness_rule_doc(doc_state) -> str:
@@ -474,6 +487,10 @@ class GraphState(TypedDict):
     #: for an unresolved packet let through; the pre-registry pack for a packet
     #: the gate would skip, when it is only recording.
     service_pack: str
+    #: Whether the pack is a pilot service's (MULTI_SERVICE_PLAN.md Phase 7),
+    #: decided with the pack: its Synthesis stages no replay, and its
+    #: casebook says `pilot: true`.
+    pilot: bool
 
 _agent = None
 
@@ -524,14 +541,18 @@ PROMPT_FILES = (
 )
 
 
-def compute_prompt_fingerprint(base_dir: str, pack: Optional[str] = None) -> str:
+def compute_prompt_fingerprint(base_dir: str, pack: Optional[str] = None,
+                               pilot: bool = False) -> str:
     """SHA256 over the agent system prompts, harness templates and rules,
     AGENTS.md, the service pack, and the tool configuration the agents are
     given.
 
     `pack` names the service pack whose text is composed into the prompts;
     its digest covers its service.json and every text file. None hashes no
-    pack at all.
+    pack at all. `pilot` hashes the pilot Synthesis's PILOT MODE section too
+    (MULTI_SERVICE_PLAN.md Phase 7): that agent is told something else, and
+    has one tool fewer, so a pilot's casebooks and an enabled service's are
+    never attributed to the same prompts.
 
     Sorted and length-prefixed so the digest cannot be changed by reordering
     or by content shifting across a boundary.
@@ -568,6 +589,8 @@ def compute_prompt_fingerprint(base_dir: str, pack: Optional[str] = None) -> str
         # A pack that is not in the registry is hashed as missing rather than
         # skipped, so it can never share a fingerprint with no pack at all.
         extras.append(("service_pack", f"{pack}\t{found.sha256 if found else 'missing'}"))
+    if pilot:
+        extras.append(("pilot", prompt_composer.PILOT_SYNTHESIS_SECTION))
     extras += [("agent_tools", mcp_client.fingerprint_material(pack)),
                ("operating_mode", OPERATING_MODE)]
     for name, body in extras:
@@ -579,15 +602,21 @@ def compute_prompt_fingerprint(base_dir: str, pack: Optional[str] = None) -> str
     return "sha256:" + digest.hexdigest()
 
 
-def prompt_fingerprint(pack: Optional[str] = None) -> str:
+def prompt_fingerprint(pack: Optional[str] = None,
+                       pilot: Optional[bool] = None) -> str:
     """The fingerprint of the prompts `pack`'s agents are built with -- the
-    pre-registry pack's when none is named. Computed on first use and kept
-    until the graph is rebuilt."""
+    pre-registry pack's when none is named. `pilot` defaults to whether the
+    pack is a pilot service's now. Computed on first use and kept until the
+    graph is rebuilt."""
     pack = pack or service_registry.PRE_REGISTRY_PACK
-    found = _prompt_fingerprints.get(pack)
+    if pilot is None:
+        pilot = service_registry.is_pilot(pack)
+    key = f"{pack}+pilot" if pilot else pack
+    found = _prompt_fingerprints.get(key)
     if found is None:
-        found = compute_prompt_fingerprint(os.path.dirname(os.path.dirname(__file__)), pack)
-        _prompt_fingerprints[pack] = found
+        found = compute_prompt_fingerprint(os.path.dirname(os.path.dirname(__file__)),
+                                           pack, pilot=pilot)
+        _prompt_fingerprints[key] = found
     return found
 
 
@@ -825,13 +854,19 @@ def _build_agent():
     # The pack is also the agent's tool scope (MULTI_SERVICE_PLAN.md D7): an
     # agent built for one pack is offered only the tools that pack may use,
     # and so is its `task` subagent.
-    def _new_agent(role: str, pack: str):
-        system_prompt = prompt_composer.compose_system_prompt(role, pack)
+    #
+    # A pilot service's Synthesis is built without `queue_for_replay`
+    # (MULTI_SERVICE_PLAN.md Phase 7): until its experts have judged enough
+    # of its casebooks, nothing it concludes is acted on. Only Synthesis
+    # differs, so `pilot` is ignored for the other roles.
+    def _new_agent(role: str, pack: str, pilot: bool = False):
+        system_prompt = prompt_composer.compose_system_prompt(role, pack,
+                                                              pilot=pilot)
         if role == "investigator":
             return build_agent("investigator", llm, system_prompt, pack=pack)
         if role == "synthesis":
-            return build_agent("synthesis", llm, system_prompt, tools=[queue_tool],
-                               pack=pack)
+            return build_agent("synthesis", llm, system_prompt,
+                               tools=[] if pilot else [queue_tool], pack=pack)
         # 2.2: the Reviewer would be a natural fit for the cheaper "simple"
         # tier. It is NOT on that tier today -- `simple_llm` is bound to
         # "complex" by the deliberate deviation documented at its assignment
@@ -839,15 +874,16 @@ def _build_agent():
         return build_agent("reviewer", simple_llm, system_prompt,
                            tools=[add_learning_rule], pack=pack)
 
-    def agent_for(role: str, pack: str):
+    def agent_for(role: str, pack: str, pilot: bool = False):
         """The `role` agent built from `pack`, built on first use and kept."""
-        key = (role, pack)
+        pilot = pilot and role == "synthesis"
+        key = (role, pack, pilot)
         agent = pool.get(key)
         if agent is None:
             with pool_lock:
                 agent = pool.get(key)
                 if agent is None:
-                    agent = _new_agent(role, pack)
+                    agent = _new_agent(role, pack, pilot)
                     pool[key] = agent
         return agent
 
@@ -859,7 +895,7 @@ def _build_agent():
                                    pack=service_registry.DEFAULT_PACK)
     queue_tool = get_tool_by_name("queue_for_replay")
     for pack in prebuilt_packs:
-        agent_for("synthesis", pack)
+        agent_for("synthesis", pack, service_registry.is_pilot(pack))
 
     from langchain_core.tools import tool
     from datetime import datetime
@@ -1417,13 +1453,14 @@ def _build_agent():
         investigation = state.get("investigation", "")
         pack = _pack_of(state)
         service = _service_of(state)
+        pilot = _pilot_of(state)
         prompt = f"Create the final JSON casebook based strictly on this approved investigation:\n{investigation}"
         prompt += _synthesis_doc_guidance(state.get("reason_code_doc"))
 
         @llm_breaker
         @retry_transient
         def invoke_synthesis():
-            return agent_for("synthesis", pack).invoke({"messages": [
+            return agent_for("synthesis", pack, pilot).invoke({"messages": [
                 HumanMessage(content=prompt)
             ]})
 
@@ -1454,7 +1491,7 @@ def _build_agent():
             @llm_breaker
             @retry_transient
             def invoke_repair():
-                return agent_for("synthesis", pack).invoke({"messages": [
+                return agent_for("synthesis", pack, pilot).invoke({"messages": [
                     HumanMessage(content=repair_prompt)
                 ]})
 

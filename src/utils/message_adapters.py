@@ -160,7 +160,7 @@ class DltAdapter:
     def parse(self, msg) -> ParseResult:
         from src.dlt.headers import decode_kafka_headers, parse_headers
         from src.dlt.identity import derive_case_id
-        from src.dlt.payload import decode_key, resolve_ref_id
+        from src.dlt.payload import decode_key, rejection_contract, resolve_ref_id
         from src.models.dlt_schemas import DltMessage
 
         raw_text = None
@@ -197,10 +197,13 @@ class DltAdapter:
         # Prefer the original record's coordinates: they are what make the id
         # idempotent across a redrive. Fall back to the DLT record's own, which
         # the consumer always has, so a message missing its DLT headers still
-        # gets a stable, unique id instead of being dropped.
+        # gets a stable, unique id instead of being dropped. The consumer group
+        # is part of the original coordinates: two groups can each dead-letter
+        # one original record (MULTI_SERVICE_PLAN.md Phase 8).
         case_id = derive_case_id(parsed_headers.original_topic,
                                  parsed_headers.original_partition,
-                                 parsed_headers.original_offset)
+                                 parsed_headers.original_offset,
+                                 parsed_headers.consumer_group)
         if case_id is None:
             case_id = derive_case_id(msg.topic, msg.partition, msg.offset)
         if case_id is None:
@@ -213,10 +216,12 @@ class DltAdapter:
                                     type_id=parsed_headers.type_id)
         if extraction.mismatch:
             logger.warning(
-                "Record key and payload disagree on the refId; using the key",
+                "Record key and payload disagree on the refId; using the "
+                + ("payload's" if extraction.source == "contract" else "key"),
                 case_id=case_id, record_key=record_key,
                 payload_ref_id=extraction.payload_ref_id,
                 type_id=parsed_headers.type_id)
+        contract = rejection_contract(payload)
 
         try:
             message = DltMessage(
@@ -229,6 +234,7 @@ class DltAdapter:
                 ref_id_source=extraction.source,
                 payload_ref_id=extraction.payload_ref_id,
                 ref_id_mismatch=extraction.mismatch,
+                event_id=contract.eventId if contract is not None else None,
             )
         except Exception as validation_err:
             logger.error("DLT message failed validation", case_id=case_id,
@@ -246,11 +252,17 @@ class DltAdapter:
         return None
 
     def identity_of(self, body: dict) -> Optional[str]:
-        # Storage is keyed on ref_id, not case_id: an operator who only knows
-        # the refId can find the casebook directly. case_id is still carried
-        # inside the casebook for audit (it encodes the original topic/
-        # partition/offset), but it is no longer the storage key.
-        return body.get("ref_id") or body.get("case_id")
+        # One key per record, led by the refId (identity.storage_key): an
+        # operator who only knows the refId finds every case of that packet
+        # under one prefix, and a second record of the same packet -- another
+        # service, another stage -- gets a case of its own rather than being
+        # skipped as the first one's duplicate (MULTI_SERVICE_PLAN.md Phase 8).
+        from src.dlt.identity import storage_key
+
+        case_id = body.get("case_id")
+        if not case_id:
+            return body.get("ref_id")
+        return storage_key(body.get("ref_id"), case_id)
 
     def timeout_casebook(self, body: dict) -> dict:
         identity = self.identity_of(body)

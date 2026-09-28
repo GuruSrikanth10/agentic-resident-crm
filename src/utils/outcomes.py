@@ -22,10 +22,20 @@ from src.storage.base import OUTCOME_VERDICTS
 from src.storage.factory import get_casebook_storage
 from src.utils.logging_config import get_logger
 from src.utils.paths import casebook_dir
+from src.utils.service_registry import PRE_REGISTRY_PACK
 
 logger = get_logger(__name__)
 
 OUTCOME_FILENAME = "outcome.json"
+
+
+def outcome_service(outcome: dict) -> str:
+    """The service an outcome record is about (MULTI_SERVICE_PLAN.md Phase 7).
+
+    A record written before outcomes carried a service is enu-biometric's:
+    it was the only service analysed until then.
+    """
+    return outcome.get("service") or PRE_REGISTRY_PACK
 
 
 class UnknownEventError(Exception):
@@ -76,6 +86,7 @@ def record_outcome(event_id: str, verdict: str, verified_by: str,
 
     resolution = casebook.get("resolution") or {}
     rejection_data = (casebook.get("packet_status") or {}).get("rejection_data") or {}
+    packet_metadata = casebook.get("packet_metadata") or {}
 
     outcome = {
         "event_id": event_id,
@@ -86,8 +97,15 @@ def record_outcome(event_id: str, verdict: str, verified_by: str,
         # Denormalised so accuracy_report can group without re-reading and
         # re-parsing every casebook, and so the outcome stays interpretable
         # even if the casebook is later pruned.
+        #
+        # The service, so accuracy is measured per service -- the figure that
+        # moves a pilot service to enabled (MULTI_SERVICE_PLAN.md Phase 7).
+        # None for a casebook from before services were resolved;
+        # `outcome_service` reads that as enu-biometric.
+        "service": packet_metadata.get("service"),
+        "pilot": bool(casebook.get("pilot")),
         "reason_code": rejection_data.get("rejection_code"),
-        "enrolment_type": (casebook.get("packet_metadata") or {}).get("update_type"),
+        "enrolment_type": packet_metadata.get("update_type"),
         "resolution_source": resolution.get("source"),
         "agent_action": resolution.get("action"),
         "corrected_action": corrected_action,
@@ -121,7 +139,8 @@ def record_outcome(event_id: str, verdict: str, verified_by: str,
     storage.save(event_id, outcome, filename=OUTCOME_FILENAME)
 
     logger.info("Resolution outcome recorded", event_id=event_id, verdict=verdict,
-                resolution_source=outcome["resolution_source"])
+                resolution_source=outcome["resolution_source"],
+                service=outcome["service"], pilot=outcome["pilot"])
     return outcome
 
 
@@ -161,12 +180,22 @@ def iter_outcomes():
             yield outcome
 
 
+def for_service(outcomes, service: Optional[str]):
+    """The outcomes about `service`, or all of them for None."""
+    for outcome in outcomes:
+        if service is None or outcome_service(outcome) == service:
+            yield outcome
+
+
 def summarise(outcomes) -> dict:
-    """Aggregate outcomes into accuracy by reason code, type, and source.
+    """Aggregate outcomes into accuracy by service, reason code, type, and
+    source.
 
     `resolution_source` is grouped on deliberately: comparing agent-generated
     against runbook-served accuracy on the same reason code is the evidence
     needed before a runbook can be trusted to short-circuit the agents (4.2).
+    The service is grouped on because two services can raise one reason code
+    and be judged apart (MULTI_SERVICE_PLAN.md Phase 7).
     """
     buckets = {}
     for outcome in outcomes:
@@ -175,6 +204,7 @@ def summarise(outcomes) -> dict:
         source_kind = "runbook" if source.startswith("runbook:") else source
 
         key = (
+            outcome_service(outcome),
             outcome.get("reason_code") or "unknown",
             outcome.get("enrolment_type") or "unknown",
             source_kind,
@@ -185,10 +215,11 @@ def summarise(outcomes) -> dict:
             bucket[verdict] += 1
 
     rows = []
-    for (reason_code, enrolment_type, source), counts in sorted(buckets.items()):
+    for (service, reason_code, enrolment_type, source), counts in sorted(buckets.items()):
         total = sum(counts.values())
         correct = counts["CORRECT"]
         rows.append({
+            "service": service,
             "reason_code": reason_code,
             "enrolment_type": enrolment_type,
             "resolution_source": source,
@@ -230,6 +261,7 @@ def summarise_shadow(outcomes) -> dict:
             continue
 
         key = (
+            outcome_service(outcome),
             outcome.get("reason_code") or "unknown",
             outcome.get("enrolment_type") or "unknown",
             runbook_id,
@@ -252,9 +284,12 @@ def summarise_shadow(outcomes) -> dict:
                     bucket["would_be_correct"] += 1
 
     rows = []
-    for (reason_code, enrolment_type, runbook_id), counts in sorted(buckets.items()):
+    for (service, reason_code, enrolment_type, runbook_id), counts in sorted(buckets.items()):
         verdicts = counts["verdicts"]
         rows.append({
+            # Which service's allowlist the runbook would be added to
+            # (`<service>:<CODE>`, MULTI_SERVICE_PLAN.md D11).
+            "service": service,
             "reason_code": reason_code,
             "enrolment_type": enrolment_type,
             "runbook_id": runbook_id,

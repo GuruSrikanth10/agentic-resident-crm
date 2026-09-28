@@ -405,7 +405,8 @@ def compute_fingerprint(root_fqcn: Optional[str],
                         normalised_frames: Sequence,
                         business_code: str = "",
                         limit: Optional[int] = None,
-                        type_id: Optional[str] = None) -> str:
+                        type_id: Optional[str] = None,
+                        service: Optional[str] = None) -> str:
     """Stable SHA256 identity for one failure mode.
 
     `business_code` is supplied by Phase 2's classifier; Phase 1 computes
@@ -419,6 +420,15 @@ def compute_fingerprint(root_fqcn: Optional[str],
     interleaved, so a fingerprint computed without it stays byte-identical to
     every fingerprint this function has ever returned. Do not reorder these
     parts to tidy them up: the order is the compatibility guarantee.
+
+    `service` is the service the record was resolved to, appended last on the
+    same terms (MULTI_SERVICE_PLAN.md Phase 8). Under the shared DLT contract
+    every service sends the same payload type, so `type_id` cannot tell two
+    services' failures apart, and a failure mode shared through a common
+    library would otherwise put one service's cached recommendation in front
+    of another's records. Callers pass it only for a service other than the
+    pre-registry one (`fingerprint_service`), so every enu-biometric and
+    unresolved fingerprint is unchanged.
     """
     count = fingerprint_frame_count() if limit is None else max(1, limit)
     parts = [
@@ -430,6 +440,10 @@ def compute_fingerprint(root_fqcn: Optional[str],
     normalised_type = (type_id or "").strip()
     if normalised_type and fingerprint_includes_type():
         parts.append(normalised_type)
+
+    normalised_service = (service or "").strip()
+    if normalised_service:
+        parts.append(f"service:{normalised_service}")
 
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 

@@ -794,6 +794,8 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
     # The pack the agents are built from (MULTI_SERVICE_PLAN.md D4), decided
     # here, where the gate decided, from the same resolution and settings.
     service_pack = service_registry.pack_for(service_resolution)
+    # And whether that pack is analysed in pilot mode (Phase 7), decided with it.
+    pilot = service_registry.is_pilot(service_pack)
 
     # get_agent() on its first call reads five prompt files, builds two LLM
     # clients and four react agents, and opens the checkpoint store (running
@@ -896,7 +898,8 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
                 agent.invoke, {"payload": signal_dict, "retry_count": 0,
                                "service": service_resolution["service"],
                                "service_resolution": service_resolution,
-                               "service_pack": service_pack},
+                               "service_pack": service_pack,
+                               "pilot": pilot},
                 config=config
             )
         try:
@@ -1058,7 +1061,7 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
             "raw_output": final_message[:2000],
         }
 
-    casebook_data = {
+    casebook_data: dict = {
         "casebook_metadata": {
             "created_at": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
             "last_updated": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
@@ -1124,8 +1127,17 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
     from src.utils import reason_code_docs
     used_pack = result.get("service_pack") or service_pack
     used_pack_spec = service_registry.pack(used_pack)
+    used_pilot = result.get("pilot")
+    if not isinstance(used_pilot, bool):
+        used_pilot = pilot if used_pack == service_pack \
+            else service_registry.is_pilot(used_pack)
+    # A pilot service's casebook says so (MULTI_SERVICE_PLAN.md Phase 7): its
+    # Synthesis could stage no replay, and its experts are still judging it.
+    # Absent, not false, for every other casebook, as before.
+    if used_pilot:
+        casebook_data["pilot"] = True
     casebook_data["resolution"]["provenance"] = {
-        "prompt_fingerprint": prompt_fingerprint(used_pack),
+        "prompt_fingerprint": prompt_fingerprint(used_pack, pilot=used_pilot),
         "service_pack": {"service": used_pack,
                          "sha256": used_pack_spec.sha256 if used_pack_spec else None},
         "reason_code_doc": reason_code_docs.provenance(

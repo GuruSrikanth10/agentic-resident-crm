@@ -102,8 +102,9 @@ logger = get_logger(__name__)
 #: the packet's service (MULTI_SERVICE_PLAN.md D7).
 SERVICE_ROLES = ("investigator", "reviewer", "synthesis", "log_filter")
 
-#: The DLT lane's roles. Not scoped by service until the DLT lane resolves
-#: services (MULTI_SERVICE_PLAN.md Phase 8).
+#: The DLT lane's roles. Scoped by service when a record is analysed with its
+#: service's pack, and by role alone when it is analysed with none
+#: (MULTI_SERVICE_PLAN.md Phase 8).
 DLT_ROLES = ("dlt_investigator", "dlt_reviewer", "dlt_synthesis")
 
 #: Every agent the pipeline builds: the rejection lane's four, then the DLT

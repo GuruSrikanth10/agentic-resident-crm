@@ -23,6 +23,9 @@ src/service_packs/
                              Investigator's prompt; written by promote_rules.py
                              for a rule of `service` scope (a `generic` rule
                              goes to src/prompts/learned_rules.md instead)
+    dlt.md                 optional: the SERVICE CONTEXT of the DLT lane's
+                             three agents for this service's dead-lettered
+                             records
 ```
 
 A prompt is the role's generic prompt from `src/prompts/` followed by these
@@ -90,7 +93,9 @@ nothing.
 | `logs.also_search` | Other registered services whose apps are searched too for this service's packets. Their own `also_search` is not followed |
 | `logs.decision_vocabulary` | A regular expression, matched case-insensitively, OR-ed with the generic decision vocabulary for this service's packets and its catalog |
 | `tools.include`, `tools.exclude` | Widen or narrow the service's tool scope by tool name (Phase 4). Never widen the roles a tool is for; `_default` takes no `include` |
-| `dlt.*` | Reserved for the DLT lane; nothing reads it yet |
+| `dlt.consumer_groups` | Kafka consumer groups whose dead-lettered records are this service's, compared exactly. Unique across services |
+| `dlt.original_topics` | Anchored regexes over a dead-lettered record's original topic |
+| `dlt.java_packages` | Java package prefixes of this service's code. The failure site's first frame a pack claims places the record, longest prefix first. Unique across services |
 
 Environment-specific values -- namespaces, hosts, credentials -- never go in a
 pack. They differ between staging and production; the pack does not.
@@ -116,7 +121,7 @@ nothing.
 
 The same decision the gate makes:
 
-- A packet of an enabled service uses its own pack.
+- A packet of an enabled or pilot service uses its own pack.
 - An unresolved packet let through by
   `REJECTION_UNRESOLVED_SERVICE=default_pack` uses `_default`, with its
   confidence capped at 0.6.
@@ -125,7 +130,23 @@ The same decision the gate makes:
   packet was before packs existed.
 
 A service is not analysed with its own pack until it is in
-`REJECTION_SERVICES_ENABLED`.
+`REJECTION_SERVICES_PILOT` or `REJECTION_SERVICES_ENABLED`.
+
+## Piloting a new service
+
+A new service is piloted before it is enabled (`MULTI_SERVICE_PLAN.md`
+section 7). Name it in `REJECTION_SERVICES_PILOT`. Its packets are then
+analysed with its pack, like an enabled service's, except that:
+
+- their casebooks carry `"pilot": true`;
+- their Synthesis agent has no `queue_for_replay` tool, and its prompt ends
+  with a `### PILOT MODE` section saying so. Nothing a pilot concludes is
+  replayed.
+
+The service's experts record verdicts with `POST /outcome/{event_id}`, and
+`python3 -m src.tools.accuracy_report --service <name>` gives the result.
+Once that meets the agreed bar, move the name from `REJECTION_SERVICES_PILOT`
+to `REJECTION_SERVICES_ENABLED`. A name in both lists is a boot error.
 
 ## Which tools a packet's agents get
 
@@ -171,3 +192,27 @@ And by convention:
 - The generic prompts point at "the SERVICE CONTEXT section" for what each
   enrolment type means, and at "the SERVICE POLICY" for the terms. Put those
   there.
+
+## Dead-lettered records (the DLT lane)
+
+Every service dead-letters its records with the rejection lane's payload and
+key; the headers carry the stack trace (`MULTI_SERVICE_PLAN.md` Phase 8). A
+record is placed in a service by, in order:
+
+1. its consumer group (`dlt.consumer_groups`);
+2. `flowMetaData.stage`, as for a rejection;
+3. its original topic (`dlt.original_topics`);
+4. its failure site's Java package (`dlt.java_packages`);
+5. `sourceTopic`;
+6. its reason code's documentation file.
+
+A service's dead-lettered records are analysed with its pack only once it is
+in `DLT_SERVICES_ENABLED`; with `DLT_SERVICE_GATE=enforce`, other services'
+records are acknowledged without analysis. Its agents then get:
+
+- the pack's optional `dlt.md` as their SERVICE CONTEXT: what its crashes
+  usually mean, where its code and data live. It is checked like the other
+  markdown files.
+- the tools in its scope.
+
+`policy.md` is not given to the DLT agents: it is written for rejections.
