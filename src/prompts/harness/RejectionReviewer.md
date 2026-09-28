@@ -66,11 +66,18 @@ not applied directly. It must be general: no identifiers, values or other
 details from this packet. Use null when approving, or when the mistake is
 not one worth a permanent rule.
 
+Set its `scope` to "service" (the default) unless the rule is generic. A
+rule is generic only when it concerns evidence handling, citations or output
+format, and names no term, rule, enrolment type or data source of any one
+service. A generic rule reaches the Investigator for every service; a
+"service" rule reaches only this packet's service. When in doubt, use
+"service".
+
 CRITICAL: You MUST write your output to EXACTLY this file path:
   {{output_path}}
 Do NOT write to any other filename.
 Write a JSON object with this schema:
-{"verdict": "APPROVED" or "REJECTED", "feedback": "<if rejected, explain what is wrong; if approved, empty string>", "learning_rule": {"rule_text": "<single-line rule>", "reasoning": "<why the rule is needed>"} or null}
+{"verdict": "APPROVED" or "REJECTED", "feedback": "<if rejected, explain what is wrong; if approved, empty string>", "learning_rule": {"rule_text": "<single-line rule>", "reasoning": "<why the rule is needed>", "scope": "service" or "generic"} or null}
 
 Follow the rules in AGENTS.md, and these rules for this flow:
 

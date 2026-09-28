@@ -270,15 +270,15 @@ def test_no_allowlist_means_no_restriction(monkeypatch):
     from src.utils import runbook_store
     monkeypatch.delenv("RUNBOOK_SERVE_ALLOWLIST", raising=False)
     assert runbook_store.serve_allowlist() is None
-    assert runbook_store.is_serve_allowed("ANY_CODE")
+    assert runbook_store.is_serve_allowed("enu-biometric", "ANY_CODE")
 
 
 def test_only_listed_codes_may_serve(monkeypatch):
     from src.utils import runbook_store
-    monkeypatch.setenv("RUNBOOK_SERVE_ALLOWLIST", "CODE_A, CODE_B")
-    assert runbook_store.is_serve_allowed("CODE_A")
-    assert runbook_store.is_serve_allowed("CODE_B")
-    assert not runbook_store.is_serve_allowed("CODE_C")
+    monkeypatch.setenv("RUNBOOK_SERVE_ALLOWLIST", "svc-a:CODE_A, svc-a:CODE_B")
+    assert runbook_store.is_serve_allowed("svc-a", "CODE_A")
+    assert runbook_store.is_serve_allowed("svc-a", "CODE_B")
+    assert not runbook_store.is_serve_allowed("svc-a", "CODE_C")
 
 
 def test_a_non_allowlisted_code_shadows_instead_of_serving(monkeypatch):
@@ -287,7 +287,7 @@ def test_a_non_allowlisted_code_shadows_instead_of_serving(monkeypatch):
     from src.utils import runbook_store
 
     monkeypatch.setenv("RUNBOOK_MODE", "serve")
-    monkeypatch.setenv("RUNBOOK_SERVE_ALLOWLIST", "OTHER_CODE")
+    monkeypatch.setenv("RUNBOOK_SERVE_ALLOWLIST", "svc-a:OTHER_CODE")
 
     runbook = {
         "runbook_id": "CODE_C__U",
@@ -299,11 +299,11 @@ def test_a_non_allowlisted_code_shadows_instead_of_serving(monkeypatch):
     # Mirror runbook_lookup_node's serve decision.
     reason_code = "CODE_C"
     mode = "serve"
-    should_shadow = mode == "shadow" or not runbook_store.is_serve_allowed(reason_code)
+    should_shadow = mode == "shadow" or not runbook_store.is_serve_allowed("svc-a", reason_code)
     assert should_shadow
 
-    monkeypatch.setenv("RUNBOOK_SERVE_ALLOWLIST", "CODE_C")
-    assert runbook_store.is_serve_allowed(reason_code)
+    monkeypatch.setenv("RUNBOOK_SERVE_ALLOWLIST", "svc-a:CODE_C")
+    assert runbook_store.is_serve_allowed("svc-a", reason_code)
 
 
 # ======================================================================

@@ -235,15 +235,18 @@ def test_fetch_logs_node_passes_identifiers_through(monkeypatch):
 
     seen = {}
 
-    def fake_reduce(event_id, extra_identifiers=()):
+    def fake_reduce(event_id, extra_identifiers=(), service=None):
         seen["event_id"] = event_id
         seen["extra"] = tuple(extra_identifiers)
+        seen["service"] = service
         return "logs"
 
     monkeypatch.setattr("src.log_pipeline.pipeline.reduce_logs", fake_reduce)
-    tool_registry.fetch_logs_for("evt-1", extra_identifiers=("ref-9",))
+    tool_registry.fetch_logs_for("evt-1", extra_identifiers=("ref-9",),
+                                 service="enu-biometric")
 
-    assert seen == {"event_id": "evt-1", "extra": ("ref-9",)}
+    assert seen == {"event_id": "evt-1", "extra": ("ref-9",),
+                    "service": "enu-biometric"}
 
 
 # ======================================================================
@@ -332,7 +335,7 @@ def test_runbook_cache_survives_concurrent_access():
     def hammer():
         try:
             for i in range(200):
-                key = runbook_store.runbook_cache_key(f"C{i % 20}", "E")
+                key = runbook_store.runbook_cache_key("enu-biometric", f"C{i % 20}", "E")
                 with runbook_store._runbook_cache_lock:
                     runbook_store._runbook_cache[key] = {"v": i}
                     runbook_store._runbook_cache.get(key)

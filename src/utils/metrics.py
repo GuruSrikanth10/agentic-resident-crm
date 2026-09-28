@@ -116,9 +116,9 @@ INVESTIGATOR_RETRIES = _histogram(
 RUNBOOK_LOOKUPS = _counter(
     "agentic_resident_crm_runbook_lookups_total",
     "Runbook lookups by outcome (hit, shadow, miss, no_reason_code, "
-    "fingerprint_mismatch, rule_source_none, error). Every outcome is "
-    "recorded, so the hit rate has a denominator.",
-    ("outcome",),
+    "no_service, fingerprint_mismatch, binding_unavailable, error) and "
+    "service. Every outcome is recorded, so the hit rate has a denominator.",
+    ("outcome", "service"),
 )
 
 REASON_CODE_DOC_LOOKUPS = _counter(

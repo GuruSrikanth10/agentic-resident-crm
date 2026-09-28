@@ -923,6 +923,31 @@ def docs_lookup_options(name: Optional[str], registry: Optional[Registry] = None
             "type_labels": dict(types.get("family_labels") or {}) or None}
 
 
+def log_options(name: Optional[str], registry: Optional[Registry] = None) -> dict:
+    """A pack's `logs` section (MULTI_SERVICE_PLAN.md Phase 6):
+
+    * `app_names` -- its Elasticsearch `application_name` values, which are
+      also its Kubernetes app names; the service's own name when it declares
+      none, as its documentation file and corpus directory default to it;
+    * `k8s_match` -- {"name_contains" | "label_selector": value}, or None;
+    * `also_search` -- the other registered services whose logs are read
+      for its packets;
+    * `decision_vocabulary` -- its regex, or None.
+
+    No app names for a name with no registered pack, `_default` included.
+    """
+    registry = registry or load()
+    found = pack(name, registry)
+    logs = (found.document.get("logs") or {}) if found else {}
+    apps = tuple(logs.get("app_names") or ())
+    if not apps and registry.is_registered(name):
+        apps = (name,)
+    return {"app_names": apps,
+            "k8s_match": dict(logs["k8s_match"]) if logs.get("k8s_match") else None,
+            "also_search": tuple(logs.get("also_search") or ()),
+            "decision_vocabulary": logs.get("decision_vocabulary")}
+
+
 # ======================================================================
 # Tools per service (MULTI_SERVICE_PLAN.md D7, D8)
 # ======================================================================

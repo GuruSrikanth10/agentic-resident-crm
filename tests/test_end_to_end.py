@@ -250,6 +250,9 @@ def test_runbook_hit_short_circuits_the_agents(storage, monkeypatch):
     assert casebook["resolution"]["source"] == "runbook:RC__U@v3"
     assert casebook["resolution"]["action"] == "REPLAY"
     assert stub.invoke.call_count == 0, "a runbook hit must cost zero LLM calls"
+    # The documentation is resolved before the runbook decision, so a packet
+    # a runbook answered records it too (MULTI_SERVICE_PLAN.md Phase 5).
+    assert casebook["resolution"]["provenance"]["reason_code_doc"]["outcome"] == "disabled"
 
 
 def test_shadow_divergence_is_persisted(storage, monkeypatch):

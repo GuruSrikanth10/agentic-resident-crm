@@ -162,22 +162,28 @@ def test_the_biometric_service_still_queries_it(estate, monkeypatch):
     assert asked == [("BIO_CODE", "U", sr.rule_type_filter("enu-biometric"))]
 
 
-def test_the_runbook_lookup_is_skipped_for_a_service_with_no_rules_table(
+def test_the_runbook_lookup_of_a_service_with_no_rules_table_never_queries_it(
         estate, monkeypatch):
-    """A runbook is derived from a rules-table rule and checked against it, so
-    for a service without one it could only be another service's."""
+    """Its runbooks are its own, bound to its documentation (Phase 5), so the
+    lookup reads that service's directory and never the rules table."""
     monkeypatch.setenv("RUNBOOK_MODE", "serve")
     _no_db(monkeypatch)
-    outcomes = []
+    outcomes, asked = [], []
     monkeypatch.setattr(orch.metrics, "RUNBOOK_LOOKUPS",
                         type("C", (), {"labels": staticmethod(
-                            lambda outcome: type("L", (), {
-                                "inc": staticmethod(lambda: outcomes.append(outcome))
+                            lambda outcome, service: type("L", (), {
+                                "inc": staticmethod(
+                                    lambda: outcomes.append((outcome, service)))
                             })())})())
+    monkeypatch.setattr(orch, "get_runbook",
+                        lambda *args: asked.append(args) or None)
     lookup = _node(monkeypatch, "runbook_lookup", _Recorder())
 
-    assert lookup(_state()) == {"resolution_source": "agent"}
-    assert outcomes == ["rule_source_none"]
+    result = lookup(_state())
+
+    assert result["resolution_source"] == "agent"
+    assert asked == [("svc-none", DOCUMENTED, "U")]
+    assert outcomes == [("miss", "svc-none")]
 
 
 # ---------------------------------------------------------------------------

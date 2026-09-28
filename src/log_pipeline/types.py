@@ -211,3 +211,12 @@ class FetchContext:
     #: We do not yet know which one the services actually log, so a caller
     #: that has both should supply both.
     extra_identifiers: tuple = ()
+    #: The application names to search, from the packet's service pack
+    #: (`scope.LogScope.apps`): Elasticsearch's `application_name` filter and
+    #: Kubernetes discovery both use this one list. None means the
+    #: environment's lists, `ES_APP_NAMES` / `K8S_APP_NAMES`, for a caller
+    #: with no service.
+    apps: Optional[tuple] = None
+    #: ((app, {"name_contains" | "label_selector": value}), ...): the pod
+    #: match each app's pack declares, used where `K8S_SERVICE_MAP` sets none.
+    pod_matches: tuple = ()

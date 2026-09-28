@@ -84,8 +84,11 @@ def _shadow_report(args) -> int:
             verdict = (f"NOT READY: only {row['verdicts']} verified outcome(s), "
                        f"need {args.min_verdicts}")
         else:
-            verdict = (f"READY: add {row['reason_code']} to "
-                       f"RUNBOOK_SERVE_ALLOWLIST")
+            # Allowlist entries name the service (MULTI_SERVICE_PLAN.md D11).
+            # Outcome records carry no service until Phase 7, so until then
+            # the operator fills it in.
+            verdict = (f"READY: add {row.get('service') or '<service>'}:"
+                       f"{row['reason_code']} to RUNBOOK_SERVE_ALLOWLIST")
         print(f"  {row['runbook_id']}: {verdict}")
 
     return 0

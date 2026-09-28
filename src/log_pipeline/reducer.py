@@ -15,8 +15,8 @@ from filelock import FileLock
 from src.log_pipeline.config import (
     BOILERPLATE_COUNT_THRESHOLD,
     COLLAPSE_SQL,
-    DECISION_VOCABULARY_REGEX,
     DRAIN3_STATE_DIR,
+    GENERIC_DECISION_VOCABULARY_REGEX,
     ERROR_CONTEXT_LINES,
     ERROR_REPEAT_THRESHOLD,
     ERROR_TRAILING_LINES,
@@ -41,6 +41,12 @@ _drain3_intraprocess_lock = threading.Lock()
 # file every time, which only grows as more templates accumulate (2.5).
 # Access is still only ever under _drain3_intraprocess_lock / FileLock above.
 _template_miner_instance = None
+
+#: The same, for each service's own parse tree (MULTI_SERVICE_PLAN.md Phase 6):
+#: state file -> TemplateMiner. A service's catalog names templates by the ids
+#: of the tree it was built from, so each service's packets are clustered in
+#: that tree and never train another service's.
+_service_template_miners: dict = {}
 
 
 # ======================================================================
@@ -187,26 +193,38 @@ def branch_on_error(logs: list[dict]) -> dict:
 # Stage 3 -- Drain3 Clustering
 # ======================================================================
 
-def _get_template_miner():
-    """Return the process-wide TemplateMiner singleton, building it (and
-    reading the persisted state file) at most once per process (2.5).
+def _default_state_file() -> str:
+    return os.path.join(DRAIN3_STATE_DIR, "drain3_state.bin")
 
-    Caller must already hold _drain3_intraprocess_lock / the FileLock.
-    """
-    global _template_miner_instance
-    if _template_miner_instance is not None:
-        return _template_miner_instance
 
+def _build_template_miner(state_file: str):
     from drain3 import TemplateMiner
     from drain3.template_miner_config import TemplateMinerConfig
     from drain3.file_persistence import FilePersistence
 
-    os.makedirs(DRAIN3_STATE_DIR, exist_ok=True)
-    state_file = os.path.join(DRAIN3_STATE_DIR, "drain3_state.bin")
-    persistence = FilePersistence(state_file)
-    config = TemplateMinerConfig()
-    _template_miner_instance = TemplateMiner(persistence, config)
-    return _template_miner_instance
+    os.makedirs(os.path.dirname(state_file), exist_ok=True)
+    return TemplateMiner(FilePersistence(state_file), TemplateMinerConfig())
+
+
+def _get_template_miner(state_file: Optional[str] = None):
+    """Return the process-wide TemplateMiner for a parse tree, building it
+    (and reading the persisted state file) at most once per process (2.5).
+
+    `state_file` None is the tree at DRAIN3_STATE_DIR/drain3_state.bin: the
+    one every packet used before services had trees of their own.
+
+    Caller must already hold _drain3_intraprocess_lock / the FileLock.
+    """
+    global _template_miner_instance
+    if state_file is None or state_file == _default_state_file():
+        if _template_miner_instance is None:
+            _template_miner_instance = _build_template_miner(_default_state_file())
+        return _template_miner_instance
+
+    miner = _service_template_miners.get(state_file)
+    if miner is None:
+        miner = _service_template_miners[state_file] = _build_template_miner(state_file)
+    return miner
 
 
 def local_template_ids(logs: list[dict]) -> list[str]:
@@ -293,8 +311,12 @@ def collapse_error_window(logs: list[dict]) -> tuple:
     return out, suppressed
 
 
-def cluster_logs(logs: list[dict], catalog: Optional[TemplateCatalog] = None) -> list[dict]:
+def cluster_logs(logs: list[dict], catalog: Optional[TemplateCatalog] = None,
+                 state_file: Optional[str] = None) -> list[dict]:
     """Cluster log messages using Drain3 with persisted state.
+
+    `state_file` is the parse tree to cluster in -- the one `catalog`'s
+    template ids came from. None is the tree at DRAIN3_STATE_DIR.
 
     Returns a list of cluster dicts ordered by first_seen timestamp:
     {
@@ -307,15 +329,15 @@ def cluster_logs(logs: list[dict], catalog: Optional[TemplateCatalog] = None) ->
         "examples": list[str]
     }
     """
-    os.makedirs(DRAIN3_STATE_DIR, exist_ok=True)
-    state_file = os.path.join(DRAIN3_STATE_DIR, "drain3_state.bin")
+    state_file = state_file or _default_state_file()
+    os.makedirs(os.path.dirname(state_file), exist_ok=True)
     lock_file = state_file + ".lock"
 
     # Hold both locks for the entire construct-feed-persist cycle so no other
     # thread/process can interleave a read-modify-write on the shared parse
     # tree (0.2), and so the cluster set below reflects only this call's logs.
     with _drain3_intraprocess_lock, FileLock(lock_file, timeout=30):
-        template_miner = _get_template_miner()
+        template_miner = _get_template_miner(state_file)
 
         # Track per-cluster metadata as we feed logs
         # cluster_id -> {first_seen, last_seen, examples, count}
@@ -399,8 +421,13 @@ def apply_evidence_guardrails(
     clusters: list[dict],
     raw_logs: list[dict],
     catalog: Optional[TemplateCatalog] = None,
+    vocabulary=None,
 ) -> dict:
     """Post-process clusters to enforce evidence retention rules.
+
+    `vocabulary` is what counts as decision vocabulary for this packet: its
+    service's (`scope.DecisionVocabulary`), or with None the generic words
+    alone.
 
     Regardless of catalog classification, always force full-text retention for:
     1. Lines matching the decision-vocabulary regex.
@@ -413,10 +440,11 @@ def apply_evidence_guardrails(
     # -------------------------------------------------------------------
     # 1. Collect decision-vocabulary lines from raw logs
     # -------------------------------------------------------------------
+    vocabulary = vocabulary or GENERIC_DECISION_VOCABULARY_REGEX
     decision_lines = []
     for log_entry in raw_logs:
         msg = log_entry.get("message", "")
-        if DECISION_VOCABULARY_REGEX.search(msg):
+        if vocabulary.search(msg):
             decision_lines.append({
                 "timestamp": log_entry.get("timestamp", ""),
                 "level": log_entry.get("level", ""),

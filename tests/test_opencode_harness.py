@@ -383,6 +383,29 @@ def test_harness_reviewer_rule_reaches_the_validated_queue(monkeypatch, tmp_path
     assert proposed == ["Always state the enrolment type."]
 
 
+def test_harness_reviewer_rule_keeps_its_scope(monkeypatch, tmp_path):
+    """The harness Reviewer's JSON carries the rule's scope, and the queue
+    records it as the direct Reviewer's tool does (MULTI_SERVICE_PLAN.md D11)."""
+    import json
+    import src.core.agent_orchestrator as orch
+
+    pending = tmp_path / "pending_rules.jsonl"
+    monkeypatch.setattr(orch, "PENDING_RULES_FILE", str(pending))
+    monkeypatch.setattr(orch, "validate_learning_rule", lambda text: [])
+    review = _rejection_reviewer(monkeypatch, _StubAgent())
+    _harness_on(monkeypatch, tmp_path, {
+        "verdict": "REJECTED",
+        "feedback": "no citation",
+        "learning_rule": {"rule_text": "Always cite the log line relied on.",
+                          "reasoning": "a claim had none", "scope": "generic"},
+    })
+
+    review(dict(_REJECTION_STATE))
+
+    [entry] = [json.loads(line) for line in pending.read_text().splitlines()]
+    assert entry["scope"] == "generic"
+
+
 def test_an_approval_proposes_no_rule(monkeypatch, tmp_path):
     import src.core.agent_orchestrator as orch
 

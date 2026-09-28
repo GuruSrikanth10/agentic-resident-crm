@@ -21,6 +21,8 @@ src/service_packs/
     synthesis.md             service-specific instructions for it
     learned_rules.md       optional: promoted learned rules, appended to the
                              Investigator's prompt; written by promote_rules.py
+                             for a rule of `service` scope (a `generic` rule
+                             goes to src/prompts/learned_rules.md instead)
 ```
 
 A prompt is the role's generic prompt from `src/prompts/` followed by these
@@ -84,9 +86,9 @@ nothing.
 | `rule_source.type` | `rules_db` when the service's rules are in the rules database, otherwise `none`: the reason-code documentation is then the rule source (Phase 3). `enrolment_type_filter` belongs to `rules_db` only |
 | `reason_code_docs_file` | Stem of the reason-code documentation file. Defaults to `service`; no two services may share one |
 | `droa_corpus_dir` | The service's directory in `docs_cache/`. Defaults to `service` |
-| `logs.app_names`, `logs.k8s_match` | The service's Elasticsearch `application_name` values, and how its pods are found (`name_contains` or `label_selector`, not both). Namespaces stay in the environment (Phase 6) |
-| `logs.also_search` | Other registered services whose logs are worth reading for this service's packets (Phase 6) |
-| `logs.decision_vocabulary` | A regular expression added to the generic decision vocabulary (Phase 6) |
+| `logs.app_names`, `logs.k8s_match` | The service's Elasticsearch `application_name` values, which are also its Kubernetes app names, and how its pods are found (`name_contains` or `label_selector`, not both). A packet of the service searches these apps and nothing else of its own. `app_names` defaults to the service name. A `K8S_SERVICE_MAP` entry for an app overrides `k8s_match`, and namespaces stay in the environment |
+| `logs.also_search` | Other registered services whose apps are searched too for this service's packets. Their own `also_search` is not followed |
+| `logs.decision_vocabulary` | A regular expression, matched case-insensitively, OR-ed with the generic decision vocabulary for this service's packets and its catalog |
 | `tools.include`, `tools.exclude` | Widen or narrow the service's tool scope by tool name (Phase 4). Never widen the roles a tool is for; `_default` takes no `include` |
 | `dlt.*` | Reserved for the DLT lane; nothing reads it yet |
 

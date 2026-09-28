@@ -511,8 +511,9 @@ def test_coverage_names_reason_codes_with_a_runbook_and_no_docs(tmp_path,
     from src.utils import runbook_store
 
     drafts = tmp_path / "drafts"
-    drafts.mkdir()
-    (drafts / "UNDOCUMENTED_CODE__E.json").write_text("{}", encoding="utf-8")
+    (drafts / "enu-biometric").mkdir(parents=True)
+    (drafts / "enu-biometric" / "UNDOCUMENTED_CODE__E.json").write_text(
+        "{}", encoding="utf-8")
     monkeypatch.setattr(runbook_store, "RUNBOOK_DRAFT_DIR", drafts)
     monkeypatch.setattr(runbook_store, "RUNBOOK_FINAL_DIR", tmp_path / "none")
 

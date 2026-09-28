@@ -728,6 +728,7 @@ def _state(outcome: str, reason_code=None, requested_type=None, detail=None) -> 
         "refs": [],
         "text": None,
         "sha256": None,
+        "entries_sha256": None,
         "truncated": False,
         "resolution_guidance": [],
         "detail": detail,
@@ -829,6 +830,7 @@ def lookup(reason_code, raw_enrolment_type, root=None, service_file=None,
                      for e in selected],
             "text": text,
             "sha256": "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "entries_sha256": entries_digest(selected),
             "truncated": truncated,
             "resolution_guidance": parse_resolution_guidance(text),
             "detail": None,
@@ -837,6 +839,26 @@ def lookup(reason_code, raw_enrolment_type, root=None, service_file=None,
     except Exception as error:  # noqa: BLE001 - the contract is "never raises"
         return _state("error", reason_code if reason_code else None,
                       requested_type, f"{type(error).__name__}: {error}")
+
+
+def entries_digest(entries: list) -> str:
+    """SHA256 over the selected entries themselves: where each came from and
+    what it says, not the rendered text around them.
+
+    What a runbook of a service with no rules table is bound to
+    (MULTI_SERVICE_PLAN.md D11). The rendered text also carries the title
+    line, whose enrolment-type label comes from the service pack, and the
+    note heading another service's entries; hashing that would make every
+    runbook stale whenever a pack's label was reworded.
+    """
+    import hashlib
+
+    canonical = json.dumps(
+        [{"source": e["source"], "kind": e["kind"], "ref": e["ref"],
+          "enrolment_type": e["enrolment_type"], "body": e["body"]}
+         for e in entries],
+        sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def provenance(doc_state) -> Optional[dict]:
@@ -1083,8 +1105,9 @@ def validate(root=None, coverage: bool = False):
                               f"file must be named after its service "
                               f"({service}.json).")
         by_file.append((path, entries))
-        for reason_code, types in entries.items():
-            published.setdefault(reason_code, set()).update(types)
+        # Per file: a runbook is checked against its own service's
+        # documentation, not against every service's.
+        published[path.stem] = set(entries)
 
     # Render every reason code each file publishes, for every type it could be
     # asked about, and check the text a model would actually be shown: the
@@ -1123,14 +1146,22 @@ def _check_coverage(published: dict, warnings: list) -> None:
 
     A runbook is a stored answer for a code the pipeline meets often, so a
     code with one and no documentation is the next document worth having.
+    `published` is {file stem: reason codes it documents}; each service's
+    runbooks are checked against that service's own file
+    (MULTI_SERVICE_PLAN.md D10, D11).
     """
-    from src.utils.runbook_store import RUNBOOK_DRAFT_DIR, RUNBOOK_FINAL_DIR
+    from src.utils import runbook_store, service_registry
 
-    for directory in (RUNBOOK_FINAL_DIR, RUNBOOK_DRAFT_DIR):
+    registry = service_registry.load()
+    for directory in (runbook_store.RUNBOOK_FINAL_DIR, runbook_store.RUNBOOK_DRAFT_DIR):
         if not directory.is_dir():
             continue
-        for path in sorted(directory.glob("*.json")):
+        for path in runbook_store._service_runbooks(directory):
+            service = runbook_store.service_of_path(path)
+            found = registry.packs.get(service)
+            stem = found.reason_code_docs_file if found else service
             reason_code = path.stem.rsplit("__", 1)[0]
-            if reason_code not in published:
+            if reason_code not in published.get(stem, ()):
                 warnings.append(f"{reason_code} has a runbook ({directory.name}/"
-                                f"{path.name}) but no documentation.")
+                                f"{service}/{path.name}) but no documentation "
+                                f"in {SERVICES_DIRNAME}/{stem}.json.")

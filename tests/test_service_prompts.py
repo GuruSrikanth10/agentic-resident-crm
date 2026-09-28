@@ -177,6 +177,14 @@ REWRITTEN_HARNESS = {
         "   auth and append against its own parent, MBU = treated as 1:N.": [
             "   for a different enrolment type.",
             "### C. MANDATORY BIOMETRIC UPDATE (MBU)"],
+        # Phase 5: a proposed rule says whether it is the service's or generic.
+        '{"verdict": "APPROVED" or "REJECTED", "feedback": "<if rejected, explain '
+        'what is wrong; if approved, empty string>", "learning_rule": {"rule_text": '
+        '"<single-line rule>", "reasoning": "<why the rule is needed>"} or null}': [
+            '{"verdict": "APPROVED" or "REJECTED", "feedback": "<if rejected, explain '
+            'what is wrong; if approved, empty string>", "learning_rule": {"rule_text": '
+            '"<single-line rule>", "reasoning": "<why the rule is needed>", "scope": '
+            '"service" or "generic"} or null}'],
     },
 }
 

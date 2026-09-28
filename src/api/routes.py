@@ -22,6 +22,7 @@ from src.utils.outcomes import (
     record_outcome,
 )
 from src.core.agent_orchestrator import get_agent, prompt_fingerprint
+from src.log_pipeline import scope as log_scope
 from src.utils import packet_claims, service_registry
 from src.storage.factory import get_casebook_storage
 from src.utils.dlq_publisher import publish_to_dlq
@@ -663,8 +664,14 @@ def fetch_logs(signal: MessagePayload):
     if storage.artifact_exists(event_id, "fetched_logs.txt"):
         log.info("Logs already fetched; reusing the persisted artifact")
     else:
-        log.info("Fetching logs for the analysis queue")
-        fetch_and_persist_logs(event_id, signal_dict)
+        # Only the packet's own service's logs are searched, and nothing for
+        # a packet no service could be placed in (MULTI_SERVICE_PLAN.md
+        # Phase 6). The pack is decided here the way the analysis stage will
+        # decide it, so the logs and the analysis agree on the service.
+        log_service = log_scope.service_to_search(
+            service_resolution, service_registry.pack_for(service_resolution))
+        log.info("Fetching logs for the analysis queue", log_service=log_service)
+        fetch_and_persist_logs(event_id, signal_dict, service=log_service)
 
     # Only advance status.json to LOGS_FETCHED from nothing/LOGS_FETCHED.
     # /analyze-rejection may already have moved it to IN_PROGRESS (or a
@@ -1104,9 +1111,12 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
     # prompt_fingerprint, so a document edit and a prompt edit stay
     # distinguishable (D14). `reason_code_docs.provenance` strips the text:
     # it is large, identical for every packet with this reason code, and the
-    # sha256 already identifies the version the model was shown. The three
-    # are None for a packet a runbook answered, which never reaches the
-    # Investigator at all.
+    # sha256 already identifies the version the model was shown. The
+    # documentation is resolved in runbook_lookup_node, before any runbook
+    # decision, so a packet a runbook answered records the documentation its
+    # runbook was checked against too (MULTI_SERVICE_PLAN.md Phase 5). The
+    # two paths are None for such a packet, which never reaches the
+    # Investigator or the Reviewer.
     #
     # The pack is the one the graph actually used: a checkpoint resumed from
     # an earlier run carries the pack that run decided, and that is what its

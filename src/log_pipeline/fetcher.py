@@ -10,7 +10,7 @@ Improvements over the old fetch_elastic_logs:
 import os
 import json
 import threading
-from typing import Optional
+from typing import Optional, Sequence
 
 from src.log_pipeline.catalog import TemplateCatalog
 from src.utils.env import get_bool_env
@@ -97,7 +97,8 @@ def _get_es_client(es_host: str, auth_args: dict):
 
 
 def fetch_logs(event_id: str, catalog: Optional[TemplateCatalog] = None,
-               window=None, out_diagnostics: Optional[dict] = None) -> list[dict]:
+               window=None, out_diagnostics: Optional[dict] = None,
+               apps: Optional[Sequence[str]] = None) -> list[dict]:
     """Fetch logs from Elasticsearch for a given event_id.
 
     Returns a list of dicts with keys: timestamp, level, message, app_name,
@@ -118,6 +119,10 @@ def fetch_logs(event_id: str, catalog: Optional[TemplateCatalog] = None,
     fetcher's own tests) want exactly today's list and only
     `ElasticLogSource` needs to build an EvidenceGap from the result.
     Omitting it gives byte-for-byte the previous behaviour.
+
+    `apps` is the packet's service's application names
+    (MULTI_SERVICE_PLAN.md Phase 6). None -- a caller with no service --
+    reads `ES_APP_NAMES`, as every fetch did before.
     """
     log = logger.bind(event_id=event_id)
     log.info("Elasticsearch fetch started")
@@ -201,9 +206,11 @@ def fetch_logs(event_id: str, catalog: Optional[TemplateCatalog] = None,
 
     filter_clauses = []
 
-    # Restrict to the configured apps. `terms` (not `term`) so more than one
-    # service is reachable; empty means no app restriction at all (F19).
-    app_names = _app_names()
+    # Restrict to the packet's service's apps, or for a caller with no
+    # service the configured ones. `terms` (not `term`) so more than one
+    # service is reachable; an empty ES_APP_NAMES means no app restriction at
+    # all (F19). A service's list is never empty (`scope.for_service`).
+    app_names = list(apps) if apps is not None else _app_names()
     if app_names:
         filter_clauses.append({"terms": {"application_name.keyword": app_names}})
 

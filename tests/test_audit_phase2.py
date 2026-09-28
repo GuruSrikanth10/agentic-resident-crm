@@ -101,7 +101,7 @@ def test_a_runbook_miss_is_counted(monkeypatch):
     monkeypatch.setenv("RUNBOOK_MODE", "serve")
     monkeypatch.setattr(orch, "_agent", None)
 
-    before = _label_values(metrics.RUNBOOK_LOOKUPS, outcome="miss")
+    before = _label_values(metrics.RUNBOOK_LOOKUPS, outcome="miss", service="_unresolved")
 
     with patch.object(orch, "build_agent", side_effect=lambda *a, **k: MagicMock()), \
          patch.object(orch, "get_llm", side_effect=lambda tier: MagicMock()), \
@@ -113,7 +113,7 @@ def test_a_runbook_miss_is_counted(monkeypatch):
         }})
 
     assert result["resolution_source"] == "agent"
-    assert _label_values(metrics.RUNBOOK_LOOKUPS, outcome="miss") == before + 1
+    assert _label_values(metrics.RUNBOOK_LOOKUPS, outcome="miss", service="_unresolved") == before + 1
 
 
 @requires_prometheus
@@ -122,7 +122,7 @@ def test_a_fingerprint_mismatch_is_counted_distinctly(monkeypatch):
     monkeypatch.setenv("RUNBOOK_MODE", "serve")
     monkeypatch.setattr(orch, "_agent", None)
 
-    before = _label_values(metrics.RUNBOOK_LOOKUPS, outcome="fingerprint_mismatch")
+    before = _label_values(metrics.RUNBOOK_LOOKUPS, outcome="fingerprint_mismatch", service="_unresolved")
 
     runbook = {"runbook_id": "RC__U", "version": 1,
                "rule_fingerprint": "sha256:stale",
@@ -140,7 +140,7 @@ def test_a_fingerprint_mismatch_is_counted_distinctly(monkeypatch):
 
     assert result["resolution_source"] == "agent"
     assert _label_values(metrics.RUNBOOK_LOOKUPS,
-                         outcome="fingerprint_mismatch") == before + 1
+                         outcome="fingerprint_mismatch", service="_unresolved") == before + 1
 
 
 @requires_prometheus
@@ -149,7 +149,7 @@ def test_a_runbook_error_is_counted(monkeypatch):
     monkeypatch.setenv("RUNBOOK_MODE", "serve")
     monkeypatch.setattr(orch, "_agent", None)
 
-    before = _label_values(metrics.RUNBOOK_LOOKUPS, outcome="error")
+    before = _label_values(metrics.RUNBOOK_LOOKUPS, outcome="error", service="_unresolved")
 
     def boom(*_a, **_k):
         raise TypeError("'StructuredTool' object is not callable")
@@ -164,7 +164,7 @@ def test_a_runbook_error_is_counted(monkeypatch):
         }})
 
     assert result["resolution_source"] == "agent"
-    assert _label_values(metrics.RUNBOOK_LOOKUPS, outcome="error") == before + 1
+    assert _label_values(metrics.RUNBOOK_LOOKUPS, outcome="error", service="_unresolved") == before + 1
 
 
 def _runbook_node():

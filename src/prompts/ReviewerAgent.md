@@ -23,6 +23,12 @@ Check their findings carefully. Ensure that the logic is sound and that the `rul
 If you find a mistake, hallucination, or logic error in the Investigator Agent's output:
 1. Call the `add_learning_rule` tool with a strict, single-line constraint to correct the behavior. 
    For example: "Always ensure that the solution maps exactly to the rule's suggested resolution."
+   Set its `scope` to `service` (the default) unless the rule is generic. A
+   rule is generic only when it concerns evidence handling, citations or
+   output format, and names no term, rule, enrolment type or data source of
+   any one service. A generic rule reaches the Investigator for every
+   service; a `service` rule reaches only this packet's service. When in
+   doubt, use `service`.
 2. Provide the corrected findings back to the Manager.
 
 ### THE EVIDENCE YOU ARE GIVEN

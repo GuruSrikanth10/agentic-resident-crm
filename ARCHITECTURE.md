@@ -780,6 +780,8 @@ agentic-resident-crm/
 │   ├── test_service_tools.py       # Tools per service: the selection matrix, prefix rule, opencode agents, subagent
 │   ├── test_service_prompts.py     # Prompts per pack: content kept, neutrality, snapshots, pool
 │   ├── test_service_rules.py       # Rule source per pack: the rules table, the notes, the case files
+│   ├── test_service_runbooks.py    # Runbooks and learned rules per service: store, binding, allowlist, scope
+│   ├── test_service_logs.py        # Logs per service: routing, catalogs, vocabulary, key redaction, audit
 │   ├── fixtures/reason_code_docs/  # A small valid store the pipeline tests look up in
 │   ├── fixtures/prompts_before_service_packs/ # The prompts as they were, for content preservation
 │   ├── fixtures/composed_prompts/  # Snapshots of the composed prompts, per pack (section 3.2.3)
@@ -857,8 +859,9 @@ agentic-resident-crm/
 │   │   └── enu-biometric/          # service.json (stage Biometric, rules_db), policy.md (the
 │   │                               #   business policy and glossary), investigator.md, reviewer.md,
 │   │                               #   synthesis.md -- the biometric text the role prompts used to carry
-│   ├── runbooks/
-│   │   ├── draft/                  # LLM-generated runbook drafts (pending human review)
+│   ├── runbooks/                   # One directory per service below each of these
+│   │   ├── draft/                  # LLM-generated runbook drafts (pending human review);
+│   │   │   └── enu-biometric/      #   the 39 shipped drafts
 │   │   └── final/                  # Human-approved runbook templates (served online)
 │   ├── storage/
 │   │   ├── base.py                 # CasebookStorage Protocol
@@ -886,7 +889,8 @@ agentic-resident-crm/
 │   │   ├── record_outcome.py       # CLI: attach a ground-truth verdict to a completed investigation
 │   │   ├── check_reason_code_docs.py # CLI: validate the reason-code document store (CI gate)
 │   │   ├── check_drift.py          # CLI: rules.csv schema drift detector
-│   │   ├── build_catalog.py        # CLI: Stage 0 offline template catalog builder
+│   │   ├── build_catalog.py        # CLI: Stage 0 offline template catalog builder (--service: one service's)
+│   │   ├── redaction_audit.py      # CLI: personal data left in a service's sample logs after redaction
 │   │   ├── eval_harness.py         # CLI: Stage 6 evaluation harness for pipeline accuracy
 │   │   ├── accuracy_report.py      # CLI: resolution accuracy by reason code (Phase E runbook gate)
 │   │   ├── prune_checkpoints.py    # CLI: SQLite checkpoint pruning utility
@@ -910,7 +914,8 @@ agentic-resident-crm/
 │   │   ├── fetcher.py              # Stage 1: Source-filtered ES fetch + search_after
 │   │   ├── reducer.py              # Stages 2-4: ERROR branch, Drain3 clustering, guardrails
 │   │   ├── pipeline.py             # Top-level orchestrator wiring Stages 1-4
-│   │   ├── redaction.py            # PII redaction for log records
+│   │   ├── scope.py                # Whose logs a packet reads: apps, catalog, vocabulary per service
+│   │   ├── redaction.py            # PII redaction for log records, by pattern and by JSON key
 │   │   ├── snapshot.py             # Evidence snapshot persistence (raw_logs_k8s.jsonl)
 │   │   └── sources/
 │   │       ├── base.py             # LogSource Protocol definition
@@ -1305,7 +1310,7 @@ replace the files shipped in `src/` -- or when no bucket is configured.
 Every service publishes its rejections to the one topic the fast consumer
 reads, in one structure. `MULTI_SERVICE_PLAN.md` moves the lane from "every
 packet is enu-biometric" to "every packet is analysed with its own service's
-knowledge". Phases 1 to 4 are built:
+knowledge". Phases 1 to 6 are built:
 
 - **Phase 1** places each packet in a service and can turn away the services
   that are not switched on yet.
@@ -1315,9 +1320,11 @@ knowledge". Phases 1 to 4 are built:
 - **Phase 3** gives each pack its own rule source and its own reason-code
   documentation first.
 - **Phase 4** scopes the agents' tools by service as well as by role.
-
-The runbooks, the learned-rule scopes and the logs are still the biometric
-ones (Phases 5 and 6).
+- **Phase 5** keeps runbooks per service, binds a runbook of a service with
+  no rules table to its documentation, and gives learned rules a scope.
+- **Phase 6** searches each packet's own service's logs, reduces them with
+  that service's catalog and vocabulary, and redacts personal data by JSON
+  key as well as by pattern, for every packet.
 
 **The registry** (`src/utils/service_registry.py`) is one directory per service
 under `SERVICE_PACKS_DIR` (default `src/service_packs/`), each with a
@@ -1459,8 +1466,8 @@ its digest), for the pack the graph actually used.
 (`pending_rules.jsonl` gains `service`, `service_pack`). `promote_rules.py`
 appends an approved rule to that pack's `learned_rules.md`, never to
 `InvestigatorAgent.md`, which every service reads. An entry recorded before
-packs existed goes to the pre-registry pack. Choosing a `generic` scope is
-Phase 5 of the plan.
+packs existed goes to the pre-registry pack. A rule can instead be `generic`
+(Phase 5, below).
 
 **Validation.** A pack is valid only if its text also is:
 - `policy.md` is present and not empty;
@@ -1496,9 +1503,8 @@ up in it (`service_registry.rule_source_of`):
 
 For a `none` pack nothing queries the rules table -- not
 `investigator_node`, not `get_error_description`, and not
-`runbook_lookup_node`, which counts `rule_source_none` and falls through to the
-agents, because a runbook is derived from a rules-table rule and checked against
-it. `db_rule` stays empty, and the `### Rule source` section holds the note for
+`runbook_lookup_node`, which checks such a service's runbooks against its
+documentation instead (Phase 5, below). `db_rule` stays empty, and the `### Rule source` section holds the note for
 the case the packet is actually in: the documentation is the only account of the
 rule; or no documentation describes this code, so say so and invent nothing; or
 the documents are switched off as well, which boot validation refuses for an
@@ -1515,8 +1521,7 @@ appended `### RULE SOURCE` section tells the agent to read it wherever the task
 says "DB rule". A `rules_db` pack's case files and prompts are exactly what they
 were.
 
-Counted on `reason_code_doc_lookups_total{outcome, match, service, scope}`, and
-`runbook_lookups_total` gains the `rule_source_none` outcome.
+Counted on `reason_code_doc_lookups_total{outcome, match, service, scope}`.
 `tests/test_service_rules.py` guards it: the rules table is wired to fail the
 test if a `none` service reaches it at all.
 
@@ -1611,11 +1616,197 @@ scope checks, the per-service opencode agents, and a fixture service's
 Investigator and its `task` subagent over the real tool server, offered no
 `bio_` tool.
 
+#### Runbooks and learned rules per service (Phase 5)
+
+A runbook is one service's stored answer for one of its reason codes, and a
+learned rule is a lesson learned under one service's policy. Both are now kept
+by service (`MULTI_SERVICE_PLAN.md` D11).
+
+**Where runbooks live.** `src/runbooks/{draft,final}/<service>/<CODE>__<TYPE>.json`
+(`utils/runbook_store.py`). `get_runbook(service, code, type)` reads only that
+service's directory, falling back to its `ANY` runbook and never to another
+service's. The cache key carries the service. The 39 shipped drafts moved to
+`draft/enu-biometric/` and record `"service": "enu-biometric"`. A runbook left
+at the top level is ignored with a warning, and `_default` has no directory:
+an unresolved packet has no service whose answers apply.
+
+**Schema 1.2 and the binding.** A 1.2 runbook records `service`, which must
+equal its directory, and `binding`, which says what it was derived from and is
+checked against before it is served:
+
+| Service's rule source | `binding.type` | `binding.fingerprint` |
+| --- | --- | --- |
+| `rules_db` | `db_rule` | `generate_rule_fingerprint` of the parsed rule rows, as before |
+| `none` | `reason_code_doc` | `entries_sha256` of the service's own documentation entries for the code |
+
+The documentation binding hashes the selected entries (their source, kind,
+ref, enrolment type and body), not the rendered text. The title line carries
+the pack's enrolment-type label, so editing a label leaves every runbook
+valid; editing an entry makes the runbooks bound to it stale.
+`reason_code_docs.lookup` returns `entries_sha256` on every hit. A 1.0 or 1.1
+runbook still loads, but only from `enu-biometric/`, the one service runbooks
+were written for before 1.2; its `rule_fingerprint` is read as a `db_rule`
+binding (`runbook_store.binding_of`).
+
+**The lookup node** (`runbook_lookup_node`):
+1. Resolves the packet's documentation first, whatever `RUNBOOK_MODE` is, and
+   returns it from every branch. There is one documentation lookup per packet:
+   the Investigator reuses it, and a packet a runbook answered records it in
+   `resolution.provenance.reason_code_doc`, which used to be `null` for one.
+2. Looks up the runbook under the packet's pack -- the knowledge the packet is
+   analysed with. In `record` mode that is the pre-registry pack for a packet
+   the gate would skip, as before.
+3. Checks the binding against the pack's rule source. A binding of the other
+   type is stale (`fingerprint_mismatch`). A `db_rule` binding is compared
+   only when the table returns a rule, as it always was. A `reason_code_doc`
+   binding with no documentation hit to compare against is not served
+   (`binding_unavailable`), because for such a service nothing else can
+   vouch for it.
+4. Serves or shadows it. `RUNBOOK_SERVE_ALLOWLIST` entries are `service:CODE`,
+   so a code cleared for one service is not cleared for another. A bare `CODE`
+   still means enu-biometric, with a deprecation warning logged once per
+   entry.
+
+`runbook_lookups_total{outcome, service}` counts `hit`, `shadow`, `miss`,
+`no_reason_code`, `no_service`, `fingerprint_mismatch`, `binding_unavailable`
+and `error`. `rule_source_none` is gone: a service without a rules table now
+has runbooks of its own.
+
+**Drafting and promotion.** `build_runbooks.py` groups casebooks by
+(service, code, type) and writes schema 1.2 drafts with the binding for the
+service's rule source. Only the service's own documentation can bind a draft;
+a code only another service documents gives nothing to bind to, so no draft.
+A casebook is used only for a registered service (`casebook_service`):
+- its `packet_metadata.service`, unless its `provenance.service_pack` names
+  another pack -- a packet the gate only recorded, reasoned from another
+  service's knowledge;
+- for a casebook from before Phase 1, enu-biometric when its
+  `packet_status.service` (the stage) matches enu-biometric's `match` rules;
+- otherwise it is left out.
+
+`promote_runbooks.py` walks the service directories, promotes a draft within
+its own service, and `--list` checks each final runbook's binding the way it
+was made. `check_reason_code_docs --coverage` checks each runbook against its
+own service's documentation file.
+
+**Learned rules carry a scope.** A proposal in `pending_rules.jsonl` records
+`scope`:
+- `service`, the default, which goes to the pack's `learned_rules.md`;
+- `generic`, which goes to `src/prompts/learned_rules.md`, composed into every
+  service's Investigator prompt and hashed into every fingerprint.
+
+Both Reviewer prompts say a rule is generic only when it concerns evidence
+handling, citations or output format and names nothing of any one service.
+The direct Reviewer passes it as `add_learning_rule(scope=...)`, the harness
+Reviewer as `learning_rule.scope` in its JSON. Anything else is queued as
+`service`, because the costs are lopsided: a rule wrongly marked generic
+reaches every service, and one wrongly kept to its service merely fails to
+spread. `promote_rules.py` shows the proposed scope and the exact diff for it;
+typing the other scope's name switches it and shows the diff again. The three
+entries queued before scopes existed have neither a scope nor a pack, and are
+promoted into enu-biometric's pack, where they were learned.
+
+`tests/test_service_runbooks.py` guards all of this, with the harness scope in
+`test_opencode_harness.py`.
+
+#### Logs and privacy per service (Phase 6)
+
+**Whose logs a packet reads.** `src/log_pipeline/scope.py` turns the service
+a packet is fetched for into a `LogScope`: the apps to search, their pod
+matches, the template catalog and Drain3 parse tree, and the decision
+vocabulary. Which service that is comes from `scope.service_to_search`, called
+with the packet's resolution and pack by `/fetch-logs` and, for a live fetch,
+by `fetch_logs_node`:
+
+| The packet | Searches | Catalog and parse tree |
+| --- | --- | --- |
+| Analysed with its own service's pack | the pack's `logs.app_names`, then those of each `logs.also_search` service, and nothing else | the service's own, when built; otherwise none |
+| Analysed with `_default` (unresolved, admitted by `REJECTION_UNRESOLVED_SERVICE=default_pack`) | nothing; the model is told why | -- |
+| Analysed with the pre-registry pack because `record` mode would have skipped it, and every caller with no service (the DLT lane, the CLIs) | `ES_APP_NAMES` / `K8S_APP_NAMES`, as before | `CATALOG_PATH` and `drain3_state.bin`, as before |
+
+A packet no service could be placed in searches nothing because searching
+every service would hand the model other services' evidence as if it were
+this packet's. `record` mode keeps changing nothing about analysis (D5): a
+packet it analyses with another service's pack is fetched as every packet was
+before. `ES_APP_NAMES` and `K8S_APP_NAMES` are therefore only a fallback now.
+
+- **Elasticsearch** filters `application_name.keyword` on the scope's apps
+  (`FetchContext.apps`, `fetcher.fetch_logs(apps=...)`).
+- **Kubernetes** discovers exactly those apps
+  (`discovery.discover_targets(apps=, pod_matches=)`). Each app's pod match
+  is its pack's `logs.k8s_match`, unless `K8S_SERVICE_MAP` has an entry for
+  the app, which still wins; the app name is used when neither says anything.
+  The namespace comes only from the environment (`K8S_SERVICE_MAP`,
+  `K8S_DEFAULT_NAMESPACE`), because it differs between environments and a
+  pack does not.
+- A service that declares no `app_names` searches the application named
+  after it, as its documentation file and corpus directory default to its
+  name (`service_registry.log_options`).
+
+**A catalog per service.** A catalog's template ids mean something only
+against the parse tree that produced them, so a service's catalog and tree go
+together: `template_catalog.<service>.json` and
+`drain3_state/drain3_state.<service>.bin`, under `LOCAL_CHECKPOINTS_DIR`.
+`build_catalog.py --service <name>` builds them from that service's packets,
+searching its apps and classifying with its vocabulary. A service without a
+catalog of its own gets an empty one, so no `must_not` clause is sent for its
+fetch: losing an evidence line costs more than a longer trace, and the
+unscoped catalog was built from another service's logs. The one exception is
+the pre-registry pack, enu-biometric: until it has a catalog of its own, it
+keeps the unscoped catalog and tree, which were built from its packets, so its
+reduction is unchanged. Catalogs are read once per process, so a new one is
+picked up on restart.
+
+**Decision vocabulary** is the generic regex (`LOG_DECISION_VOCAB_REGEX`,
+now only the words every service's decisions share) OR the pack's
+`logs.decision_vocabulary`, matched case-insensitively
+(`scope.DecisionVocabulary`). The biometric words the generic regex used to
+carry are enu-biometric's pack vocabulary, and a caller with no service still
+matches them, so the unscoped vocabulary is exactly the old one.
+
+**Redaction by JSON key.** Names, dates of birth, genders and addresses have
+no shape a pattern can recognise, so `redaction.redact_text` also replaces
+the value of every `REDACT_JSON_KEYS` key (default
+`redaction.DEFAULT_JSON_KEYS`: name fields, relatives' names, `dob` /
+`dateOfBirth`, `gender`, address fields and `pincode`), matched
+case-insensitively, before the patterns run:
+- at any depth, and whatever the value is: a string, a number, or a whole
+  object or array;
+- in plain JSON and in JSON logged inside a string (`\"name\":\"...\"`),
+  honouring escaped quotes, and brackets inside strings;
+- a value cut off by the end of the line is redacted to the end;
+- `null`, booleans, empty strings and values already redacted are left
+  alone, so a second pass counts nothing.
+
+The placeholder is `"[REDACTED:JSON_FIELD]"`, quoted as the key is, and the
+count lands in `redactions_total{pattern="JSON_FIELD"}`. Redaction is global
+(D12): the list is every service's sensitive keys, applied to every packet
+whatever its service, because it must not depend on the service having been
+resolved correctly. It covers every caller of `redact_text`: the log
+pipeline, the Kubernetes snapshot, the DLT lane's stack traces and payload
+fields, and the agent tools' database values.
+
+**The redaction audit.** `python -m src.tools.redaction_audit --service <name>
+<files or directories>` runs a service's sample logs through the same
+redaction and counts what is left of the known keys -- in any spelling it can
+recognise: `"key": `, `'key': `, `key=`, `key: ` -- and patterns. The count
+must be zero before a service is enabled or piloted; findings name the file
+and line, never the value, and the exit status is 1 while anything is left. A
+count on a non-JSON spelling means the service logs a form key redaction does
+not cover, and `K8S_REDACT_EXTRA_PATTERNS` or `REDACT_JSON_KEYS` must cover it
+first.
+
+**Not done: the payload projection.** The plan narrows `_project_payload` to
+named `packetMetaData` fields only if Phase 0 finds demographic fields in a
+service's payload. Phase 0 has not been run, so the projection is unchanged.
+
+`tests/test_service_logs.py` guards all of this.
+
 ### 3.3 Core Pipeline (Deterministic StateGraph)
 Instead of relying on an unpredictable LLM to orchestrate the subagents, the system uses a highly robust, strictly deterministic Python `StateGraph` (via `langgraph`) in `src/core/agent_orchestrator.py`. This ensures the exact sequential execution of every step.
 
 1. **Log Fetcher Node**: Cache-first (section 3.11). Reads `fetched_logs.txt` from `CasebookStorage` -- persisted by `POST /fetch-logs` before `/analyze-rejection` ever invokes the graph -- and uses it directly if present, with no live fetch. Only when that artifact is absent (a direct `/process-rejection` call, `local_run.py`, or any caller that invokes the graph without going through `/fetch-logs` first) does it fall back to fetching live: if `ENABLE_LOG_FETCHING=true`, `fetch_and_persist_logs` triggers the same log-reduction pipeline (`fetch_logs_for`) to pull relevant Kibana/Kubernetes traces using the `eventId` and persists the result for next time.
-2. **Runbook Lookup Node**: Checks `RUNBOOK_MODE` (off/serve/shadow). A packet whose service pack has no rules table never uses a runbook -- a runbook is derived from a rules-table rule and verified against it, so it could only be another service's; the outcome is counted as `rule_source_none` (section 3.2.3). If `serve`, it looks up a final runbook by `(reason_code, enrolment_type)` in `src/runbooks/final/`, verifies the DB rule fingerprint hasn't changed, and short-circuits the graph directly to `END` with the pre-built resolution (no LLM calls). In `shadow` mode, it records the runbook match but lets the agents run normally; `synthesis_node` later compares the two results and logs any divergence. If `off` (the default) or no runbook matches, it falls through to the Investigator.
+2. **Runbook Lookup Node**: First resolves the packet's reason-code documentation, whatever the mode, and returns it for the Investigator to reuse. Then checks `RUNBOOK_MODE` (off/serve/shadow). If `serve`, it looks up a final runbook by `(reason_code, enrolment_type)` in `src/runbooks/final/<pack>/`, verifies its binding -- the DB rule fingerprint for a service with a rules table, the documentation entries' hash for one without (section 3.2.3, Phase 5) -- hasn't changed, and short-circuits the graph directly to `END` with the pre-built resolution (no LLM calls). In `shadow` mode, it records the runbook match but lets the agents run normally; `synthesis_node` later compares the two results and logs any divergence. If `off` (the default) or no runbook matches, it falls through to the Investigator.
 3. **Investigator Node**: A deep agent (section 3.5.1). For a service whose pack names the rules table as its rule source, the rule is still fetched deterministically in Python before the call: `lookup_rule_by_reason_code` is invoked by the node itself, the result is filtered by `enrolmentType` using the pack's own filter, and the rule text is injected into the prompt. If the rule lookup fails or returns nothing, it falls back to `get_error_description` (from `tool_registry.py`) to inject hardcoded error definitions (e.g., for `RESIDENT_BIOMETRIC_UPDATE_IDENTIFY_FAILURE`). For a service with no rules table nothing here queries one, and the prompt carries a `Rule source` note instead (section 3.2.3). On top of that the agent gets the MCP tools the `investigator` role is given (section 3.5.1) -- the process DB tools when `PROCESS_DB_ENABLED=true`, otherwise none -- and every call it makes, including one inside a `task` subagent, is recorded into the `tool_evidence` state field (merged across retries), saved as the `tool_evidence.json` artifact, and listed in the casebook's `resolution.provenance.tool_calls`. The harness path appends the same AVAILABLE TOOLS section to its prompt, runs as the `crm_investigator` opencode agent, and keeps the MCP calls it made -- read off the task's event stream -- as evidence the same way. A retry is shown the earlier attempts' tool results under `Evidence retrieved with tools`. The prompt is projected down to only the fields the Investigator needs (`eventId`, `packetMetaData`, `packetExecutionSummary`, `flowMetaData.stage`) rather than the full raw Kafka message, and on a retry it sends only the delta -- the prior investigation plus the Reviewer's feedback -- instead of resending the full payload/logs/rule context again. When `REJECTION_REASON_CODE_DOCS_ENABLED=true` the node additionally resolves the reason-code documentation for this packet (section 3.2.2) before anything else, stores it in graph state as `reason_code_doc` so every later node reuses the same version, counts the outcome on `reason_code_doc_lookups_total`, and builds both its prompts through `core/rejection_context.py` -- documentation and rule first, logs last, task restated after them, and only the logs trimmed when `REJECTION_PROMPT_MAX_CHARS` binds. With that switch off the prompts are byte-for-byte the ones described above. Either way it returns `investigator_path` (`harness` or `direct`), because a harness task that fails falls back silently and a comparison of the two paths would otherwise score the wrong one. When `USE_OPENCODE_HARNESS_REJECTION=true`, the node writes `context.json` and `supported_logs.txt` to the local casebook directory, renders the `RejectionInvestigator` harness prompt template, and calls `opencode_runner.run_task_json()` -- giving the agent Glob/Grep/Read access to the `docs_cache/` DROA corpus. It falls back to the direct LLM path on harness failure (section 3.2.1).
 4. **Reviewer Node**: A distinct deep agent, built once at graph-construction time (not per review) and bound to the `simple` LLM tier, that acts as a strict QC validator holding one tool (`add_learning_rule`). The tool no longer closes over the current `event_id`/investigation text per call -- it reads them from a pair of `contextvars.ContextVar`s that `reviewer_node` sets before each invocation, since each packet already runs on its own dedicated thread. `REJECTION_REVIEWER_EVIDENCE` defaults to **true**, so on the direct path it is now given the same evidence the Investigator had -- including what the Investigator's tools returned, as an `Evidence retrieved with tools` section (and, for a harness Reviewer, as `tool_evidence.txt`), without which every finding resting on a tool result could only be rejected -- the rule, the enrolment type, the projected payload, the logs, and the stored document -- through `build_review_prompt`, rather than the investigation text alone. It could not otherwise check the citation it most often rejects for, while `ReviewerAgent.md` asked it to do exactly that; setting the variable to false restores the older prompt character for character. It returns `reviewer_path` alongside its verdict. When `USE_OPENCODE_HARNESS_REJECTION=true`, the node rewrites `context.json`/`supported_logs.txt` from graph state (the same `_write_harness_case_files` the Investigator uses), writes `investigation_text.txt`, and renders the `RejectionReviewer` harness prompt template, giving the reviewer agent the same corpus access to verify the investigator's claims against service documentation. The harness reviewer has no tools, so a rejection returns its proposed rule as an optional `learning_rule` object in its JSON, which is passed to the same `queue_learning_rule` function behind `add_learning_rule` -- one validated path to `pending_rules.jsonl` either way. All file writes sit inside the harness `try`, so a missing or unwritable case directory falls back to the direct LLM like any other harness failure.
 5. **Conditional Router & Loop Guard**: A pure Python control edge that checks the Reviewer's output via `is_reviewer_approved()`: the (markdown/whitespace-stripped) feedback must *start with* the literal token `APPROVED`, not merely contain it -- this closes the "NOT APPROVED"/"DISAPPROVED" false-positive that a substring match would produce. Otherwise it increments `retry_count`; once `retry_count >= MAX_INVESTIGATION_RETRIES` it routes to the `escalate` node (preventing infinite LLM loops), else it loops back to the Investigator Node. A fresh (non-resumed) invocation always starts `retry_count` at 0, so a redelivered packet can never resume a stale checkpoint with the retry budget already exhausted.
@@ -1692,14 +1883,15 @@ The stage summary applies the table's rules rather than returning rows: per writ
 
 ### 3.6 Log Reduction Pipeline
 Fetched logs are heavily compressed to prevent LLM context window exhaustion and save tokens, using a map-reduce and clustering architecture (`src/log_pipeline/`). The stages are numbered as the design named them, which is why there is a 2.5: it was inserted between two existing stages and the numbers of the others are load-bearing in the code and the tests. `pipeline.reduce_logs` runs them in this order:
-- **Stage 0 (Offline Catalog)**: `build_catalog.py` samples historical logs to identify structural templates, classifying them as `boilerplate`, `informative`, or `decision-marker` based on cross-flow frequency.
+- **Scope**: Each packet is fetched for one service -- its apps, its catalog, its vocabulary -- or, for a packet of the `_default` pack, not at all; a caller with no service keeps the environment's lists (section 3.2.3, "Logs and privacy per service").
+- **Stage 0 (Offline Catalog)**: `build_catalog.py` samples historical logs to identify structural templates, classifying them as `boilerplate`, `informative`, or `decision-marker` based on cross-flow frequency. `--service` builds one service's own catalog and parse tree.
 - **Stage 1 (Fetch)**: Source-filters Elastic logs to minimal fields, uses `search_after` with `_seq_no` for stable pagination, and uses catalog-driven `must_not` filters to drop pure boilerplate.
-- **Redaction**: PII is scrubbed at this one seam -- after the fetch, before *any* persistence -- so Elasticsearch is covered as well as Kubernetes (section 3.10).
+- **Redaction**: PII is scrubbed at this one seam -- after the fetch, before *any* persistence -- so Elasticsearch is covered as well as Kubernetes (section 3.10), by pattern and by JSON key.
 - **Stage 2.5 (Noise Floor)**: Applied **after** `raw_logs.txt` is written, never before, so the audit copy stays the complete record and only the model's copy is thinned. Two filters: a severity floor (`LOG_MIN_LEVEL`, default `INFO`) drops framework `DEBUG` chatter -- shard hints, JPA transaction bookkeeping, SQL echo, roughly half the lines and two-thirds of the bytes in a real trace -- and `LOG_COLLAPSE_SQL` (default on) reduces an echoed `SELECT`'s column list to a count, since the diagnostic content of `select a,b,...,z from t where x=?` is entirely in the table and the predicate. `WARN` and `ERROR` sit above the default floor and can never be dropped by it, the count of what was removed is announced in the banner rather than dropped silently, and if the floor would empty the trace the original is kept -- handing the agent nothing reads as "no logs existed", the one conclusion this pipeline must never invite.
 - **Small-trace bypass**: Under 50 records the trace is emitted verbatim; there is nothing to reduce.
 - **Stage 2 (ERROR Branching)**: Detects `level=ERROR` logs. If found, it trims the trace to the errors plus `LOG_ERROR_CONTEXT_LINES` (default 200) *preceding* and `LOG_ERROR_TRAILING_LINES` (default 200) *trailing* lines, bypassing clustering entirely to preserve raw crash forensics. Without the trailing cap a cascading failure keeps everything from the first error to the end of the trace, which is the whole log. Within that window a template repeating `LOG_ERROR_REPEAT_THRESHOLD` times (default 3) is folded to its first occurrence plus a count -- a lower bar than the clustered path uses, because the window is a few hundred lines rather than a whole flow; `WARN` and `ERROR` lines are never folded.
-- **Stage 3 (Drain3 Clustering)**: For non-crashing (logic/rule rejection) flows, it uses Drain3 to strip dynamic noise (UUIDs, IPs) and cluster identical logs into structural templates. Clustering state is file-persisted to keep template IDs stable.
-- **Stage 4 (Evidence Guardrails)**: Regardless of clustering, it forces full-text retention for matches against a decision-vocabulary regex (`LOG_DECISION_VOCAB_REGEX`, e.g. `Validation Failed`), rare templates (`LOG_RARE_TEMPLATE_THRESHOLD`, count < 5), and flow boundaries. Two bounds keep those exemptions from inverting the pipeline: a template repeating `LOG_BOILERPLATE_COUNT` times (default 5) collapses to count-only **even with no catalog** -- frequency within the flow is evidence of boilerplate on its own, and without this a deployment that never ran `build_catalog` collapsed nothing at all and emitted "reduced" output ~1.8x larger than its input -- and decision-vocabulary matches are capped at `LOG_MAX_DECISION_LINES` (default 300), keeping the first and last half rather than the first N, since a decision sequence carries information at both ends and repeats in the middle.
+- **Stage 3 (Drain3 Clustering)**: For non-crashing (logic/rule rejection) flows, it uses Drain3 to strip dynamic noise (UUIDs, IPs) and cluster identical logs into structural templates. Clustering state is file-persisted to keep template IDs stable, one parse tree per service catalog.
+- **Stage 4 (Evidence Guardrails)**: Regardless of clustering, it forces full-text retention for matches against a decision vocabulary (the generic `LOG_DECISION_VOCAB_REGEX`, e.g. `Validation Failed`, OR the packet's pack's `logs.decision_vocabulary`), rare templates (`LOG_RARE_TEMPLATE_THRESHOLD`, count < 5), and flow boundaries. Two bounds keep those exemptions from inverting the pipeline: a template repeating `LOG_BOILERPLATE_COUNT` times (default 5) collapses to count-only **even with no catalog** -- frequency within the flow is evidence of boilerplate on its own, and without this a deployment that never ran `build_catalog` collapsed nothing at all and emitted "reduced" output ~1.8x larger than its input -- and decision-vocabulary matches are capped at `LOG_MAX_DECISION_LINES` (default 300), keeping the first and last half rather than the first N, since a decision sequence carries information at both ends and repeats in the middle.
 - **Final ceiling**: `LOG_MAX_REDUCED_CHARS` (default 120,000) bounds the whole formatted string, trimming the middle and saying so. The per-section bounds cap the parts; this caps the total, and exists chiefly for the ERROR branch, which is bounded in *lines* and not in characters -- a stack-trace-heavy trace can exhaust a context window in a few hundred of them. The gap/noise banner is prepended **after** this trim, so a size ceiling can never be what removes the warning that the evidence is incomplete.
 - **Stage 5 & 6 (LLM & Eval)**: The compressed, structured output is injected into the LLM context (and simultaneously persisted to `reduced_logs.txt` for human audits). `eval_harness.py` provides an offline safety check to measure evidence-citation accuracy against ground truth before trusting the pipeline in production.
 
@@ -1707,11 +1899,15 @@ Fetched logs are heavily compressed to prevent LLM context window exhaustion and
 If the `ReviewerAgent` spots a mistake (e.g., the Investigator recommended a solution that contradicts the business rule), the Reviewer invokes the `add_learning_rule` tool, defined inline in `agent_orchestrator.reviewer_node`.
 
 The tool does **not** mutate any prompt directly. It appends a JSON proposal
-(`eventId`, timestamp, proposed rule, reviewer reasoning, original investigator output)
+(`eventId`, timestamp, proposed rule, reviewer reasoning, original investigator output,
+the packet's `service` and `service_pack`, and the proposed `scope`)
 to `src/prompts/pending_rules.jsonl` under a `filelock`. A human then runs
-`src/tools/promote_rules.py`, which refuses to run if `src/prompts/` has uncommitted
-changes, prompts per rule, appends approved ones to `src/prompts/InvestigatorAgent.md`
-as `- CRITICAL RULE:` lines, and Git-commits each promotion. This keeps the learning
+`src/tools/promote_rules.py`, which refuses to run if `src/prompts/` or
+`src/service_packs/` has uncommitted changes, prompts per rule (showing the
+scope, which the operator may change), and appends approved ones as
+`- CRITICAL RULE:` lines: a `service` rule to its pack's `learned_rules.md`, a
+`generic` one to `src/prompts/learned_rules.md` (section 3.2.3). Committing is
+opt-in (`--commit`). This keeps the learning
 loop auditable and prevents an LLM from silently rewriting its own instructions.
 
 ### 3.8 Storage & Casesheets
@@ -1803,7 +1999,7 @@ To ensure zero hallucinations, `routes.py` deterministically extracts static met
 - **resolution** (`source`, `synthesis`, `action`, `resident_action`, `confidence`, `abstained` -- `source` is `"agent"` for LLM-generated or `"runbook:<id>@v<version>"` for runbook-served results)
   - `resolution.provenance.prompt_fingerprint`: the SHA256 over every agent system prompt, **every harness template in `src/prompts/harness/` and the `rules/` files they inline**, the generic `learned_rules.md`, the root `AGENTS.md`, **the service pack the agents were built from** (its `service.json` and every text file, by digest), and the tool configuration (`compute_prompt_fingerprint`). It is per pack, so an edit to one service's pack moves only that service's fingerprint. This is what lets an accuracy movement be attributed to a prompt change rather than merely correlated with one.
   - `resolution.provenance.service_pack`: `{"service", "sha256"}` -- the pack the agents were built from, and its digest. Usually the packet's own service; see section 3.2.3 for when it is not.
-  - `resolution.provenance.reason_code_doc`: which documentation this packet was reasoned from -- the outcome, the requested and matched enrolment types, the source refs, and the SHA256 of the exact rendered text the model was shown. The text itself is **never** written to a casebook or a log line: it is large, identical for every packet with this reason code, and the digest already identifies the version. It is recorded per packet rather than folded into `prompt_fingerprint` so that a document edit and a prompt edit stay distinguishable. `null` for a packet a runbook answered, which never reaches the Investigator.
+  - `resolution.provenance.reason_code_doc`: which documentation this packet was reasoned from -- the outcome, the requested and matched enrolment types, the source refs, and the SHA256 of the exact rendered text the model was shown. The text itself is **never** written to a casebook or a log line: it is large, identical for every packet with this reason code, and the digest already identifies the version. It is recorded per packet rather than folded into `prompt_fingerprint` so that a document edit and a prompt edit stay distinguishable. For a packet a runbook answered it is the documentation the runbook was checked against, resolved before the runbook decision (section 3.2.3, Phase 5); it was `null` for such a packet before then.
   - `resolution.provenance.investigator_path` / `reviewer_path`: `harness`, `direct`, or `null`. A harness task that fails falls back to the direct LLM silently, so without these a comparison of the two paths would be scoring runs that were not on the path they claim.
   - `outcome.json` denormalises `reason_code_doc_outcome`, `reason_code_doc_sha256` and `investigator_path` beside `prompt_fingerprint`, for the same reason the other fields are denormalised there: accuracy has to be groupable without re-reading every casebook.
   - `resolution.shadow`: present only in `RUNBOOK_MODE=shadow`, carrying what the runbook would have decided.
@@ -1820,9 +2016,9 @@ is the payload identifier downstream systems actually join on.
 
 ### 3.9 Runbook Pipeline
 For repeated rejections, the system implements a Runbook pattern to short-circuit the multi-minute LLM loop.
-- **Drafting (Offline)**: `build_runbooks.py` mines `local_casesheets/` for completed resolutions sharing the same `errorReasonCode` and `enrolmentType`. It uses a strictly prompted LLM (the `simple` tier) to synthesize a generic resolution template that contains zero packet-specific values (enforced by a regex validator checking for UUIDs, dates, SRNs, etc.). The result is saved to `src/runbooks/draft/`.
-- **Promotion (Offline)**: `promote_runbooks.py` acts as a human review gate. Operators inspect the generic template and approve it. The tool checks for rule fingerprint staleness, bumps the version, and git-commits the final template to `src/runbooks/final/`.
-- **Serving (Online)**: A `runbook_lookup` node runs immediately after `fetch_logs`. If `RUNBOOK_MODE=serve` and a final runbook matches the current packet's reason code (with the `rule_fingerprint` matching the live DB rule), the graph short-circuits the agents and directly emits the runbook's generic resolution. To preserve auditability, `resolution.source` in the casebook is marked with `runbook:<id>@v<version>`. If `RUNBOOK_MODE=shadow`, the agents still run and any divergence is logged. `RUNBOOK_SERVE_ALLOWLIST` narrows `serve` to specific reason codes: a code not on the list keeps running the agents and is shadow-compared, which is how it earns its place. (Until 2026-08-15 the fingerprint check raised `TypeError` and DLQ'd every runbook-matching packet.)
+- **Drafting (Offline)**: `build_runbooks.py` mines `local_casesheets/` for completed resolutions sharing the same service, `errorReasonCode` and `enrolmentType` (section 3.2.3, Phase 5). It uses a strictly prompted LLM (the `simple` tier) to synthesize a generic resolution template that contains zero packet-specific values (enforced by a regex validator checking for UUIDs, dates, SRNs, etc.). The result is saved to `src/runbooks/draft/<service>/`, as schema 1.2 with the service and its binding.
+- **Promotion (Offline)**: `promote_runbooks.py` acts as a human review gate. Operators inspect the generic template and approve it. The tool checks for binding staleness, bumps the version, and git-commits the final template to `src/runbooks/final/<service>/`.
+- **Serving (Online)**: A `runbook_lookup` node runs immediately after `fetch_logs`. If `RUNBOOK_MODE=serve` and a final runbook of the packet's service matches its reason code (with its binding matching the live DB rule, or for a service without a rules table the live documentation entries), the graph short-circuits the agents and directly emits the runbook's generic resolution. To preserve auditability, `resolution.source` in the casebook is marked with `runbook:<id>@v<version>`. If `RUNBOOK_MODE=shadow`, the agents still run and any divergence is logged. `RUNBOOK_SERVE_ALLOWLIST` narrows `serve` to specific `service:CODE` pairs: a code not on the list keeps running the agents and is shadow-compared, which is how it earns its place. (Until 2026-08-15 the fingerprint check raised `TypeError` and DLQ'd every runbook-matching packet.)
 
 ### 3.10 Kubernetes Log Source (`src/log_pipeline/sources/k8s/`)
 Elasticsearch is the primary log source and system of record, but it can drop lines under heavy load or indexing delays. The Kubernetes log source reads pod logs directly from the kubelet API to cover those gaps. **It is supplementary, not a replacement.** The full design is documented in `KUBERNETES_LOGS_PLAN.md`.
@@ -1841,7 +2037,7 @@ The `KubernetesLogSource` (`sources/k8s/source.py`) ties together five internal 
 
 1. **Discovery** (`discovery.py`): Verifies the namespace with a targeted `read_namespace` pre-flight (the ServiceAccount cannot list namespaces or pods cluster-wide), then lists pods within it -- by default a client-side name-substring match (`PodMatchSpec`, `K8S_SERVICE_MAP`), or a server-side label selector where an app opts in -- filters out sidecars (`istio-proxy`, `linkerd-proxy`, `vault-agent`), skips `Pending` pods, and caps the target list at `K8S_MAX_PODS` (default 20). Reports `TRUNCATED_PODS` evidence gaps when the cap is reached.
 
-   **Multi-service (2026-08-21).** A refId passes through several services, so `K8S_APP_NAMES` -- falling back to `ES_APP_NAMES`, so one list drives both sources -- names every service to search. Each resolves its own namespace and match spec, and the results are merged. Three properties make the merge safe: pods are **deduped** on (namespace, pod, container), because `name_contains` is a substring test and `enu-biometric` therefore also matches `enu-biometric-abis-mw-consumer`'s pods -- reading such a pod once per matching service would duplicate every line it contributed; a service that cannot be searched **degrades rather than fails**, yielding a `SERVICE_UNAVAILABLE` gap while the others still return logs, so an unreachable hop is announced instead of being mistaken for a silent one; and `K8S_MAX_PODS` applies **per service** with merging done round-robin, so adding a service never shrinks another's representation and the optional `K8S_MAX_TOTAL_PODS` ceiling trims every service evenly rather than dropping whichever was configured last.
+   **Multi-service (2026-08-21).** A refId passes through several services, so `K8S_APP_NAMES` -- falling back to `ES_APP_NAMES`, so one list drives both sources -- names every service to search. Each resolves its own namespace and match spec, and the results are merged. Since Phase 6 of `MULTI_SERVICE_PLAN.md` these lists are only the fallback for a caller with no service: a packet searches its own service's apps, with its pack's pod match (section 3.2.3). Three properties make the merge safe: pods are **deduped** on (namespace, pod, container), because `name_contains` is a substring test and `enu-biometric` therefore also matches `enu-biometric-abis-mw-consumer`'s pods -- reading such a pod once per matching service would duplicate every line it contributed; a service that cannot be searched **degrades rather than fails**, yielding a `SERVICE_UNAVAILABLE` gap while the others still return logs, so an unreachable hop is announced instead of being mistaken for a silent one; and `K8S_MAX_PODS` applies **per service** with merging done round-robin, so adding a service never shrinks another's representation and the optional `K8S_MAX_TOTAL_PODS` ceiling trims every service evenly rather than dropping whichever was configured last.
 2. **Retrieval** (`retrieval.py`): Reads logs for each discovered `(pod, container)` pair using a concurrent `ThreadPoolExecutor` fan-out. Streams logs line-by-line (`_preload_content=False`) to avoid buffering hundreds of megabytes. Requests kubelet timestamps (`timestamps=True`) for reliable cross-pod ordering. Also reads `previous=True` logs for restarted containers so pre-crash evidence is not lost. The entire fan-out is bounded by a wall-clock deadline (`K8S_TOTAL_FETCH_TIMEOUT_SECONDS`), enforced with `as_completed(timeout=...)` plus an explicit `shutdown(wait=False, cancel_futures=True)` -- a `with ThreadPoolExecutor(...)` block would call `shutdown(wait=True)` on exit and wait for every slow pod regardless of the deadline.
 3. **Parser** (`parser.py`): Splits each line into a kubelet RFC3339Nano timestamp and a body, then extracts a structured `LogRecord` with `level`, `message`, and `app_name`. Tracks parse statistics (`ParseStats`) so degradation can be detected.
 4. **Filtering** (`filtering.py`): Applies client-side identifier matching (the kubelet API has no server-side grep). Matches by `eventId`, `refId`, and any extra identifiers. Uses a `KeepAllSelector` fallback when no identifier is available.
@@ -1860,7 +2056,7 @@ Log lines may carry Aadhaar numbers, VIDs, mobile numbers, or email addresses. R
 fetch -> filter by identifier -> extract context -> REDACT -> persist
 ```
 
-Patterns matched (longest-first to prevent partial matches): 16-digit VIDs, 12-digit Aadhaar numbers, spaced Aadhaar (`NNNN NNNN NNNN`), 10-digit mobile numbers, email addresses. Operational identifiers (`eventId`, `refId`) are allowlisted so they remain matchable. Placeholders are retained rather than deleted, so the LLM can see that a value existed.
+Patterns matched (longest-first to prevent partial matches): 16-digit VIDs, 12-digit Aadhaar numbers, spaced Aadhaar (`NNNN NNNN NNNN`), 10-digit mobile numbers, email addresses. Before them, the value of every personal-data JSON key (`REDACT_JSON_KEYS`: names, date of birth, gender, address) is replaced, in plain or escaped JSON (section 3.2.3, "Logs and privacy per service"). Operational identifiers (`eventId`, `refId`) are allowlisted so they remain matchable. Placeholders are retained rather than deleted, so the LLM can see that a value existed. `redaction_audit.py` counts what a service's sample logs still hold after redaction.
 
 #### Evidence Snapshot (`src/log_pipeline/snapshot.py`)
 Kubelet retention is short (roughly 10MB x 5 files per container), but investigations routinely happen much later -- consumer lag, DLQ replays, checkpoint resumes, and the Investigator retry loop all re-enter the fetch path. The first successful Kubernetes fetch is persisted as structured JSONL (`raw_logs_k8s.jsonl`) alongside a metadata file (`log_snapshot_meta.json`). Every later fetch reuses the snapshot. This makes retries deterministic and free, and preserves evidence that the kubelet has since discarded.
@@ -2093,6 +2289,8 @@ python3 -m src.tools.build_log_fixture                 # turn a prod log dump in
 
 # Log pipeline
 python3 -m src.tools.build_catalog --refids-file refids.txt   # Stage 0 catalog builder
+python3 -m src.tools.build_catalog --service <name> --refids-file refids.txt  # one service's own catalog
+python3 -m src.tools.redaction_audit --service <name> samples/   # personal data left after redaction (must be 0)
 python3 -m src.tools.eval_harness --test-cases test_cases.json # Stage 6 evaluation harness
 
 # DLT replay precheck (DLT_PLAN.md 14)
@@ -2499,6 +2697,57 @@ first means group state is not accumulating.
 This section records where the running code diverges from the design intent above.
 It is maintained deliberately so the document stays a truthful source of truth.
 
+**Update 2026-09-28 (e):** Phase 6 of `MULTI_SERVICE_PLAN.md` -- logs and
+privacy per service (section 3.2.3, "Logs and privacy per service"). What to
+know:
+
+1. **An enu-biometric packet searches enu-biometric's apps**, from its pack,
+   not `ES_APP_NAMES`. With the shipped defaults they are the same list. A
+   deployment that set `ES_APP_NAMES` wider, to read other hops of a
+   biometric packet's journey, now reads only enu-biometric until those hops
+   are registered services named in its pack's `logs.also_search` (which
+   accepts only registered services). Check the deployed value before this
+   lands.
+2. **An unresolved packet admitted with the `_default` pack fetches no logs.**
+   Its `fetched_logs.txt` says why.
+3. **Redaction is wider**: JSON values under name, date-of-birth, gender and
+   address keys are replaced for every packet. `"name"` is in the default
+   list, so an operational JSON field called `name` (a rule's or a topic's)
+   is redacted too; narrow `REDACT_JSON_KEYS` from the Phase 0 sample if that
+   costs evidence. Dashboards on `redactions_total` gain the `JSON_FIELD`
+   series.
+4. **`LOG_DECISION_VOCAB_REGEX` now overrides only the generic words**; a
+   pack's vocabulary is added to it. Its default lost the four biometric
+   terms, which moved to enu-biometric's pack; the combined regex for
+   enu-biometric and for callers with no service is unchanged.
+5. **`_project_payload` is unchanged**: narrowing it waits on Phase 0 (plan
+   question 11.9).
+
+**Update 2026-09-28 (d):** Phase 5 of `MULTI_SERVICE_PLAN.md` -- runbooks and
+learned rules per service (section 3.2.3, "Runbooks and learned rules per
+service"). What to know:
+
+1. **Runbook paths moved.** Drafts and finals now sit under a service
+   directory (`draft/enu-biometric/...`). A runbook left at the old top-level
+   path is ignored with a warning, so a final runbook deployed outside the
+   repository must be moved under `final/enu-biometric/` before this lands.
+   None is committed.
+2. **`RUNBOOK_SERVE_ALLOWLIST` takes `service:CODE`.** Bare codes still work,
+   as enu-biometric's, with a deprecation warning. Rewrite them.
+3. **`runbook_lookups_total` gained the `service` label**, lost the
+   `rule_source_none` outcome, and gained `no_service` and
+   `binding_unavailable`. Dashboards reading the old series need the label.
+4. **The documentation is resolved in the runbook node now**, before the mode
+   check, so its lookup is counted there rather than in the Investigator. It
+   is still one lookup per packet, and a runbook-answered casebook now records
+   `provenance.reason_code_doc` where it recorded `null`.
+5. **The Reviewer prompts changed** (the scope paragraph, and the harness JSON
+   schema), so every pack's prompt fingerprint moves once. Compare accuracy
+   per period across this date.
+6. **A documentation-bound runbook has not been served yet.** Only
+   enu-biometric has runbooks, and they are `db_rule` bound. The `none` path
+   is exercised by `tests/test_service_runbooks.py`'s fixture service.
+
 **Update 2026-09-28 (c):** Phase 4 of `MULTI_SERVICE_PLAN.md` -- tools per
 service (section 3.2.3, "Tools per service"). Every rejection agent is now
 built for a service pack and offered only that pack's tools; the harness runs
@@ -2547,9 +2796,10 @@ validated before it replaces what is on disk. What this does not do:
 2. **The rules table itself is still one service's.** Nothing routes a query
    to a per-service table, because there is only one. A second `rules_db`
    service needs that first (plan section 4, D6).
-3. **Tools and runbooks are still the biometric ones** (Phases 4 and 5; Phase
-   4 has since landed -- see the entry above). A `none` service gets no
-   runbook at all rather than another service's.
+3. **Tools and runbooks are still the biometric ones** (Phases 4 and 5; both
+   have since landed -- see the entries above). A `none` service gets no
+   runbook at all rather than another service's; since Phase 5 it gets its
+   own, bound to its documentation.
 4. **The S3 download is untested against a real bucket.** It is covered by the
    fake (`tests/s3_fakes.py`): the swap, the two layouts, and that a broken,
    empty or unreadable upload keeps the last good copy. Off by default.
@@ -2579,7 +2829,7 @@ pack (section 3.2.3). What is not yet true or not yet verified:
    see the entry above). The enabled list should stay `enu-biometric` until
    those phases and the privacy phase (6) are done.
 4. **Not every metric has a `service` label yet.** The documentation counter
-   gained it in Phase 3; the runbook counter gains it in Phase 5.
+   gained it in Phase 3; the runbook counter gained it in Phase 5.
 5. **The prompt fingerprint changed for every packet** when Phase 2 landed:
    the policy moved into the pack and the fingerprint is now per pack. Compare
    accuracy per period across this date.

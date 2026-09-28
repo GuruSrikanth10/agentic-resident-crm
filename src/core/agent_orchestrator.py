@@ -9,6 +9,7 @@ from langchain_core.messages import HumanMessage
 
 from src.utils import metrics, reason_code_docs, service_registry
 from src.core import prompt_composer, rejection_context
+from src.log_pipeline import scope as log_scope
 from src.core.agent_factory import build_agent
 from src.tools import mcp_client
 from src.utils.llm_utils import get_llm
@@ -32,6 +33,10 @@ from src.utils.runbook_validator import validate_learning_rule
 from src.utils.logging_config import get_logger
 from src.core.checkpointer import get_checkpointer
 from src.utils.runbook_store import (
+    BINDING_DB_RULE,
+    BINDING_REASON_CODE_DOC,
+    binding_of,
+    doc_binding_fingerprint,
     generate_rule_fingerprint,
     get_runbook,
     is_serve_allowed,
@@ -51,6 +56,29 @@ _current_investigation: contextvars.ContextVar[str] = contextvars.ContextVar("cu
 #: service's rule until someone decides otherwise.
 _current_service: contextvars.ContextVar[str] = contextvars.ContextVar("current_service", default="unknown")
 _current_pack: contextvars.ContextVar[str] = contextvars.ContextVar("current_pack", default="unknown")
+
+#: The queue of proposed learning rules awaiting `promote_rules.py`. Read at
+#: call time, so a test can point it elsewhere.
+PENDING_RULES_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                                  "prompts", "pending_rules.jsonl")
+
+#: Where a learned rule belongs (MULTI_SERVICE_PLAN.md D11): the pack it was
+#: learned under, or every service's prompt.
+RULE_SCOPE_SERVICE = "service"
+RULE_SCOPE_GENERIC = "generic"
+RULE_SCOPES = (RULE_SCOPE_SERVICE, RULE_SCOPE_GENERIC)
+
+
+def normalize_rule_scope(scope, event_id: str = "unknown") -> str:
+    """A proposed rule's scope: `generic` only when it says exactly that
+    (in any case), `service` otherwise. A value that is neither is logged."""
+    text = str(scope or "").strip().lower()
+    if text in RULE_SCOPES:
+        return text
+    if text:
+        logger.warning("Unknown learning-rule scope; queued as service",
+                       event_id=event_id, scope=str(scope)[:40])
+    return RULE_SCOPE_SERVICE
 
 def _counted(node: str, invoke, service: str = "unknown"):
     """Run an LLM invocation, counting failures as well as successes.
@@ -641,8 +669,15 @@ def _build_agent():
             return {"logs": cached, "logs_artifact": "fetched_logs.txt",
                     **service_update}
 
-        log.info("No persisted logs found; fetching live", state="LOG_FETCHER")
-        logs = fetch_and_persist_logs(event_id, payload)
+        # The same service /fetch-logs would have searched: the packet's own,
+        # nothing for `_default`, and the environment's lists when `record`
+        # mode analyses it with another pack (MULTI_SERVICE_PLAN.md Phase 6).
+        known = {**state, **service_update}
+        log_service = log_scope.service_to_search(
+            known.get("service_resolution"), known.get("service_pack"))
+        log.info("No persisted logs found; fetching live", state="LOG_FETCHER",
+                 log_service=log_service)
+        logs = fetch_and_persist_logs(event_id, payload, service=log_service)
         log.info("Logs retrieved")
         # Both branches name the same artifact: `fetch_and_persist_logs` writes
         # `fetched_logs.txt` on the live path, which is the object the cache
@@ -651,21 +686,39 @@ def _build_agent():
                 **service_update}
 
     def runbook_lookup_node(state: GraphState):
-        mode = os.environ.get("RUNBOOK_MODE", "off").lower()
-        if mode == "off":
-            return {"resolution_source": "agent"}
-
         payload = state.get("payload", {})
         event_id = payload.get("eventId", "unknown")
         log = logger.bind(event_id=event_id)
+
+        # The packet's documentation is resolved here, once, whatever the
+        # runbook mode, and returned from every branch: a runbook of a service
+        # with no rules table is bound to it, and the investigation that
+        # follows a miss reads this same state rather than looking it up
+        # again. A packet a runbook answers then records in its casebook the
+        # documentation it was answered against (MULTI_SERVICE_PLAN.md
+        # Phase 5).
+        doc_state = _resolve_reason_code_doc(state, payload, log)
+        agent = {"resolution_source": "agent", "reason_code_doc": doc_state}
+
+        mode = os.environ.get("RUNBOOK_MODE", "off").lower()
+        if mode == "off":
+            return agent
+
+        # Runbooks are kept per pack: the pack is the knowledge the packet is
+        # analysed with, so it is also whose stored answers apply to it.
+        pack = _pack_of(state)
+        service = _service_of(state)
 
         # Every outcome is counted, not just hits. A counter that only ever
         # records "hit" has no denominator, so the runbook hit RATE -- named in
         # ENHANCEMENT_PLAN section 4.5 as one of the unknowables and the primary
         # input to the section 4.2 rollout decision -- stayed unknowable (G16).
+        def _count(outcome: str):
+            metrics.RUNBOOK_LOOKUPS.labels(outcome=outcome, service=service).inc()
+
         def _miss(reason: str):
-            metrics.RUNBOOK_LOOKUPS.labels(outcome=reason).inc()
-            return {"resolution_source": "agent"}
+            _count(reason)
+            return agent
 
         # The runbook path is an optimisation, never a correctness
         # requirement: falling back to the agents always produces a valid
@@ -674,44 +727,52 @@ def _build_agent():
         # to fail agent.invoke() outright and DLQ every runbook-matching
         # packet (F2).
         try:
-            # A runbook is derived from a rules-table rule and checked against
-            # it below, and runbooks are not yet kept per service
-            # (MULTI_SERVICE_PLAN.md Phase 5). A pack with no rules database
-            # therefore never uses one: it could only be another service's.
-            pack = _pack_of(state)
-            if service_registry.rule_source_of(pack) != service_registry.RULES_DB:
-                return _miss("rule_source_none")
+            # An unresolved packet has no service, so no service's runbooks
+            # are its answers.
+            if pack == service_registry.DEFAULT_PACK:
+                return _miss("no_service")
 
-            exec_summary = payload.get("packetExecutionSummary") or {}
-            error_data = exec_summary.get("errorData") or []
-            reason_code = None
-            for err in error_data:
-                if err and err.get("errorReasonCode"):
-                    reason_code = err.get("errorReasonCode")
-                    break
-
+            reason_code = _reason_code_of(payload)
             if not reason_code:
                 return _miss("no_reason_code")
 
             packet_type = payload.get("packetMetaData", {}).get("enrolmentType", "")
-            runbook = get_runbook(reason_code, packet_type)
+            runbook = get_runbook(pack, reason_code, packet_type)
             if not runbook:
                 return _miss("miss")
 
             runbook_id = runbook["runbook_id"]
             version = runbook["version"]
 
-            # Staleness check: serve the runbook only while the DB rule it was
-            # derived from is unchanged. Fingerprint the *parsed* rows, not the
-            # raw to_json string (F2).
-            rules = lookup_rule_for(reason_code, packet_type,
-                                    type_filter=service_registry.rule_type_filter(pack))
-            if rules:
-                current_fp = generate_rule_fingerprint(rules)
-                if current_fp != runbook["rule_fingerprint"]:
-                    log.warning("Fingerprint mismatch", runbook_id=runbook_id,
-                                expected=runbook["rule_fingerprint"], actual=current_fp)
+            # Staleness check: serve the runbook only while what it was
+            # derived from is unchanged (D11). For a service with a rules
+            # table, that is the DB rule -- fingerprinted from the *parsed*
+            # rows, not the raw to_json string (F2). For one without, it is
+            # the documentation entries this packet was just given.
+            binding = binding_of(runbook)
+            if service_registry.rule_source_of(pack) == service_registry.RULES_DB:
+                if binding["type"] != BINDING_DB_RULE:
+                    log.warning("Runbook is not bound to the rules table",
+                                runbook_id=runbook_id, binding=binding["type"])
                     return _miss("fingerprint_mismatch")
+                rules = lookup_rule_for(reason_code, packet_type,
+                                        type_filter=service_registry.rule_type_filter(pack))
+                current_fp = generate_rule_fingerprint(rules) if rules else None
+            else:
+                if binding["type"] != BINDING_REASON_CODE_DOC:
+                    log.warning("Runbook is not bound to the documentation",
+                                runbook_id=runbook_id, binding=binding["type"])
+                    return _miss("fingerprint_mismatch")
+                current_fp = doc_binding_fingerprint(doc_state)
+                if current_fp is None:
+                    # Without the documentation there is nothing to check the
+                    # runbook against, and for this service nothing else is.
+                    return _miss("binding_unavailable")
+            if current_fp is not None and current_fp != binding["fingerprint"]:
+                log.warning("Fingerprint mismatch", runbook_id=runbook_id,
+                            binding=binding["type"],
+                            expected=binding["fingerprint"], actual=current_fp)
+                return _miss("fingerprint_mismatch")
 
             res_source = f"runbook:{runbook_id}@v{version}"
             synthesis_json = json.dumps(runbook["resolution"])
@@ -719,21 +780,22 @@ def _build_agent():
             # A reason code not on the allowlist still runs the agents, but
             # its runbook is compared against them -- which is how it earns
             # its place on the allowlist (4.2).
-            if mode == "shadow" or not is_serve_allowed(reason_code):
+            if mode == "shadow" or not is_serve_allowed(pack, reason_code):
                 if mode != "shadow":
                     log.info("Runbook not yet cleared to serve; shadowing instead",
                              runbook_id=runbook_id)
                 log.info("Runbook shadowed", runbook_id=runbook_id, version=version, mode=mode)
-                metrics.RUNBOOK_LOOKUPS.labels(outcome="shadow").inc()
+                _count("shadow")
                 return {
-                    "resolution_source": "agent",
+                    **agent,
                     "shadow_runbook_resolution": synthesis_json,
                     "runbook_id": runbook_id,
                 }
 
             log.info("Runbook hit", runbook_id=runbook_id, version=version, mode=mode)
-            metrics.RUNBOOK_LOOKUPS.labels(outcome="hit").inc()
-            return {"resolution_source": res_source, "synthesis": synthesis_json, "runbook_id": runbook_id}
+            _count("hit")
+            return {"resolution_source": res_source, "synthesis": synthesis_json,
+                    "runbook_id": runbook_id, "reason_code_doc": doc_state}
         except Exception as e:
             log.error("Runbook lookup failed; falling through to the agents",
                       error=f"{type(e).__name__}: {e}", exc_info=True)
@@ -803,14 +865,23 @@ def _build_agent():
     from datetime import datetime
     from filelock import FileLock
 
-    def queue_learning_rule(rule_text: str, reasoning: str) -> str:
+    def queue_learning_rule(rule_text: str, reasoning: str,
+                            scope: Optional[str] = None) -> str:
         """Validate a proposed rule and queue it for human review.
 
         Shared by the direct Reviewer (through the `add_learning_rule` tool)
         and the harness Reviewer (through its JSON output), so a rule reaches
         pending_rules.jsonl by one validated path whichever one proposed it.
+
+        `scope` is the Reviewer's proposal of where the rule belongs
+        (MULTI_SERVICE_PLAN.md D11): `service`, the default, or `generic`.
+        Anything else is read as `service`. The costs are lopsided: a rule
+        wrongly marked generic reaches every service's Investigator, one
+        wrongly kept to its service merely fails to spread -- and the
+        operator can still change it at promotion.
         """
-        target_file = os.path.join(base_dir, "prompts", "pending_rules.jsonl")
+        scope = normalize_rule_scope(scope, event_id=_current_event_id.get())
+        target_file = PENDING_RULES_FILE
         lock_file = target_file + ".lock"
 
         # Validate at the point of proposal, not only at promotion.
@@ -844,19 +915,28 @@ def _build_agent():
             # pack's learned_rules.md, not to a prompt every service reads.
             "service": _current_service.get(),
             "service_pack": _current_pack.get(),
+            # Proposed only: promote_rules.py shows it and the operator decides.
+            "scope": scope,
         }
         try:
             with FileLock(lock_file, timeout=10):
                 with open(target_file, "a", encoding="utf-8") as f:
                     f.write(json.dumps(entry) + "\n")
-            return f"Successfully queued rule for human review: {rule_text}"
+            return (f"Successfully queued rule for human review "
+                    f"(scope {scope}): {rule_text}")
         except Exception as e:
             return f"Failed to queue rule: {e}"
 
     @tool
-    def add_learning_rule(rule_text: str, reasoning: str) -> str:
-        """Propose a new permanent rule to fix Investigator mistakes."""
-        return queue_learning_rule(rule_text, reasoning)
+    def add_learning_rule(rule_text: str, reasoning: str,
+                          scope: str = RULE_SCOPE_SERVICE) -> str:
+        """Propose a new permanent rule to fix Investigator mistakes.
+
+        scope: "service" (the default) for a rule about this packet's
+        service; "generic" only for a rule about evidence handling, citations
+        or output format that names no concept of any one service.
+        """
+        return queue_learning_rule(rule_text, reasoning, scope)
 
     # 2.1: built once per pack (not per review) now that the tool reads its
     # per-packet context from contextvars instead of a closure over
@@ -1212,7 +1292,8 @@ def _build_agent():
                     rule = result["result"].get("learning_rule")
                     if isinstance(rule, dict) and rule.get("rule_text"):
                         outcome = queue_learning_rule(str(rule["rule_text"]),
-                                                      str(rule.get("reasoning") or ""))
+                                                      str(rule.get("reasoning") or ""),
+                                                      rule.get("scope"))
                         log.info("Harness Reviewer proposed a learning rule",
                                  queued=outcome.startswith("Successfully"))
                 log.info("Reviewer finished (opencode harness)",

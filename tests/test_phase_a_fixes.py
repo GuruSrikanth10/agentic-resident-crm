@@ -216,12 +216,12 @@ def _extract_runbook_node(orch):
 
 @pytest.mark.parametrize("raw", ["E", "e", " e ", " E "])
 def test_cache_key_normalises_enrolment_type(raw):
-    assert runbook_store.runbook_cache_key("CODE", raw) == "CODE__E"
+    assert runbook_store.runbook_cache_key("svc", "CODE", raw) == "svc/CODE__E"
 
 
 def test_cache_key_defaults_missing_type_to_any():
-    assert runbook_store.runbook_cache_key("CODE", None) == "CODE__ANY"
-    assert runbook_store.runbook_cache_key("CODE", "") == "CODE__ANY"
+    assert runbook_store.runbook_cache_key("svc", "CODE", None) == "svc/CODE__ANY"
+    assert runbook_store.runbook_cache_key("svc", "CODE", "") == "svc/CODE__ANY"
 
 
 def test_promotion_invalidates_the_key_lookups_actually_read(tmp_path, monkeypatch):
@@ -229,13 +229,13 @@ def test_promotion_invalidates_the_key_lookups_actually_read(tmp_path, monkeypat
     monkeypatch.setattr(runbook_store, "RUNBOOK_FINAL_DIR", tmp_path / "final")
     monkeypatch.setattr(runbook_store, "RUNBOOK_DRAFT_DIR", tmp_path / "draft")
     (tmp_path / "final").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "draft").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "draft" / "svc").mkdir(parents=True, exist_ok=True)
 
     runbook_store._runbook_cache.clear()
     # Seed the cache the way get_runbook() would, with the normalised key.
-    runbook_store._runbook_cache["CODE__E"] = {"version": 1, "stale": True}
+    runbook_store._runbook_cache["svc/CODE__E"] = {"version": 1, "stale": True}
 
-    draft_path = tmp_path / "draft" / "CODE__E.json"
+    draft_path = tmp_path / "draft" / "svc" / "CODE__E.json"
     draft_path.write_text("{}", encoding="utf-8")
 
     promoted = {
@@ -247,4 +247,4 @@ def test_promotion_invalidates_the_key_lookups_actually_read(tmp_path, monkeypat
     }
     runbook_store.promote_draft_to_final(draft_path, promoted)
 
-    assert "CODE__E" not in runbook_store._runbook_cache
+    assert "svc/CODE__E" not in runbook_store._runbook_cache

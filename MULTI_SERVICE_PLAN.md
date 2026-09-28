@@ -1,7 +1,7 @@
 # Multi-Service Rejection Lane -- Implementation Plan
 
 - **Date:** 2026-09-25
-- **Status:** Phases 1, 2, 3 and 4 implemented on 2026-09-28; `ARCHITECTURE.md`
+- **Status:** Phases 1, 2, 3, 4, 5 and 6 implemented on 2026-09-28; `ARCHITECTURE.md`
   sections 3.2.2, 3.2.3 and 3.5.1 describe what was built. Phase 0 needs production access and is the
   owner's; of it, only 0.6 (the failing-test baseline: 56 pre-existing
   failures) has been done. Implementing Phase 1 corrected four points of this
@@ -56,6 +56,33 @@
   - **The `_default` pack takes no `tools.include`, and no service may be
     named `default`**, so D7's "only the `*` tools" and 5.6's opencode names
     both hold by construction.
+
+  Phase 5 was implemented on 2026-09-28 too; see its own "As built" section.
+  It settled four points the plan left open:
+  - **Runbooks are looked up under the packet's pack**, not its service, so
+    `record` mode still analyses a skipped packet exactly as before (D5).
+  - **A documentation-bound runbook with no documentation to compare against
+    is not served** (`binding_unavailable`), where a rules-table runbook with
+    no rule still is, as before.
+  - **`build_runbooks.py` also leaves out a casebook analysed with another
+    pack than its service's**, and binds a draft only to its service's own
+    documentation.
+  - **An unknown learned-rule scope is queued as `service`**, on both
+    Reviewer paths, rather than refused.
+
+  Phase 6 was implemented on 2026-09-28 too; see its own "As built" section.
+  It settled four points the plan left open:
+  - **Logs follow the pack only when it is the packet's own.** A packet
+    `record` mode analyses with the pre-registry pack because the gate would
+    skip it is fetched as before (the environment's lists), so `record` still
+    changes nothing (D5). A `_default` packet fetches nothing.
+  - **enu-biometric keeps the unscoped catalog and parse tree** until it has
+    a catalog of its own, so its reduction is unchanged; every other service
+    without one gets no filtering.
+  - **The generic decision vocabulary lost its four biometric terms** to
+    enu-biometric's pack; callers with no service still match them.
+  - **`_project_payload` is unchanged**: the plan makes narrowing it
+    conditional on Phase 0, which has not been run.
 - **Scope:** the rejection lane. Every service publishes its rejection events
   to one Kafka topic, in the structure the lane already parses. The DLT lane
   is deferred until its message contract is final (section 10); the registry
@@ -65,18 +92,19 @@
 
 ### Where a new session resumes (2026-09-28)
 
-**Done:** Phases 1, 2, 3 and 4, each with an "As built" section (Phases 1
+**Done:** Phases 1 to 6, each with an "As built" section (Phases 1
 and 2 describe theirs under "Changes, as built") under its own heading in
-section 6. Read them before Phase 5: they record where the implementation
+section 6. Read them before Phase 7: they record where the implementation
 differs from what the phase text says, and the later phases build on the
 differences, not on the original text.
 
-**Next:** Phase 5 (runbooks and learned rules per service), or Phase 6 (logs
-and privacy) -- they do not depend on each other. Nothing in Phases 1-4 was
-left half-done for them to finish.
+**Next:** Phase 7 (onboarding a service), which needs Phase 0's values first.
+Of Phase 6, only the `_project_payload` narrowing waits, on Phase 0's answer
+to question 11.9.
 
-**State of the branch:** Phases 1-3 are committed on `feature/multi-service`,
-and Phase 4 is committed on top of them.
+**State of the branch:** Phases 1-4 are committed on `feature/multi-service`.
+Phases 5 and 6 are in the working tree, not committed (the 39 draft moves are
+staged by `git mv`).
 
 **Baseline to compare against:** 56 pre-existing failures on the full suite,
 re-measured before Phase 4 and unchanged after it. Re-measure before the next
@@ -92,8 +120,8 @@ values Phase 0 produces.
 
 **Deliberately not built yet, so do not read its absence as an oversight:**
 per-service rules tables (there is one table, and it is enu-biometric's --
-D6), per-service runbooks and learned-rule scopes (Phase 5), per-service log sources and redaction (Phase 6, required before any
-other service is enabled), and the DLT lane (Phase 8, blocked on its contract).
+D6), the named-field payload projection (Phase 6, waiting on Phase 0), and
+the DLT lane (Phase 8, blocked on its contract).
 
 ---
 
@@ -954,8 +982,8 @@ Warnings:
 | 2 | Prompt layering, agent pool, per-service fingerprint | Prompt text reorganised; gated on parity | Large |
 | 3 | Rule source and documentation per service | No | Medium |
 | 4 | Tools per service | The biometric tools are renamed `bio_` | Large |
-| 5 | Runbooks and learned rules per service | Runbook paths move | Medium |
-| 6 | Logs and privacy | Wider redaction; logs searched per packet | Large |
+| 5 | Runbooks and learned rules per service (implemented) | Runbook paths move | Medium |
+| 6 | Logs and privacy (implemented) | Wider redaction; logs searched per packet | Large |
 | 7 | Onboarding a service (repeat for each) | No | Small each, plus SME time |
 | 8 | DLT lane | -- | After its contract is final |
 
@@ -1452,7 +1480,7 @@ Everything above, with these differences and these details.
   `run_task_json` accepts the new argument.
 - **Full suite:** the same 56 failures as the baseline, no new ones.
 
-### Phase 5 -- Runbooks and learned rules per service
+### Phase 5 -- Runbooks and learned rules per service (implemented 2026-09-28)
 
 Changes:
 - **Carried from Phase 1:** a `service` label on `RUNBOOK_LOOKUPS`.
@@ -1501,7 +1529,91 @@ Tests:
 
 **Checkpoint.**
 
-### Phase 6 -- Logs and privacy (required before any other service is enabled)
+#### As built (2026-09-28)
+
+Everything above, with these differences and these details.
+
+- **The store** (`utils/runbook_store.py`). Every function takes the service
+  first: `get_runbook(service, code, type)`, `write_draft_runbook(service,
+  ...)`, `runbook_cache_key(service, code, type)` (`"<service>/<CODE>__<TYPE>"`)
+  and `is_serve_allowed(service, code)`. `promote_draft_to_final` takes the
+  service from the draft's directory and refuses a draft naming another.
+  `list_draft_runbooks` / `list_final_runbooks` walk `<dir>/<service>/*.json`
+  and ignore, with a warning, a runbook left at the top level. A service
+  directory must be a service name, so `_default` has none.
+  - `check_runbook(data, service)`: a 1.2 runbook needs `service` equal to its
+    directory and a `binding` of a known type with a fingerprint. A 1.0 or 1.1
+    runbook loads only from `enu-biometric/`, and `binding_of` reads its
+    `rule_fingerprint` as a `db_rule` binding. Test fakes that return a runbook
+    dict with only `rule_fingerprint` therefore keep working.
+  - The 39 drafts stay schema 1.1, now with `"service": "enu-biometric"`; they
+    are upgraded only if they are redrafted.
+- **The documentation binding.** `reason_code_docs.lookup` adds
+  `entries_sha256` to every state (`entries_digest` over each selected
+  entry's source, kind, ref, enrolment type and body); the rendered title and
+  the other-service note are not in it. `runbook_store.doc_binding_fingerprint`
+  reads it, None for anything but a hit.
+- **The node.** `runbook_lookup_node` calls `_resolve_reason_code_doc` first and
+  returns `reason_code_doc` from every branch, `off` included. It looks up
+  under `_pack_of(state)`, and counts `RUNBOOK_LOOKUPS{outcome, service}` with
+  `_service_of(state)`.
+  - Outcomes: `rule_source_none` is removed; `no_service` is added (the
+    `_default` pack, before any lookup) and `binding_unavailable` (a
+    `reason_code_doc` binding and no documentation hit).
+  - A binding of the other type than the pack's rule source is
+    `fingerprint_mismatch`. A `db_rule` binding is still compared only when
+    the rules table returns rows, as before.
+- **The allowlist.** An entry is `service:CODE` when the part before the first
+  `:` has the shape of a service name, since a reason code may itself contain
+  `:`. Anything else is a bare code, read as the pre-registry service's, with
+  a warning logged once per entry per process.
+- **`build_runbooks.py`** gained `--service`. `casebook_service(cb)` decides the
+  group's service as the plan says, and also leaves out a casebook whose
+  `provenance.service_pack` names another pack than its service (a packet the
+  gate only recorded, analysed with the pre-registry pack): its resolution was
+  reasoned from another service's knowledge. `binding_for(service, code, type)`
+  binds a `rules_db` service to the rule, with the pack's type filter, and a
+  `none` service to its own documentation only (`scope` `own`); anything else
+  writes no draft. The generator's message now opens with `Service:`.
+- **`promote_runbooks.py`** gained `--service`, and `--list` checks each final
+  runbook's binding through `build_runbooks.binding_for`, reporting a change
+  of rule source as stale. `check_reason_code_docs --coverage` checks each
+  runbook against its own service's documentation file (the pack's
+  `reason_code_docs_file`).
+- **Learned rules.**
+  - `queue_learning_rule(rule_text, reasoning, scope=None)` records `scope`;
+    `normalize_rule_scope` makes anything but `generic` (any case) `service`
+    and logs an unknown value. `add_learning_rule` has `scope="service"`; the
+    harness passes `learning_rule.scope`.
+  - The queue path is `agent_orchestrator.PENDING_RULES_FILE`, read at call
+    time, so the new tests write to a temporary file rather than the tracked
+    one.
+  - `ReviewerAgent.md` and `harness/RejectionReviewer.md` each gained one
+    paragraph on when a rule is generic, and the harness JSON schema line
+    gained `"scope"` (listed as a replacement in `test_service_prompts.py`).
+    The Reviewer snapshots were regenerated; the diff is that paragraph.
+  - `promote_rules.py`: `scope_of(entry)`, `target_file_for(entry, scope)`
+    and `generic_rules_file()`. The prompt accepts `promote`, or the other
+    scope's name to switch and show the diff again. It reads the prompts
+    directory through `prompt_composer`, so it follows `paths.REPO_ROOT`.
+- **`accuracy_report --shadow`** says "add `<service>:<CODE>`"; outcome records
+  carry no service until Phase 7, so the operator supplies it.
+- **Documentation:** `ARCHITECTURE.md` (section 3.2.3's new "Runbooks and
+  learned rules per service", 3.3, 3.7, 3.8, 3.9, the tree and a section 5
+  entry), `SYSTEM_OVERVIEW.md` sections 9 and 10, `.env.example` and
+  `src/service_packs/README.md`.
+- **Tests:** `tests/test_service_runbooks.py` (49) is new: the store per
+  service and its ANY fallback, legacy and malformed runbooks, the shipped
+  drafts, the allowlist, the binding across a label change and an entry
+  change, every node outcome, drafting and coverage per service, and the
+  scope from proposal to promotion and into the fingerprint.
+  `test_opencode_harness.py` gained the harness scope case and
+  `test_end_to_end.py` the runbook-hit provenance. Every existing runbook test
+  moved to the new signatures and the `service` label, and the
+  `test_operator_tools.py` casebooks now record their service.
+- **Full suite:** the same 56 failures as the baseline, no new ones.
+
+### Phase 6 -- Logs and privacy (required before any other service is enabled; implemented 2026-09-28)
 
 Changes:
 - **Logs searched per packet.**
@@ -1541,6 +1653,94 @@ Tests:
 - The audit CLI's counting.
 
 **Checkpoint.**
+
+#### As built (2026-09-28)
+
+Everything above, except the payload projection, with these differences and
+details.
+
+- **The scope** (`src/log_pipeline/scope.py`). `for_service(name)` returns a
+  `LogScope`: `apps`, `pod_matches`, `catalog_path`, `drain3_state_file`,
+  `decision_vocabulary` and `searchable`. `unscoped()` is the behaviour from
+  before Phase 6, and `for_service(None)` is it. `service_to_search(resolution,
+  pack)` decides which a packet gets:
+  - its pack, when that is its own service's pack;
+  - `_default`, which searches nothing: `reduce_logs` returns
+    `not_searched_message`, which is persisted as `fetched_logs.txt` like any
+    other fetch;
+  - None (unscoped) otherwise, which is a packet `record` mode analyses with
+    the pre-registry pack. The plan's "skipped packets fetch nothing" holds
+    under `enforce`, where the gate returns before any fetch (Phase 1).
+- **The plumbing.** `service` is threaded through
+  `fetch_and_persist_logs(..., service=)`, `fetch_logs_for` and
+  `reduce_logs`. `/fetch-logs` computes it from the resolution and
+  `pack_for`; `fetch_logs_node`'s live fetch from the state's resolution and
+  pack.
+  - `FetchContext` gained `apps` and `pod_matches`. `apps` None means the
+    environment's lists.
+  - `fetcher.fetch_logs(apps=)` puts them in the terms filter.
+  - `discovery.discover_targets(apps=, pod_matches=)` searches exactly those.
+    `resolve_service(match=)` takes a pack's pod match, below an operator's
+    `K8S_SERVICE_MAP` entry and above the app name.
+  - `service_registry.log_options(name)` reads a pack's `logs`. A service
+    that declares no `app_names` searches its own name, as its documentation
+    file and corpus directory default to it. `also_search` is followed one
+    level, and its services' own vocabularies are not added.
+- **The catalog.** `template_catalog.<service>.json` beside the old catalog,
+  and `drain3_state/drain3_state.<service>.bin`. The reducer keeps a
+  `TemplateMiner` per state file, and the pipeline a catalog per path, each
+  read once per process. The pre-registry pack uses the unscoped pair until
+  `template_catalog.enu-biometric.json` exists, since that catalog was built
+  from its packets; without this, Phase 6 would have removed its `must_not`
+  clauses and boilerplate classifications. `build_catalog.py --service`
+  always builds the service's own pair, and refuses an unregistered service.
+- **The vocabulary.** `config.DECISION_VOCABULARY_REGEX` is now
+  `GENERIC_DECISION_VOCABULARY_REGEX`, without `biometric.*match`,
+  `MAN_DEDUP`, `dedup.*reject` and `quality.*check.*fail`, which are
+  enu-biometric's `logs.decision_vocabulary`. `scope.DecisionVocabulary`
+  matches the two as separate patterns, because the generic one's inline
+  `(?i)` cannot be nested in an alternation; the pack's is compiled
+  case-insensitively. The unscoped vocabulary adds the pre-registry pack's,
+  so it is the old regex. `apply_evidence_guardrails(vocabulary=)` falls back
+  to the generic words alone.
+- **Redaction** (`redaction.py`). `DEFAULT_JSON_KEYS`, `json_keys()`,
+  `redact_json_fields(text)`, run by `redact_text` before the patterns and
+  counted as `JSON_FIELD`. The value after `"<key>":` is replaced whatever
+  it is (string, number, object, array), in plain JSON and in JSON escaped
+  one or more levels inside a string, honouring escaped quotes and brackets
+  inside strings. A cut-off value is redacted to the end of the line.
+  `null`, booleans, empty strings and existing placeholders are left, which
+  keeps redaction idempotent. `_active_patterns` became `active_patterns`,
+  for the audit.
+  - The default list includes `name`, as the plan says. It also redacts an
+    operational JSON field called `name`; the Phase 0 sample should decide
+    whether to narrow it.
+- **The payload projection is not changed.** It is conditional on Phase 0
+  finding demographic fields in `packetMetaData` (question 11.9), and Phase 0
+  has not been run. It remains to be done before a service whose payload
+  carries them is enabled.
+- **The audit** (`src/tools/redaction_audit.py`). `--service <name>` over
+  files or directories. Each line goes through `redact_text`; what is left is
+  counted per key (`key:<name>`) and per pattern (`pattern:<label>`). Keys
+  are looked for in any spelling it can recognise (`"key":`, `'key':`,
+  `key=`, `key:`), not only JSON, because those are what key redaction
+  misses. Empty, `null`, boolean and placeholder values are not counted.
+  Findings give the file and line, never the value. Exit 0 when nothing is
+  left, 1 when anything is, 2 when there was nothing to read.
+- **Documentation:** `ARCHITECTURE.md` (section 3.2.3's new "Logs and privacy
+  per service", 3.6, 3.10, 4.3, the tree and a section 5 entry),
+  `SYSTEM_OVERVIEW.md` sections 4.2 and 6, `.env.example`
+  (`REDACT_JSON_KEYS`, and `ES_APP_NAMES` / `K8S_APP_NAMES` as a fallback)
+  and `src/service_packs/README.md`.
+- **Tests:** `tests/test_service_logs.py` (43) is new: the scope per service
+  and its `also_search`, the `_default` and unscoped cases, the service each
+  kind of packet is fetched for through `/fetch-logs` and the graph, the
+  Elasticsearch filter and Kubernetes discovery, the pod-match precedence,
+  the catalog and parse tree per service, `build_catalog --service`, the
+  vocabulary, key redaction, and the audit. `test_evidence_integrity.py`'s
+  fake fetchers accept `apps`, and `test_phase_c_fixes.py`'s fake
+  `reduce_logs` accepts `service` and checks it is passed through.
+- **Full suite:** the same 56 failures as the baseline, no new ones.
 
 ### Phase 7 -- Onboarding a service (repeat for each)
 
