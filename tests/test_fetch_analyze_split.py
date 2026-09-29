@@ -178,7 +178,7 @@ def test_fetch_logs_node_uses_the_cached_artifact_end_to_end(storage, monkeypatc
     synthesis = json.dumps({
         "synthesis": "ok", "action": "REPLAY", "resident_action": "NEW_PACKET",
     })
-    with patch.object(orch, "create_react_agent",
+    with patch.object(orch, "build_agent",
                       side_effect=lambda *a, **k: _stub_llm(synthesis)), \
          patch.object(orch, "get_llm", side_effect=lambda tier: MagicMock()):
         monkeypatch.setattr(orch, "is_reviewer_approved", lambda _f: True)
@@ -200,7 +200,7 @@ def test_fetch_logs_node_falls_back_to_a_live_fetch_when_uncached(storage, monke
     synthesis = json.dumps({
         "synthesis": "ok", "action": "REPLAY", "resident_action": "NEW_PACKET",
     })
-    with patch.object(orch, "create_react_agent",
+    with patch.object(orch, "build_agent",
                       side_effect=lambda *a, **k: _stub_llm(synthesis)), \
          patch.object(orch, "get_llm", side_effect=lambda tier: MagicMock()):
         monkeypatch.setattr(orch, "is_reviewer_approved", lambda _f: True)
@@ -227,7 +227,7 @@ def test_analyze_rejection_produces_the_same_casebook_shape(storage, monkeypatch
         "resident_action": "NEW_PACKET",
         "confidence": 0.9,
     })
-    with patch.object(orch, "create_react_agent",
+    with patch.object(orch, "build_agent",
                       side_effect=lambda *a, **k: _stub_llm(synthesis)), \
          patch.object(orch, "get_llm", side_effect=lambda tier: MagicMock()):
         monkeypatch.setattr(orch, "is_reviewer_approved", lambda _f: True)
@@ -259,7 +259,7 @@ def test_analyze_rejection_runbook_hit_still_costs_zero_llm_calls(storage, monke
         },
     }
     stub = _stub_llm("should never be called")
-    with patch.object(orch, "create_react_agent", side_effect=lambda *a, **k: stub), \
+    with patch.object(orch, "build_agent", side_effect=lambda *a, **k: stub), \
          patch.object(orch, "get_llm", side_effect=lambda tier: MagicMock()), \
          patch.object(orch, "get_runbook", return_value=runbook), \
          patch.object(orch, "lookup_rule_for", return_value=None):
@@ -277,7 +277,7 @@ def test_a_terminal_packet_reached_via_analyze_rejection_is_not_reprocessed(stor
     })
     stub = _stub_llm(synthesis)
 
-    with patch.object(orch, "create_react_agent", side_effect=lambda *a, **k: stub), \
+    with patch.object(orch, "build_agent", side_effect=lambda *a, **k: stub), \
          patch.object(orch, "get_llm", side_effect=lambda tier: MagicMock()):
         monkeypatch.setattr(orch, "is_reviewer_approved", lambda _f: True)
         _run_analyze("ar-idempotent")
@@ -444,7 +444,7 @@ def _synthesis_stub():
 
 
 def _analyze_with_stub_llm(event_id, monkeypatch):
-    with patch.object(orch, "create_react_agent",
+    with patch.object(orch, "build_agent",
                       side_effect=lambda *a, **k: _stub_llm(_synthesis_stub())), \
          patch.object(orch, "get_llm", side_effect=lambda tier: MagicMock()):
         monkeypatch.setattr(orch, "is_reviewer_approved", lambda _f: True)

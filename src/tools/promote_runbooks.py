@@ -7,16 +7,18 @@ from pathlib import Path
 from filelock import FileLock, Timeout
 
 from src.utils.runbook_store import (
+    binding_of,
     list_draft_runbooks,
+    list_final_runbooks,
     load_draft_runbook,
     promote_draft_to_final,
     get_runbook,
+    service_of_path,
     RUNBOOK_ROOT,
-    generate_rule_fingerprint
 )
 from src.utils.runbook_validator import validate_generic_text
 from src.utils.logging_config import get_logger
-from src.tools.tool_registry import lookup_rule_for
+from src.tools.build_runbooks import binding_for
 
 logger = get_logger(__name__)
 
@@ -39,6 +41,7 @@ def git_commit_runbooks(message: str):
 
 def main():
     parser = argparse.ArgumentParser(description="Promote draft runbooks to final.")
+    parser.add_argument("--service", type=str, help="Filter by service")
     parser.add_argument("--reason-code", type=str, help="Filter by reason code")
     parser.add_argument("--list", action="store_true", help="List drafts and staleness without promoting")
     parser.add_argument("--dry-run", action="store_true", help="Dry run only")
@@ -60,20 +63,24 @@ def main():
             
             for draft_path in drafts:
                 data = load_draft_runbook(draft_path)
+                # A draft belongs to the service whose directory holds it.
+                service = service_of_path(draft_path)
                 reason_code = data["reason_code"]
                 etype = data["enrolment_type"]
                 
+                if args.service and service != args.service:
+                    continue
                 if args.reason_code and reason_code != args.reason_code:
                     continue
                     
                 print(f"\n{'='*60}")
-                print(f"Draft: {reason_code} ({etype})")
+                print(f"Draft: {service} {reason_code} ({etype})")
                 print(f"Sources: {data['provenance']['source_casebook_count']} casebooks, max retries: {data['provenance']['max_retry_count_in_sources']}")
                 print(f"Resolution:")
                 print(json.dumps(data["resolution"], indent=2))
                 
                 # Compare to existing final runbook
-                existing = get_runbook(reason_code, etype)
+                existing = get_runbook(service, reason_code, etype)
                 if existing:
                     print(f"\nExisting version: {existing['version']}")
                 else:
@@ -115,7 +122,7 @@ def main():
                         
                     if not args.dry_run:
                         promote_draft_to_final(draft_path, data)
-                        git_commit_runbooks(f"Add runbook {reason_code} {etype} v{data['version']}")
+                        git_commit_runbooks(f"Add runbook {service} {reason_code} {etype} v{data['version']}")
                         print(f"Promoted to final as version {data['version']}.")
                     else:
                         print("Dry run: would promote.")
@@ -124,23 +131,28 @@ def main():
             if args.list:
                 print(f"\n{'='*60}")
                 print("Checking staleness for all final runbooks...")
-                from src.utils.runbook_store import RUNBOOK_FINAL_DIR
-                if RUNBOOK_FINAL_DIR.exists():
-                    for final_path in RUNBOOK_FINAL_DIR.glob("*.json"):
-                        with open(final_path, "r", encoding="utf-8") as f:
-                            final_data = json.load(f)
-                            
-                        rc = final_data["reason_code"]
-                        et = final_data["enrolment_type"]
-                        
-                        rules = lookup_rule_for(rc, et)
+                for final_path in list_final_runbooks():
+                    with open(final_path, "r", encoding="utf-8") as f:
+                        final_data = json.load(f)
 
-                        if rules:
-                            current_fp = generate_rule_fingerprint(rules)
-                            if current_fp != final_data["rule_fingerprint"]:
-                                print(f"STALE: {rc} ({et}) - Fingerprint mismatch! Rule has changed.")
-                        else:
-                            print(f"WARNING: Rule not found in DB for {rc} ({et})")
+                    service = service_of_path(final_path)
+                    rc = final_data["reason_code"]
+                    et = final_data["enrolment_type"]
+
+                    # What the runbook is bound to now, computed the way it
+                    # was when the draft was written (MULTI_SERVICE_PLAN.md D11).
+                    bound = binding_of(final_data)
+                    current = binding_for(service, rc, et)
+                    if current is None:
+                        print(f"WARNING: {service} {rc} ({et}) - nothing to check it "
+                              f"against: no rule in the DB, or no documentation "
+                              f"of the service's own")
+                    elif current["type"] != bound["type"]:
+                        print(f"STALE: {service} {rc} ({et}) - bound to {bound['type']}, "
+                              f"but the service's rule source is now {current['type']}.")
+                    elif current["fingerprint"] != bound["fingerprint"]:
+                        print(f"STALE: {service} {rc} ({et}) - Fingerprint mismatch! "
+                              f"The {current['type']} has changed.")
             
     except Timeout:
         print("Another promotion is currently in progress. Exiting.")

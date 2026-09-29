@@ -26,8 +26,21 @@ DLT_ROOT_NAME = "dlt_cases"
 DLT_GROUPS_ROOT_NAME = "dlt_groups"
 
 def get_dlt_storage() -> CasebookStorage:
-    """Storage for individual DLT cases, keyed by `ref_id`."""
+    """Storage for individual DLT cases, one per record, keyed by
+    `identity.storage_key` (`<refId>__<digest of case_id>`; before
+    MULTI_SERVICE_PLAN.md Phase 8, the bare refId)."""
     return get_scoped_storage(DLT_ROOT_NAME)
+
+
+def keys_for_ref_id(ref_id: str) -> list:
+    """Every stored case of the packet `ref_id`, sorted: each record's own key
+    and a case stored under the bare refId before Phase 8. How an operator
+    who knows only the refId finds its cases."""
+    from src.dlt.identity import STORAGE_KEY_SEPARATOR
+
+    prefix = f"{ref_id}{STORAGE_KEY_SEPARATOR}"
+    return sorted(key for key in get_dlt_storage().list_events()
+                  if key == ref_id or key.startswith(prefix))
 
 
 def get_group_storage() -> CasebookStorage:

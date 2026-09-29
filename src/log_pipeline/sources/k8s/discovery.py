@@ -50,7 +50,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Sequence
 
 from src.log_pipeline.sources.k8s import client as k8s_client_module
 from src.log_pipeline.sources.k8s import fixtures
@@ -158,7 +158,8 @@ def _service_map() -> dict:
 
 
 def resolve_service(app: Optional[str] = None,
-                    namespace: Optional[str] = None) -> tuple:
+                    namespace: Optional[str] = None,
+                    match: Optional[dict] = None) -> tuple:
     """Resolve a logical app name to (namespace, PodMatchSpec).
 
     `K8S_SERVICE_MAP` keeps this out of Kafka payloads and lets an operator
@@ -166,9 +167,17 @@ def resolve_service(app: Optional[str] = None,
     `label_selector` to opt into server-side label matching; otherwise the
     default is `name_contains` on the app name itself, matching the
     validated reference pattern.
+
+    `match` is the pod match the app's service pack declares
+    (`logs.k8s_match`, MULTI_SERVICE_PLAN.md Phase 6). It stands between the
+    two: an operator's `K8S_SERVICE_MAP` entry still overrides it, and the
+    app name is used only when neither says anything. The namespace never
+    comes from a pack -- it differs between environments, and a pack does
+    not.
     """
     app = app or os.environ.get("K8S_DEFAULT_APP") or "enu-biometric"
     mapping = _service_map().get(app, {})
+    match = match or {}
 
     resolved_namespace = (
         namespace
@@ -178,8 +187,12 @@ def resolve_service(app: Optional[str] = None,
 
     if mapping.get("label_selector"):
         match_spec = PodMatchSpec(MATCH_MODE_LABEL, mapping["label_selector"])
+    elif mapping.get("name_contains"):
+        match_spec = PodMatchSpec(MATCH_MODE_NAME_CONTAINS, mapping["name_contains"])
+    elif match.get("label_selector"):
+        match_spec = PodMatchSpec(MATCH_MODE_LABEL, match["label_selector"])
     else:
-        match_spec = PodMatchSpec(MATCH_MODE_NAME_CONTAINS, mapping.get("name_contains") or app)
+        match_spec = PodMatchSpec(MATCH_MODE_NAME_CONTAINS, match.get("name_contains") or app)
 
     return resolved_namespace, match_spec
 
@@ -363,7 +376,8 @@ def _list_pods(namespace: str, match_spec: PodMatchSpec, request_timeout: float)
 
 def list_pods_for_service(app: Optional[str] = None,
                           namespace: Optional[str] = None,
-                          request_timeout: Optional[float] = None):
+                          request_timeout: Optional[float] = None,
+                          match: Optional[dict] = None):
     """Raw pods for one service, or None when they cannot be listed.
 
     A read-only view for callers that want pod *metadata* rather than log
@@ -376,8 +390,11 @@ def list_pods_for_service(app: Optional[str] = None,
     "no errors occurred"; here an empty result is simply an unknown version,
     which every caller already has to handle, and the extra RBAC round-trip
     would be paid on the packet path for nothing.
+
+    `match` is the app's pack pod match, as for `discover_for_service`.
     """
-    resolved_namespace, match_spec = resolve_service(app=app, namespace=namespace)
+    resolved_namespace, match_spec = resolve_service(app=app, namespace=namespace,
+                                                     match=match)
     if not resolved_namespace:
         return None
 
@@ -388,15 +405,19 @@ def list_pods_for_service(app: Optional[str] = None,
 
 def discover_for_service(app: Optional[str] = None,
                          namespace: Optional[str] = None,
-                         verified: Optional[dict] = None) -> DiscoveryResult:
+                         verified: Optional[dict] = None,
+                         match: Optional[dict] = None) -> DiscoveryResult:
     """Find every (pod, container) to read for ONE service.
 
     `verified` is a namespace -> (ok, reason) cache shared across the services
     in a single `discover_targets` call. Several services usually share one
     namespace, and re-reading it once per service would multiply the RBAC
     round-trips for no new information.
+
+    `match` is the app's pack pod match; see `resolve_service`.
     """
-    resolved_namespace, match_spec = resolve_service(app=app, namespace=namespace)
+    resolved_namespace, match_spec = resolve_service(app=app, namespace=namespace,
+                                                     match=match)
     service_label = app or os.environ.get("K8S_DEFAULT_APP") or DEFAULT_APP
 
     if not resolved_namespace:
@@ -584,12 +605,17 @@ def _merge_round_robin(per_service: list, total_cap: int) -> tuple:
 
 
 def discover_targets(namespace: Optional[str] = None,
-                     app: Optional[str] = None) -> DiscoveryResult:
+                     app: Optional[str] = None,
+                     apps: Optional[Sequence[str]] = None,
+                     pod_matches=()) -> DiscoveryResult:
     """Find every (pod, container) to read, across every configured service.
 
     Passing `app` explicitly searches only that service -- the operator CLI
-    and the single-service callers rely on this. With `app` unset, every name
-    in `app_names()` is searched and the results merged; when that list holds
+    and the single-service callers rely on this. Passing `apps` searches
+    exactly those: a packet's service's app names, with `pod_matches`
+    ((app, match), ...) the pod match its pack declares for each
+    (MULTI_SERVICE_PLAN.md Phase 6). With neither, every name in
+    `app_names()` is searched and the results merged; when that list holds
     one entry (the default), this is byte-for-byte the old behaviour.
 
     A service that cannot be searched degrades the result instead of failing
@@ -598,7 +624,13 @@ def discover_targets(namespace: Optional[str] = None,
     from an absence. Only when nothing at all is searchable does this report
     `ok=False`.
     """
-    services = [app] if app is not None else app_names()
+    if app is not None:
+        services = [app]
+    elif apps is not None:
+        services = list(dict.fromkeys(apps))
+    else:
+        services = app_names()
+    matches = dict(pod_matches or ())
 
     verified: dict = {}
     per_service, gaps, searched, failed = [], [], [], []
@@ -606,7 +638,8 @@ def discover_targets(namespace: Optional[str] = None,
 
     for service in services:
         result = discover_for_service(app=service, namespace=namespace,
-                                      verified=verified)
+                                      verified=verified,
+                                      match=matches.get(service))
         if not result.ok:
             failed.append(service)
             if first_failure is None:

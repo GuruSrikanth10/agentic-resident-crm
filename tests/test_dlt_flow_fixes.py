@@ -24,6 +24,7 @@ from src.api import dlt_routes
 from src.api.dlt_routes import analyze_dlt, fetch_dlt_logs
 from src.dlt import (auto_replay, case_storage, claims, code_check, groups,
                      parked, per_code, registry)
+from src.dlt.identity import storage_key
 from src.models.dlt_schemas import DltMessage
 from src.models.dlt_synthesis import DltFinding, apply_dlt_confidence_policy
 from src.storage import factory
@@ -75,7 +76,8 @@ def stub_llm(monkeypatch, finding=FINDING, delay=0.0):
     calls = []
     lock = threading.Lock()
 
-    def fake(ref_id, failure, corroboration, logs, payload_summary=None):
+    def fake(ref_id, failure, corroboration, logs, payload_summary=None,
+             **_service):
         with lock:
             calls.append(ref_id)
         if delay:
@@ -93,7 +95,11 @@ def analyse(*messages):
 
 
 def casebook(ref_id):
-    return case_storage.get_dlt_storage().load(ref_id)
+    """The one case stored for `ref_id` -- under its record's own key since
+    MULTI_SERVICE_PLAN.md Phase 8."""
+    keys = case_storage.keys_for_ref_id(ref_id)
+    assert len(keys) <= 1, keys
+    return case_storage.get_dlt_storage().load(keys[0]) if keys else None
 
 
 def fingerprint():
@@ -132,7 +138,8 @@ def test_a_duplicate_of_a_finished_record_is_skipped_even_when_old(monkeypatch):
     monkeypatch.setenv("DLT_CLAIM_TTL_SECONDS", "1")
     claims.claim_case("dlt-T-1-1", "REF-A")
     case_storage.get_dlt_storage().save_terminal(
-        "REF-A", {"packet_status": {"status": "NEEDS_MANUAL_REVIEW"}})
+        storage_key("REF-A", "dlt-T-1-1"),
+        {"packet_status": {"status": "NEEDS_MANUAL_REVIEW"}})
     _age_claim("dlt-T-1-1", seconds=60)
 
     claim = claims.claim_case("dlt-T-1-1", "REF-B")
@@ -220,7 +227,9 @@ def test_the_analysis_lane_proceeds_with_no_claim_on_file(monkeypatch):
     calls = stub_llm(monkeypatch)
     (result,) = analyse(message())
     assert result["status"] == "processed"
-    assert calls == ["REF-FIX-1"]
+    # The case's storage key: the refId, then its record (Phase 8).
+    assert calls == case_storage.keys_for_ref_id("REF-FIX-1")
+    assert calls[0].startswith("REF-FIX-1__")
 
 
 # ======================================================================
@@ -271,7 +280,8 @@ def test_different_fingerprints_never_wait_on_each_other(monkeypatch):
     state = {"now": 0, "peak": 0}
     lock = threading.Lock()
 
-    def fake(ref_id, failure, corroboration, logs, payload_summary=None):
+    def fake(ref_id, failure, corroboration, logs, payload_summary=None,
+             **_service):
         with lock:
             state["now"] += 1
             state["peak"] = max(state["peak"], state["now"])

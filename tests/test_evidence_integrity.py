@@ -111,7 +111,7 @@ def test_elastic_source_raises_a_truncated_gap(monkeypatch):
     from src.log_pipeline.sources.elastic import ElasticLogSource
     from src.log_pipeline.types import FetchContext
 
-    def fake_fetch(identifier, catalog=None, out_diagnostics=None):
+    def fake_fetch(identifier, catalog=None, out_diagnostics=None, apps=None):
         if out_diagnostics is not None:
             out_diagnostics["truncated"] = True
             out_diagnostics["max_documents"] = 50000
@@ -129,7 +129,7 @@ def test_elastic_source_raises_no_gap_when_nothing_was_capped():
     from src.log_pipeline.sources.elastic import ElasticLogSource
     from src.log_pipeline.types import FetchContext
 
-    def fake_fetch(identifier, catalog=None, out_diagnostics=None):
+    def fake_fetch(identifier, catalog=None, out_diagnostics=None, apps=None):
         if out_diagnostics is not None:
             out_diagnostics["truncated"] = False
         return [{"timestamp": "t", "level": "INFO", "message": "m", "app_name": "a"}]

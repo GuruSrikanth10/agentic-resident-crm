@@ -22,7 +22,8 @@ from src.utils.outcomes import (
     record_outcome,
 )
 from src.core.agent_orchestrator import get_agent, prompt_fingerprint
-from src.utils import packet_claims
+from src.log_pipeline import scope as log_scope
+from src.utils import packet_claims, service_registry
 from src.storage.factory import get_casebook_storage
 from src.utils.dlq_publisher import publish_to_dlq
 from src.utils.analysis_queue_publisher import publish_to_analysis_queue
@@ -254,9 +255,11 @@ def _packet_metrics(resolution_source: str = "agent"):
     biased p95 latency downward by dropping exactly the slow tail it measures
     (G15).
 
-    The caller sets `outcome["status"]` and, optionally, `outcome["source"]`.
+    The caller sets `outcome["status"]` and, optionally, `outcome["source"]`
+    and `outcome["service"]` -- the latter once the packet's service is
+    resolved, so a packet that exits before that is counted as `unknown`.
     """
-    outcome = {"status": None, "source": resolution_source}
+    outcome: dict = {"status": None, "source": resolution_source, "service": None}
     started = time.monotonic()
     try:
         yield outcome
@@ -265,11 +268,14 @@ def _packet_metrics(resolution_source: str = "agent"):
         # per-runbook label would grow cardinality with the runbook catalog.
         source = str(outcome.get("source") or "agent")
         source_kind = "runbook" if source.startswith("runbook:") else "agent"
+        service = str(outcome.get("service") or "unknown")
         metrics.PACKETS_TOTAL.labels(
             status=str(outcome.get("status") or "unknown"),
             resolution_source=source_kind,
+            service=service,
         ).inc()
-        metrics.PACKET_DURATION.labels(resolution_source=source_kind).observe(
+        metrics.PACKET_DURATION.labels(resolution_source=source_kind,
+                                       service=service).observe(
             time.monotonic() - started
         )
 
@@ -507,6 +513,14 @@ def readiness_check():
     except Exception as e:
         logger.error("Readiness check failed on the checkpoint store", backend=backend, error=f"{type(e).__name__}: {e}")
 
+    # The bundled agent tool server, when this process runs one (main_api's
+    # lifespan). Every agent reaches its tools over MCP; a graph built while
+    # the server is still starting would be built without them.
+    from src.tools import mcp_server
+    tool_server = mcp_server.local_server()
+    if tool_server is not None and not tool_server.healthy():
+        raise HTTPException(status_code=503, detail="Starting agent tool server")
+
     # When ANY lane uses the opencode harness, the API is not ready until the
     # documentation corpus has been downloaded to disk. Without this, the
     # consumers start forwarding packets before the agent can read the docs.
@@ -518,6 +532,14 @@ def readiness_check():
         from src.utils.opencode_runner import server_ready
         if not server_ready():
             raise HTTPException(status_code=503, detail="Starting opencode server")
+
+    # The reason-code store, when this process downloads it from S3
+    # (MULTI_SERVICE_PLAN.md D10). Only until the first copy is on disk: a
+    # refresh serves the copy it already has, so it never unreadies a pod.
+    from src.utils import reason_code_docs
+    if reason_code_docs.s3_download_enabled() and not reason_code_docs.docs_available():
+        raise HTTPException(status_code=503,
+                            detail="Downloading reason-code documentation")
 
     kafka_ready = _check_kafka_producer_ready()
 
@@ -615,11 +637,41 @@ def fetch_logs(signal: MessagePayload):
         log.info("Skipping fetch; a terminal casebook already exists", recorded_status=current_status)
         return {"status": "already_processed", "event_id": event_id}
 
+    # Which service this packet belongs to, and whether that service is
+    # switched on (MULTI_SERVICE_PLAN.md D1, D5). Decided before anything is
+    # fetched or written: a packet the gate skips must leave nothing behind --
+    # no logs, no artifact, no status -- so that it can still be analysed in
+    # full if it is replayed once its service is enabled.
+    service_resolution, fresh = service_registry.load_or_resolve(
+        storage, event_id, signal_dict)
+    if fresh:
+        metrics.record_service_resolution(service_resolution)
+    decision = service_registry.gate(service_resolution)
+    if decision.skip:
+        metrics.record_rejection_skipped(service_resolution["service"], decision.reason)
+        log.info("Skipping; the packet's service is not analysed here",
+                 service=service_resolution["service"], reason=decision.reason,
+                 resolved_by=service_resolution.get("source"))
+        return {"status": "skipped", "reason": decision.reason,
+                "service": service_resolution["service"], "event_id": event_id}
+    if decision.reason:
+        log.info("The service gate would skip this packet; recording only",
+                 service=service_resolution["service"], reason=decision.reason,
+                 resolved_by=service_resolution.get("source"), gate_mode=decision.mode)
+    if fresh:
+        service_registry.persist(storage, event_id, service_resolution)
+
     if storage.artifact_exists(event_id, "fetched_logs.txt"):
         log.info("Logs already fetched; reusing the persisted artifact")
     else:
-        log.info("Fetching logs for the analysis queue")
-        fetch_and_persist_logs(event_id, signal_dict)
+        # Only the packet's own service's logs are searched, and nothing for
+        # a packet no service could be placed in (MULTI_SERVICE_PLAN.md
+        # Phase 6). The pack is decided here the way the analysis stage will
+        # decide it, so the logs and the analysis agree on the service.
+        log_service = log_scope.service_to_search(
+            service_resolution, service_registry.pack_for(service_resolution))
+        log.info("Fetching logs for the analysis queue", log_service=log_service)
+        fetch_and_persist_logs(event_id, signal_dict, service=log_service)
 
     # Only advance status.json to LOGS_FETCHED from nothing/LOGS_FETCHED.
     # /analyze-rejection may already have moved it to IN_PROGRESS (or a
@@ -711,6 +763,39 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
         if status in TERMINAL_STATUSES:
             logger.bind(event_id=event_id).info("Skipping event; a terminal casebook already exists", recorded_status=status)
             return {"status": "already_processed", "event_id": event_id}
+
+    # The service gate again (MULTI_SERVICE_PLAN.md D5), ahead of the agent,
+    # the claim and the IN_PROGRESS stub, so a skipped packet writes nothing.
+    # It is normally a read of what /fetch-logs stored; it resolves afresh on
+    # the /process-rejection path, which has no fetch stage, and it catches a
+    # service switched off while its packets waited on the analysis queue.
+    service_resolution, fresh = await _off_loop(
+        service_registry.load_or_resolve, storage, event_id, signal_dict)
+    outcome["service"] = service_resolution["service"]
+    if fresh:
+        metrics.record_service_resolution(service_resolution)
+    decision = service_registry.gate(service_resolution)
+    if decision.skip:
+        metrics.record_rejection_skipped(service_resolution["service"], decision.reason)
+        logger.bind(event_id=event_id).info(
+            "Skipping; the packet's service is not analysed here",
+            service=service_resolution["service"], reason=decision.reason,
+            resolved_by=service_resolution.get("source"))
+        outcome["status"] = "skipped"
+        return {"status": "skipped", "reason": decision.reason,
+                "service": service_resolution["service"], "event_id": event_id}
+    if decision.reason:
+        logger.bind(event_id=event_id).info(
+            "The service gate would skip this packet; recording only",
+            service=service_resolution["service"], reason=decision.reason,
+            resolved_by=service_resolution.get("source"), gate_mode=decision.mode)
+    if fresh:
+        await _off_loop(service_registry.persist, storage, event_id, service_resolution)
+    # The pack the agents are built from (MULTI_SERVICE_PLAN.md D4), decided
+    # here, where the gate decided, from the same resolution and settings.
+    service_pack = service_registry.pack_for(service_resolution)
+    # And whether that pack is analysed in pilot mode (Phase 7), decided with it.
+    pilot = service_registry.is_pilot(service_pack)
 
     # get_agent() on its first call reads five prompt files, builds two LLM
     # clients and four react agents, and opens the checkpoint store (running
@@ -806,8 +891,16 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
             # otherwise resume a persisted checkpoint whose retry_count is
             # already at/over MAX_INVESTIGATION_RETRIES, escalating instantly
             # without doing any work (0.5).
+            #
+            # The service resolution travels in with the payload, so every
+            # node reads the one the gate acted on (MULTI_SERVICE_PLAN.md D1).
             invoke_call = functools.partial(
-                agent.invoke, {"payload": signal_dict, "retry_count": 0}, config=config
+                agent.invoke, {"payload": signal_dict, "retry_count": 0,
+                               "service": service_resolution["service"],
+                               "service_resolution": service_resolution,
+                               "service_pack": service_pack,
+                               "pilot": pilot},
+                config=config
             )
         try:
             result = await asyncio.wait_for(
@@ -968,7 +1061,7 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
             "raw_output": final_message[:2000],
         }
 
-    casebook_data = {
+    casebook_data: dict = {
         "casebook_metadata": {
             "created_at": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
             "last_updated": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
@@ -983,7 +1076,12 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
             "update_type": packet_meta.get("enrolmentType"),  # B/D mapping not immediately available
             "is_child": None,  # Age determination not immediately available
             "created_at": signal_dict.get("sidDate"),
-            "uploaded_at": signal_dict.get("eventTimestamp")
+            "uploaded_at": signal_dict.get("eventTimestamp"),
+            # Which service the packet belongs to, and how that was decided
+            # (MULTI_SERVICE_PLAN.md 5.8). `packet_status.service` below still
+            # holds `flowMetaData.stage`, for the readers that expect it there.
+            "service": service_resolution["service"],
+            "service_resolution": service_resolution,
         },
         "packet_status": {
             "status": packet_status,
@@ -1016,16 +1114,41 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
     # prompt_fingerprint, so a document edit and a prompt edit stay
     # distinguishable (D14). `reason_code_docs.provenance` strips the text:
     # it is large, identical for every packet with this reason code, and the
-    # sha256 already identifies the version the model was shown. The three
-    # are None for a packet a runbook answered, which never reaches the
-    # Investigator at all.
+    # sha256 already identifies the version the model was shown. The
+    # documentation is resolved in runbook_lookup_node, before any runbook
+    # decision, so a packet a runbook answered records the documentation its
+    # runbook was checked against too (MULTI_SERVICE_PLAN.md Phase 5). The
+    # two paths are None for such a packet, which never reaches the
+    # Investigator or the Reviewer.
+    #
+    # The pack is the one the graph actually used: a checkpoint resumed from
+    # an earlier run carries the pack that run decided, and that is what its
+    # agents were built from (MULTI_SERVICE_PLAN.md D13).
     from src.utils import reason_code_docs
+    used_pack = result.get("service_pack") or service_pack
+    used_pack_spec = service_registry.pack(used_pack)
+    used_pilot = result.get("pilot")
+    if not isinstance(used_pilot, bool):
+        used_pilot = pilot if used_pack == service_pack \
+            else service_registry.is_pilot(used_pack)
+    # A pilot service's casebook says so (MULTI_SERVICE_PLAN.md Phase 7): its
+    # Synthesis could stage no replay, and its experts are still judging it.
+    # Absent, not false, for every other casebook, as before.
+    if used_pilot:
+        casebook_data["pilot"] = True
     casebook_data["resolution"]["provenance"] = {
-        "prompt_fingerprint": prompt_fingerprint(),
+        "prompt_fingerprint": prompt_fingerprint(used_pack, pilot=used_pilot),
+        "service_pack": {"service": used_pack,
+                         "sha256": used_pack_spec.sha256 if used_pack_spec else None},
         "reason_code_doc": reason_code_docs.provenance(
             result.get("reason_code_doc")),
         "investigator_path": result.get("investigator_path"),
         "reviewer_path": result.get("reviewer_path"),
+        # Which lookups the Investigator's tools made. The results themselves
+        # are in the tool_evidence.json artifact beside this casebook.
+        "tool_calls": [{"tool": record.get("tool"), "args": record.get("args")}
+                       for record in (result.get("tool_evidence") or [])
+                       if isinstance(record, dict)],
     }
 
     # Guard against overwriting a terminal status another actor already

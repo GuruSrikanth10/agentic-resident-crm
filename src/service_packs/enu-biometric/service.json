@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "service": "enu-biometric",
+  "display_name": "ENU Biometric (BIO stage, BIO_DEDUP)",
+  "tool_prefix": "bio",
+  "match": {
+    "stages": ["Biometric"],
+    "sub_stages": [],
+    "source_topics": []
+  },
+  "enrolment_types": {
+    "payload": {
+      "N": {"family": "E", "label": "New Enrolment (1:N deduplication)"},
+      "E": {"family": "E", "label": "New Enrolment (1:N deduplication)"},
+      "U": {"family": "U", "label": "Biometric Update (1:N deduplication, matches must be only the parent Aadhaar; append)"},
+      "Z": {"family": "Z", "label": "Reactivation (1:N deduplication, matches must be only the parent Aadhaar; append)"}
+    },
+    "family_labels": {"E": "New Enrolment (E)", "U": "Biometric Update (U)"},
+    "doc_aliases": {"ENROLMENT": "E", "ENROLLMENT": "E", "UPDATE": "U"}
+  },
+  "rule_source": {
+    "type": "rules_db",
+    "enrolment_type_filter": {"N": "ENROLMENT", "E": "ENROLMENT", "ENROLMENT": "ENROLMENT",
+                              "ENROLLMENT": "ENROLMENT", "U": "UPDATE", "UPDATE": "UPDATE"}
+  },
+  "reason_code_docs_file": "enu-biometric",
+  "droa_corpus_dir": "enu-biometric",
+  "logs": {
+    "app_names": ["enu-biometric"],
+    "k8s_match": {"name_contains": "enu-biometric"},
+    "also_search": [],
+    "decision_vocabulary": "biometric.*match|MAN_DEDUP|dedup.*reject|quality.*check.*fail"
+  },
+  "tools": {"include": [], "exclude": []},
+  "dlt": {"consumer_groups": [], "original_topics": [], "java_packages": ["com.uidai.enu.biometric"]}
+}

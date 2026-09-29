@@ -52,11 +52,29 @@ MIN_LOG_ROOM = 2000
 # Section labels. These are the names the prompt files already use, so the
 # system prompt and the user message refer to the same things.
 # ---------------------------------------------------------------------------
+#: Which service the packet was placed in, and how (MULTI_SERVICE_PLAN.md
+#: 5.5). First when present, because it frames everything after it; absent
+#: when the caller has nothing true to say, which is how the prompts stay
+#: what they were for a packet analysed as it was before packs existed.
+SERVICE = "Service"
 DOCUMENTATION = "Reason Code Documentation"
 DATABASE_RULE = "Database Rule Configuration"
+#: What stands where the Database Rule Configuration would, for a service
+#: with no rules database (MULTI_SERVICE_PLAN.md D6): only the provenance
+#: note saying where the rule is, since there is no rule to show.
+RULE_SOURCE = "Rule source"
+
+#: A pack's `rule_source.type`. The default everywhere below is `rules_db`, so
+#: a caller that passes nothing gets exactly the prompts it always got.
+RULES_DB = "rules_db"
+NO_RULES_DB = "none"
 ENROLMENT_TYPE = "Enrolment Type"
 KAFKA_PAYLOAD = "Kafka Payload"
 LOGS = "Elasticsearch Logs"
+#: What the Investigator's tools returned (src/tools/agent_tools). Present only
+#: when a tool was called, so a packet investigated without tools gets
+#: exactly the prompts it got before tools existed.
+TOOL_EVIDENCE = "Evidence retrieved with tools"
 PREVIOUS_ANALYSIS = "Your previous analysis"
 REVIEWER_FEEDBACK = "Reviewer Feedback (You MUST fix your previous analysis)"
 INVESTIGATION = "Investigation to validate"
@@ -68,6 +86,11 @@ TASK = "Task"
 NO_DOCUMENTATION = (
     "No documentation is available for this reason code. Reason from the "
     "Database Rule Configuration and the policy context.")
+#: The same, for a service with no rules database: there is no rule to point
+#: the model at.
+NO_DOCUMENTATION_NO_RULE = (
+    "No documentation is available for this reason code. Reason from the "
+    "policy context and the evidence.")
 
 #: What the logs section says when there is no trace. The alternative -- an
 #: empty section, or the bare `Log fetching disabled.` sentinel -- leaves the
@@ -127,6 +150,23 @@ RULE_NOTE_NEITHER = (
     "this reason code. Say so plainly in your findings, reason from the "
     "reason code, the payload and the logs alone, and do not invent a rule.")
 
+# A service with no rules database (MULTI_SERVICE_PLAN.md D6, Appendix B.10).
+# Its rule-engine rules, where it has any, are in its documentation file, so
+# the documentation is the only account of the rule there is.
+RULE_NOTE_NO_DB_DOC = (
+    "Provenance: this service has no rules database. The Reason Code "
+    "Documentation above, including any rule-engine rules it lists, is the "
+    "only account of the rule. Reason from it.")
+RULE_NOTE_NO_DB_NEITHER = (
+    "Provenance: this service has no rules database, and no documentation "
+    "describes this reason code. Say so plainly, reason from the reason code, "
+    "the payload and the logs alone, and do not invent a rule.")
+RULE_NOTE_NO_DB_DOCS_OFF = (
+    "Provenance: this service has no rules database, and the reason-code "
+    "documentation is switched off, so no account of the rule is available. "
+    "Say so plainly, reason from the reason code, the payload and the logs "
+    "alone, and do not invent a rule.")
+
 #: How `tool_registry.lookup_rule_text` reports that it found nothing, or
 #: could not look. Both are prose the Investigator is meant to see, so they
 #: arrive in `db_rule` exactly like a real rule would and have to be
@@ -142,8 +182,20 @@ def rule_is_present(db_rule) -> bool:
     return not text.startswith(_RULE_MISS_PREFIXES)
 
 
-def _rule_note(doc_state, db_rule) -> str:
+def no_rules_db_note(doc_state) -> str:
+    """The provenance note for a service with no rules database."""
+    outcome = (doc_state or {}).get("outcome")
+    if outcome == "hit":
+        return RULE_NOTE_NO_DB_DOC
+    if outcome in (None, "disabled"):
+        return RULE_NOTE_NO_DB_DOCS_OFF
+    return RULE_NOTE_NO_DB_NEITHER
+
+
+def _rule_note(doc_state, db_rule, rule_source: str = RULES_DB) -> str:
     """The provenance note for this combination of the two sources."""
+    if rule_source == NO_RULES_DB:
+        return no_rules_db_note(doc_state)
     outcome = (doc_state or {}).get("outcome")
     if outcome == "hit":
         refs = (doc_state or {}).get("refs") or []
@@ -163,6 +215,19 @@ def _rule_body(doc_state, db_rule) -> str:
     note = _rule_note(doc_state, db_rule)
     body = db_rule or ""
     return f"{body}\n\n{note}" if note else body
+
+
+def _rule_section(doc_state, db_rule, rule_source: str = RULES_DB) -> tuple:
+    """(label, body) of the section that says what the rule is.
+
+    For a service with a rules database, the Database Rule Configuration as it
+    has always been. For one without, a Rule source section holding only the
+    note: a Database Rule Configuration section with nothing in it would read
+    as a lookup that failed.
+    """
+    if rule_source == NO_RULES_DB:
+        return (RULE_SOURCE, no_rules_db_note(doc_state))
+    return (DATABASE_RULE, _rule_body(doc_state, db_rule))
 
 _TRIM_MARKER = ("\n\n... {} characters omitted from the middle of this trace "
                 "(REJECTION_PROMPT_MAX_CHARS) ...\n\n")
@@ -197,7 +262,7 @@ def prompt_max_chars() -> int:
 # Sections
 # ---------------------------------------------------------------------------
 
-def _documentation_body(doc_state) -> Optional[str]:
+def _documentation_body(doc_state, rule_source: str = RULES_DB) -> Optional[str]:
     """The documentation section, or None to leave it out entirely.
 
     `disabled` and a missing state both mean the feature is off, and a prompt
@@ -211,9 +276,11 @@ def _documentation_body(doc_state) -> Optional[str]:
     outcome = doc_state.get("outcome")
     if outcome == "disabled":
         return None
+    missing = NO_DOCUMENTATION_NO_RULE if rule_source == NO_RULES_DB \
+        else NO_DOCUMENTATION
     if outcome == "hit":
-        return doc_state.get("text") or NO_DOCUMENTATION
-    return NO_DOCUMENTATION
+        return doc_state.get("text") or missing
+    return missing
 
 
 def _logs_body(logs) -> str:
@@ -269,64 +336,92 @@ def _with_documentation(sections, doc_body):
         else sections
 
 
+def _with_service(sections, service_note):
+    """Put the service section first, when there is one to send."""
+    return ([(SERVICE, service_note)] + sections) if service_note else sections
+
+
 # ---------------------------------------------------------------------------
 # The three prompts
 # ---------------------------------------------------------------------------
 
-def build_investigation_prompt(*, doc_state, db_rule, enrolment_display,
-                               payload_projection, logs):
-    """The Investigator's first pass. Returns (prompt, logs_were_trimmed)."""
-    doc_body = _documentation_body(doc_state)
-    sources = ("the Reason Code Documentation and the Database Rule "
-               "Configuration") if doc_body is not None \
+def _sources(doc_body, rule_source: str) -> str:
+    """What the investigation task tells the model to apply."""
+    if rule_source == NO_RULES_DB:
+        return "the Reason Code Documentation" if doc_body is not None \
+            else "the SERVICE POLICY"
+    return ("the Reason Code Documentation and the Database Rule "
+            "Configuration") if doc_body is not None \
         else "the Database Rule Configuration"
-    sections = _with_documentation([
-        (DATABASE_RULE, _rule_body(doc_state, db_rule)),
+
+
+def build_investigation_prompt(*, doc_state, db_rule, enrolment_display,
+                               payload_projection, logs, service_note=None,
+                               rule_source=RULES_DB):
+    """The Investigator's first pass. Returns (prompt, logs_were_trimmed)."""
+    doc_body = _documentation_body(doc_state, rule_source)
+    sources = _sources(doc_body, rule_source)
+    sections = _with_service(_with_documentation([
+        _rule_section(doc_state, db_rule, rule_source),
         (ENROLMENT_TYPE, enrolment_display or ""),
         (KAFKA_PAYLOAD, json.dumps(payload_projection)),
         (LOGS, ""),
         (TASK, _TASK_INVESTIGATION.format(sources=sources)),
-    ], doc_body)
+    ], doc_body), service_note)
     return _fit(sections, _index_of(sections, LOGS), _logs_body(logs))
 
 
+def _with_tool_evidence(sections, tool_evidence):
+    """Insert the tool evidence after the logs, when there is any."""
+    if not tool_evidence:
+        return sections
+    at = _index_of(sections, LOGS) + 1
+    return sections[:at] + [(TOOL_EVIDENCE, tool_evidence)] + sections[at:]
+
+
 def build_retry_prompt(*, previous_investigation, feedback, doc_state, db_rule,
-                       enrolment_display, logs):
+                       enrolment_display, logs, tool_evidence=None,
+                       service_note=None, rule_source=RULES_DB):
     """The Investigator's retry. Returns (prompt, logs_were_trimmed).
 
     No payload, as on the retry path today: it is static and already reflected
     in the prior investigation. The logs are NOT dropped with it -- the
     Reviewer's most common rejection is that the findings are not grounded in
     the evidence, and a retry that asks for better citations with the
-    citations removed cannot comply (G12).
+    citations removed cannot comply (G12). For the same reason the earlier
+    attempts' tool results come with it.
     """
-    sections = _with_documentation([
-        (DATABASE_RULE, _rule_body(doc_state, db_rule)),
+    sections = _with_tool_evidence(_with_documentation([
+        _rule_section(doc_state, db_rule, rule_source),
         (ENROLMENT_TYPE, enrolment_display or ""),
         (LOGS, ""),
         (TASK, _TASK_RETRY),
-    ], _documentation_body(doc_state))
-    sections = [(PREVIOUS_ANALYSIS, previous_investigation or ""),
-                (REVIEWER_FEEDBACK, feedback or "")] + sections
+    ], _documentation_body(doc_state, rule_source)), tool_evidence)
+    sections = _with_service([(PREVIOUS_ANALYSIS, previous_investigation or ""),
+                              (REVIEWER_FEEDBACK, feedback or "")] + sections,
+                             service_note)
     return _fit(sections, _index_of(sections, LOGS), _logs_body(logs))
 
 
 def build_review_prompt(*, investigation, doc_state, db_rule, enrolment_display,
-                        payload_projection, logs):
+                        payload_projection, logs, tool_evidence=None,
+                        service_note=None, rule_source=RULES_DB):
     """The Reviewer, with the evidence the Investigator had.
 
     The investigation comes after the evidence, not before it: the Reviewer's
     job is to check the claims against the evidence, and reading the claims
     first is how a reviewer ends up looking for support for them instead.
+    That evidence includes what the Investigator's tools returned, without
+    which a finding that rests on a tool result could only be rejected.
     """
-    sections = _with_documentation([
-        (DATABASE_RULE, _rule_body(doc_state, db_rule)),
+    sections = _with_service(_with_tool_evidence(_with_documentation([
+        _rule_section(doc_state, db_rule, rule_source),
         (ENROLMENT_TYPE, enrolment_display or ""),
         (KAFKA_PAYLOAD, json.dumps(payload_projection)),
         (LOGS, ""),
         (INVESTIGATION, investigation or ""),
         (TASK, _TASK_REVIEW),
-    ], _documentation_body(doc_state))
+    ], _documentation_body(doc_state, rule_source)), tool_evidence), service_note)
     return _fit(sections, _index_of(sections, LOGS), _logs_body(logs))
 
 

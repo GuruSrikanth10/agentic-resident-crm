@@ -367,7 +367,7 @@ flowchart TD
     classDef good fill:#14532d,stroke:#052e16,color:#ffffff
     classDef gap fill:#78350f,stroke:#451a03,color:#ffffff
 
-    IN(["Access confirmed"]) --> LIST["List workloads for every<br/>service on the packet's path"]
+    IN(["Access confirmed"]) --> LIST["List workloads for the packet's<br/>service and the services it names"]
     LIST --> CAP{"More than the cap of 20?"}
     CAP -->|Yes| GAPT["Gap: truncated.<br/>Keep the most recent."]
     CAP -->|No| TGT
@@ -750,14 +750,15 @@ never silent: every stage that removes something announces how much.
 
 | Stage | What it does | Why |
 |---|---|---|
-| **Catalog** *(offline)* | Samples historical traces to classify recurring templates as boilerplate, informative, or decision-marker | Frequency across unrelated flows is the strongest available signal for "this line never distinguishes one outcome from another" |
+| **Scope** | Reads only the packet's own service's logs, and those of the services its configuration names; a packet whose service is unknown reads none | Another service's lines in the trace read as evidence about this packet. For an unplaced packet there is no service whose logs are known to be its own |
+| **Catalog** *(offline, per service)* | Samples historical traces of one service to classify recurring templates as boilerplate, informative, or decision-marker | Frequency across unrelated flows is the strongest available signal for "this line never distinguishes one outcome from another" — but only within one service's logs. A service with no catalog of its own has nothing filtered out |
 | **Retrieval** | Source-filtered query with stable pagination and a hard document cap | An unbounded query against a busy index is an outage waiting to happen |
-| **Redaction** | Removes identity numbers, contact details and addresses; allowlists correlation identifiers | Runs at the one point every source passes through, before *any* persistence — so it cannot be bypassed by adding a source |
+| **Redaction** | Removes identity numbers and contact details by their shape, and names, dates of birth, genders and addresses by the field they are logged under; allowlists correlation identifiers | Runs at the one point every source passes through, before *any* persistence — so it cannot be bypassed by adding a source. The same for every service, so a packet placed in the wrong service is still redacted in full. An audit counts what a service's sample logs still hold after it, and must find nothing before that service is switched on |
 | **Audit copy** | The complete trace is written to disk first | Everything downstream is lossy. The unmodified record has to exist somewhere. |
 | **Noise floor** | Drops framework chatter below a severity threshold; collapses verbose query echoes to a summary | Roughly half the lines and two-thirds of the bytes in a real trace. Applied only to the model's copy — never to the audit copy. If it would empty the trace, the original is kept. |
 | **Branch on error** | If the trace contains errors: keep them plus 200 lines either side, and skip clustering entirely | A crash is a *sequence*. Replacing it with a cluster summary destroys exactly the ordering that explains it. |
 | **Clustering** | Otherwise: strip variable content and group structurally identical lines | A rule-rejection trace is repetitive by nature; what matters is which distinct things happened, not how many times |
-| **Guardrails** | Force full retention for decision vocabulary, rare templates, and flow boundaries — each bounded | Without bounds the exemptions invert the pipeline. An unbounded "always keep decision lines" rule once produced reduced output larger than its input. |
+| **Guardrails** | Force full retention for decision vocabulary (shared words plus the service's own), rare templates, and flow boundaries — each bounded | Without bounds the exemptions invert the pipeline. An unbounded "always keep decision lines" rule once produced reduced output larger than its input. |
 | **Ceiling** | Trim the middle of the final text, and say so | Head and tail both carry information; the middle repeats |
 | **Evaluation** *(offline)* | Measures citation accuracy against known-good cases | The pipeline's own correctness is testable, and is tested before it is trusted |
 
@@ -869,7 +870,9 @@ difference between an evaluation loop and a hope.
 correct, incorrect, partial — to any finished casebook. This is the only
 source of truth the system has about its own accuracy, and everything that
 depends on knowing whether it works well (promoting a runbook, enabling the
-abstention floor, validating the deployment check) depends on it.
+abstention floor, validating the deployment check, moving a piloted service
+to enabled) depends on it. Each verdict records the packet's service, so
+accuracy is measured per service.
 
 ---
 
@@ -891,7 +894,7 @@ flowchart LR
     Q --> H{"Human review"}
     H -->|Rejected| KEEP["Left staged.<br/>Nothing is lost."]
     H -->|Approved| P["Appended, and<br/>committed to history"]
-    P --> NEXT["Applies to every<br/>later investigation"]
+    P --> NEXT["Applies to later investigations<br/>of its service, or of all"]
 
     class R,V,Q auto
     class H,P human
@@ -904,6 +907,13 @@ promotion removes it, so a proposal that is skipped, errors, or arrives
 concurrently survives rather than being silently dropped. Every promotion is a
 version-controlled commit, which means the instruction set has a history and a
 bad rule can be identified and reverted.
+
+A rule belongs to the service it was learned under, because a lesson drawn
+from one service's policy can be wrong under another's. The reviewer may
+propose a rule as generic -- one about evidence, citations or output that
+names nothing of any service -- and the person promoting it decides. The
+default is the service: a rule wrongly kept to one service merely fails to
+spread, while one wrongly made generic reaches every service.
 
 An agent that can rewrite its own instructions without supervision will
 eventually rewrite them somewhere nobody intended. This design accepts slower
@@ -953,14 +963,17 @@ flowchart LR
 
 Three safeguards make this safe to switch on:
 
-- **A runbook is bound to the rule it was derived from.** If the underlying
-  business rule changes, the binding no longer matches and the runbook stops
-  being served — the agents take the case back automatically. A stale runbook
-  cannot answer for a rule that no longer exists.
+- **A runbook belongs to one service, and is bound to what it was derived
+  from.** It is looked up only for packets of its own service. Its binding is
+  the business rule it was derived from, or, for a service whose rules live
+  only in its documentation, that documentation. If either changes, the
+  binding no longer matches and the runbook stops being served — the agents
+  take the case back automatically. A stale runbook cannot answer for a rule
+  that no longer exists.
 - **Shadow mode earns the promotion.** A candidate runs alongside the agents,
   answering nothing, while its answers are compared against theirs and against
-  recorded operator verdicts. Serving is allowlisted per failure type, so a
-  code earns its place individually rather than by category.
+  recorded operator verdicts. Serving is allowlisted per service and failure
+  type, so a code earns its place individually rather than by category.
 - **The provenance is preserved.** A runbook-served casebook is marked as such,
   with the runbook's identity and version, so it is never mistaken for an
   agent's reasoning.
@@ -976,6 +989,7 @@ and the evidence has to come from running it in a mode where it cannot do harm.
 | Capability | Default | What turning it on does |
 |---|---|---|
 | Rejection analysis | **On** | The core lane |
+| A new service's rejections | Off | Piloted first: analysed in full and judged by its experts, but its findings cannot trigger a replay. Accuracy is measured per service, and the service is enabled only once it meets the agreed bar |
 | Crash (dead-letter) analysis | Off | Adds the second lane entirely |
 | Noise filtering agent | Off | Adds a model call to clean the trace |
 | Tool-using harness | Off | Agents gain documentation search |
@@ -1005,6 +1019,17 @@ These arrive on a dead-letter topic after the producing service has already
 exhausted its own retries. The lane mirrors the rejection lane's two-stage
 split for the same reason, and shares its evidence pipeline, storage and
 confidence policy. It shares neither the data model nor the runbook space.
+
+Every service dead-letters its records in the rejection lane's message shape,
+so each crash is placed in its service the same deterministic way. The
+consumer that gave up and the Java package that threw are extra evidence.
+From there the crash is treated as that service's own:
+
+- it is switched on per service;
+- its logs and its running build are that service's;
+- its agents are built with that service's knowledge;
+- its failure is grouped only with the same service's failures, so one
+  service's cached answer is never served to another's crash.
 
 ```
 collection stage:  parse the failure headers -> classify -> fingerprint

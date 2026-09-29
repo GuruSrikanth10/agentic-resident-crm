@@ -83,7 +83,8 @@ def seed_logs(case_id, text):
 
 def stub_llm(monkeypatch, finding: DltFinding, calls: list,
              seen_summaries: list = None):
-    def fake(case_id, failure, corroboration, logs, payload_summary=None):
+    def fake(case_id, failure, corroboration, logs, payload_summary=None,
+             **_service):
         calls.append(case_id)
         if seen_summaries is not None:
             seen_summaries.append(payload_summary)

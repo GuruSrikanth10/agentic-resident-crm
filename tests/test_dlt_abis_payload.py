@@ -389,7 +389,10 @@ def test_the_adapter_resolves_the_ref_id_from_the_key():
     assert body["ref_id_source"] == "record_key"
     assert body["record_key"] == KEY
     assert body["ref_id_mismatch"] is False
-    assert body["case_id"] == "dlt-ENU.MWARE.DEDUPE.PROCESS.COMPLETION.V1-9-4441353"
+    # The consumer group that dead-lettered it is part of the record's
+    # identity (MULTI_SERVICE_PLAN.md Phase 8), as a digest.
+    assert body["case_id"].startswith(
+        "dlt-ENU.MWARE.DEDUPE.PROCESS.COMPLETION.V1-9-4441353-g")
 
 
 def test_an_undecodable_payload_keeps_its_log_lane():

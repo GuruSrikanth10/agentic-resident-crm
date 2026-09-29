@@ -335,7 +335,7 @@ def test_retry_prompt_includes_the_logs():
     agent = MagicMock()
     agent.invoke.side_effect = capture
 
-    with patch.object(orch, "create_react_agent", side_effect=lambda *a, **k: agent), \
+    with patch.object(orch, "build_agent", side_effect=lambda *a, **k: agent), \
          patch.object(orch, "get_llm", side_effect=lambda tier: MagicMock()):
         orch._agent = None
         graph = orch.get_agent()

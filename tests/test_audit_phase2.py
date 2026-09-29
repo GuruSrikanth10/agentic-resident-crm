@@ -41,13 +41,15 @@ def test_packet_metrics_record_the_status_the_caller_sets():
     from src.api.routes import _packet_metrics
 
     before = _label_values(metrics.PACKETS_TOTAL,
-                           status="FAILED_TIMEOUT", resolution_source="agent")
+                           status="FAILED_TIMEOUT", resolution_source="agent",
+                           service="unknown")
 
     with _packet_metrics() as outcome:
         outcome["status"] = "FAILED_TIMEOUT"
 
     after = _label_values(metrics.PACKETS_TOTAL,
-                          status="FAILED_TIMEOUT", resolution_source="agent")
+                          status="FAILED_TIMEOUT", resolution_source="agent",
+                          service="unknown")
     assert after == before + 1, "the timeout path must be counted (G15)"
 
 
@@ -57,14 +59,16 @@ def test_packet_metrics_record_even_when_the_body_raises():
     from src.api.routes import _packet_metrics
 
     before = _label_values(metrics.PACKETS_TOTAL,
-                           status="unknown", resolution_source="agent")
+                           status="unknown", resolution_source="agent",
+                           service="unknown")
 
     with pytest.raises(RuntimeError):
         with _packet_metrics() as outcome:
             raise RuntimeError("boom")
 
     after = _label_values(metrics.PACKETS_TOTAL,
-                          status="unknown", resolution_source="agent")
+                          status="unknown", resolution_source="agent",
+                          service="unknown")
     assert after == before + 1
 
 
@@ -74,14 +78,16 @@ def test_runbook_source_collapses_to_a_bounded_label():
     from src.api.routes import _packet_metrics
 
     before = _label_values(metrics.PACKETS_TOTAL,
-                           status="COMPLETED", resolution_source="runbook")
+                           status="COMPLETED", resolution_source="runbook",
+                           service="unknown")
 
     with _packet_metrics() as outcome:
         outcome["status"] = "COMPLETED"
         outcome["source"] = "runbook:SOME_CODE__U@v7"
 
     after = _label_values(metrics.PACKETS_TOTAL,
-                          status="COMPLETED", resolution_source="runbook")
+                          status="COMPLETED", resolution_source="runbook",
+                          service="unknown")
     assert after == before + 1
 
 
@@ -95,9 +101,9 @@ def test_a_runbook_miss_is_counted(monkeypatch):
     monkeypatch.setenv("RUNBOOK_MODE", "serve")
     monkeypatch.setattr(orch, "_agent", None)
 
-    before = _label_values(metrics.RUNBOOK_LOOKUPS, outcome="miss")
+    before = _label_values(metrics.RUNBOOK_LOOKUPS, outcome="miss", service="_unresolved")
 
-    with patch.object(orch, "create_react_agent", side_effect=lambda *a, **k: MagicMock()), \
+    with patch.object(orch, "build_agent", side_effect=lambda *a, **k: MagicMock()), \
          patch.object(orch, "get_llm", side_effect=lambda tier: MagicMock()), \
          patch.object(orch, "get_runbook", return_value=None):
         node = _runbook_node()
@@ -107,7 +113,7 @@ def test_a_runbook_miss_is_counted(monkeypatch):
         }})
 
     assert result["resolution_source"] == "agent"
-    assert _label_values(metrics.RUNBOOK_LOOKUPS, outcome="miss") == before + 1
+    assert _label_values(metrics.RUNBOOK_LOOKUPS, outcome="miss", service="_unresolved") == before + 1
 
 
 @requires_prometheus
@@ -116,13 +122,13 @@ def test_a_fingerprint_mismatch_is_counted_distinctly(monkeypatch):
     monkeypatch.setenv("RUNBOOK_MODE", "serve")
     monkeypatch.setattr(orch, "_agent", None)
 
-    before = _label_values(metrics.RUNBOOK_LOOKUPS, outcome="fingerprint_mismatch")
+    before = _label_values(metrics.RUNBOOK_LOOKUPS, outcome="fingerprint_mismatch", service="_unresolved")
 
     runbook = {"runbook_id": "RC__U", "version": 1,
                "rule_fingerprint": "sha256:stale",
                "resolution": {"action": "REPLAY"}}
 
-    with patch.object(orch, "create_react_agent", side_effect=lambda *a, **k: MagicMock()), \
+    with patch.object(orch, "build_agent", side_effect=lambda *a, **k: MagicMock()), \
          patch.object(orch, "get_llm", side_effect=lambda tier: MagicMock()), \
          patch.object(orch, "get_runbook", return_value=runbook), \
          patch.object(orch, "lookup_rule_for", return_value=[{"rule": "x"}]):
@@ -134,7 +140,7 @@ def test_a_fingerprint_mismatch_is_counted_distinctly(monkeypatch):
 
     assert result["resolution_source"] == "agent"
     assert _label_values(metrics.RUNBOOK_LOOKUPS,
-                         outcome="fingerprint_mismatch") == before + 1
+                         outcome="fingerprint_mismatch", service="_unresolved") == before + 1
 
 
 @requires_prometheus
@@ -143,12 +149,12 @@ def test_a_runbook_error_is_counted(monkeypatch):
     monkeypatch.setenv("RUNBOOK_MODE", "serve")
     monkeypatch.setattr(orch, "_agent", None)
 
-    before = _label_values(metrics.RUNBOOK_LOOKUPS, outcome="error")
+    before = _label_values(metrics.RUNBOOK_LOOKUPS, outcome="error", service="_unresolved")
 
     def boom(*_a, **_k):
         raise TypeError("'StructuredTool' object is not callable")
 
-    with patch.object(orch, "create_react_agent", side_effect=lambda *a, **k: MagicMock()), \
+    with patch.object(orch, "build_agent", side_effect=lambda *a, **k: MagicMock()), \
          patch.object(orch, "get_llm", side_effect=lambda tier: MagicMock()), \
          patch.object(orch, "get_runbook", side_effect=boom):
         node = _runbook_node()
@@ -158,7 +164,7 @@ def test_a_runbook_error_is_counted(monkeypatch):
         }})
 
     assert result["resolution_source"] == "agent"
-    assert _label_values(metrics.RUNBOOK_LOOKUPS, outcome="error") == before + 1
+    assert _label_values(metrics.RUNBOOK_LOOKUPS, outcome="error", service="_unresolved") == before + 1
 
 
 def _runbook_node():
@@ -168,7 +174,7 @@ def _runbook_node():
     compiled graph's node table rather than imported directly. Fails loudly if
     langgraph's internals move, instead of silently testing nothing.
     """
-    with patch.object(orch, "create_react_agent", side_effect=lambda *a, **k: MagicMock()), \
+    with patch.object(orch, "build_agent", side_effect=lambda *a, **k: MagicMock()), \
          patch.object(orch, "get_llm", side_effect=lambda tier: MagicMock()):
         agent = orch.get_agent()
 
@@ -187,7 +193,8 @@ def _runbook_node():
 
 @requires_prometheus
 def test_a_failed_llm_call_is_counted():
-    before = _label_values(metrics.LLM_CALLS, node="investigator", outcome="error")
+    before = _label_values(metrics.LLM_CALLS, node="investigator", outcome="error",
+                           service="unknown")
 
     def boom():
         raise RuntimeError("model unreachable")
@@ -195,7 +202,8 @@ def test_a_failed_llm_call_is_counted():
     with pytest.raises(RuntimeError):
         orch._counted("investigator", boom)
 
-    after = _label_values(metrics.LLM_CALLS, node="investigator", outcome="error")
+    after = _label_values(metrics.LLM_CALLS, node="investigator", outcome="error",
+                          service="unknown")
     assert after == before + 1
 
 
@@ -222,8 +230,6 @@ def test_prompt_fingerprint_is_stable_and_sensitive(tmp_path):
     for name in orch.PROMPT_FILES:
         (prompts / name).parent.mkdir(parents=True, exist_ok=True)
         (prompts / name).write_text("original", encoding="utf-8")
-    (tmp_path.parent / "agent_policy_context.md").write_text("policy",
-                                                             encoding="utf-8")
 
     first = orch.compute_prompt_fingerprint(str(tmp_path))
     assert first == orch.compute_prompt_fingerprint(str(tmp_path)), "must be stable"

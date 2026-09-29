@@ -88,7 +88,6 @@ RUN npm config set registry http://10.10.206.59:8080/repository/npm-proxy/ && \
 COPY src /app/src
 COPY start.py /app/start.py
 COPY local_run.py /app/local_run.py
-COPY agent_policy_context.md /app/agent_policy_context.md
 COPY opencode.json /app/opencode.json
 COPY AGENTS.md /app/AGENTS.md
 COPY reason_codes.csv /app/reason_codes.csv

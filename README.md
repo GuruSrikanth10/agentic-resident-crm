@@ -589,7 +589,7 @@ agentic-resident-crm/
 ├── .agents/
 │   └── AGENTS.md                   # Agentic configurations and behavioral rules
 ├── .env.example                    # Annotated env-var template (the .env itself is gitignored)
-├── agent_policy_context.md         # Foundational business logic & rules mapping for AI agents
+├── MULTI_SERVICE_PLAN.md           # One rejection lane for many services: plan (ARCHITECTURE.md 3.2.3)
 ├── DLT_PLAN.md                     # Dead-letter topic (DLT) analysis lane: engineering design
 ├── KUBERNETES_LOGS_PLAN.md         # Kubernetes log source: engineering design
 ├── RUNBOOK_PLAN.md                 # Standard runbook implementation plan
@@ -892,7 +892,7 @@ The architecture incorporates several resilience mechanisms to prevent runaway c
 - **Rate Limiter Eviction**: The in-memory IP rate limiter evicts stale entries when it exceeds 1000 tracked IPs to prevent unbounded memory growth.
 
 ### 3.5 The Agent Ecosystem
-The intelligence of the system relies on a multi-agent hierarchy. Both the Investigator and Synthesis agents are strictly instructed to reference the business logic outlined in `agent_policy_context.md` to understand success criteria and parse deviations correctly.
+The intelligence of the system relies on a multi-agent hierarchy. The Investigator, the Reviewer and Synthesis are each built with the business policy of the packet's service -- the `policy.md` of its pack under `src/service_packs/` (ARCHITECTURE.md section 3.2.3) -- and are strictly instructed to reference it to understand success criteria and parse deviations correctly.
 - **Dynamic Context Injection**: The Python orchestrator dynamically intercepts and filters database rules (e.g., checking the `enrolmentType` from the payload) before injecting the exact correct rule into the agent's prompt to avoid LLM hallucinations.
 - **RejectionManager (not an LLM)**: The conductor is the compiled `StateGraph` itself, not an agent. Routing is plain Python, so the sequence of steps cannot be altered by a model.
 - **LogFilterAgent**: (Optional). Because logs are fetched from Kubernetes using a sliding window (e.g., 5 lines before, 20 lines after a match), the resulting block often contains log lines and errors from highly concurrent, unrelated packets. If `ENABLE_LOG_FILTER_AGENT=true`, this agent reads the block and cleanly deletes any errors belonging to other `eventId`s or `refId`s before the investigation begins, writing its output to a `filtered_logs.txt` artifact for local debugging before uploading to S3.

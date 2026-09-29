@@ -62,7 +62,7 @@ def _node(monkeypatch, name, agent):
 
     monkeypatch.setattr(orch, "_agent", None)
     monkeypatch.setattr(orch, "get_llm", lambda _tier: MagicMock())
-    monkeypatch.setattr(orch, "create_react_agent", lambda *a, **k: agent)
+    monkeypatch.setattr(orch, "build_agent", lambda *a, **k: agent)
     monkeypatch.setattr(orch, "get_checkpointer", lambda: None)
     return orch._build_agent().builder.nodes[name].runnable.func
 
@@ -278,17 +278,22 @@ def _counted(monkeypatch):
     return seen
 
 
-@pytest.mark.parametrize("reason_code,raw_type,outcome,match", [
-    ("FIXTURE_TYPED_CODE", "E", "hit", "exact"),
-    ("FIXTURE_ANY_CODE", "E", "hit", "any"),
-    ("NOT_DOCUMENTED", "E", "miss", "none"),
-    (None, "E", "no_reason_code", "none"),
+@pytest.mark.parametrize("reason_code,raw_type,outcome,match,service,scope", [
+    ("FIXTURE_TYPED_CODE", "E", "hit", "exact", "fixture-service", "other_service"),
+    ("FIXTURE_ANY_CODE", "E", "hit", "any", "fixture-service", "other_service"),
+    ("NOT_DOCUMENTED", "E", "miss", "none", "_unresolved", "none"),
+    (None, "E", "no_reason_code", "none", "_unresolved", "none"),
 ])
 def test_every_lookup_outcome_is_counted(monkeypatch, reason_code, raw_type,
-                                         outcome, match):
+                                         outcome, match, service, scope):
     """`exact` and `any` are counted apart: `any` means the code is documented
     but not for this enrolment type, which is a different piece of work from
-    a miss."""
+    a miss.
+
+    `service` and `scope` say whose documentation answered
+    (MULTI_SERVICE_PLAN.md Phase 3): this payload is placed by its reason code
+    alone, in a service with no pack, so the hit comes from a file that is not
+    the pack's own and is labelled `other_service`."""
     _docs_on(monkeypatch)
     seen = _counted(monkeypatch)
     investigate = _node(monkeypatch, "investigate", _Recorder())
@@ -299,7 +304,8 @@ def test_every_lookup_outcome_is_counted(monkeypatch, reason_code, raw_type,
         [{"errorReasonCode": reason_code}] if reason_code else [])
     investigate(_state(payload=payload))
 
-    assert seen == [{"outcome": outcome, "match": match}]
+    assert seen == [{"outcome": outcome, "match": match,
+                     "service": service, "scope": scope}]
 
 
 def test_the_switch_being_off_is_counted_as_nothing(monkeypatch):
@@ -325,7 +331,7 @@ def _harness_on(monkeypatch, tmp_path, result, fail=False):
     monkeypatch.setenv("USE_OPENCODE_HARNESS_REJECTION", "true")
     monkeypatch.setattr(paths, "LOCAL_CASESHEETS_DIR", tmp_path)
 
-    def run(prompt, output_path, node=None):
+    def run(prompt, output_path, node=None, service=None):
         if fail:
             raise opencode_runner.OpencodeUnavailable("no binary")
         return {"result": result, "seconds": 0,

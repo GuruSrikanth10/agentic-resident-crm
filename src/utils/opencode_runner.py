@@ -128,15 +128,71 @@ def _provider_of(model_name: str) -> str:
 
 
 def _harness_config(model_name: str) -> Dict[str, Any]:
-    """opencode's own timeouts for this run, as `OPENCODE_CONFIG_CONTENT`.
+    """What the harness adds to opencode's config, as `OPENCODE_CONFIG_CONTENT`.
 
-    Returns an empty dict to skip overriding the operator's
-    `~/.config/opencode` config. The provider config (baseURL, model
-    names, npm package) is already set there; sending a partial config
-    here replaces it and loses the baseURL, causing 'Request is not
-    supported by this version of OpenCode Server' errors.
+    The agent tool servers (an `mcp` block) and the opencode agents: one per
+    harness rejection role and service pack, and one per DLT harness role,
+    each allowed exactly the MCP tools that role gets for that pack -- see
+    mcp_client.opencode_config. Empty when no tool server is configured.
+
+    Never a `provider` block. The provider config (baseURL, model names, npm
+    package) lives in `~/.config/opencode` or the project's opencode.json, and
+    a provider block sent here once replaced it and lost the baseURL, causing
+    'Request is not supported by this version of OpenCode Server' errors.
+    Blocks without one are deep-merged with it: verified on opencode 1.18.20
+    with `opencode debug config`, the provider surviving from both the global
+    and the project file.
+
+    A failure to work the blocks out -- a tool list that cannot be read, a
+    selection that names an unknown tool -- leaves the harness without tools
+    rather than without a server: the direct path still has them.
     """
-    return {}
+    try:
+        from src.tools import mcp_client
+        return mcp_client.opencode_config()
+    except Exception as error:
+        logger.error("Could not configure the agent tool servers for opencode; "
+                     "harness tasks run without them",
+                     error=f"{type(error).__name__}: {error}")
+        return {}
+
+
+def _task_agent(node: Optional[str], service: Optional[str],
+                config: Dict[str, Any]) -> Optional[str]:
+    """The opencode agent a task for `node` runs as, when the config has one.
+
+    A rejection role's agent is its service pack's, `crm_<role>__<slug>`
+    (MULTI_SERVICE_PLAN.md 5.6). A pack the server was started without -- one
+    registered since -- falls back to `crm_<role>__default`, which has only
+    the tools for every service: never to a wider set.
+
+    With no tool servers configured there are no agents, and the task runs
+    as opencode's default agent, which then has no MCP tools either. With
+    servers configured, that default agent would have every one of them, so a
+    task that finds no agent of its own is refused instead: the node falls
+    back to its direct path, whose tools are scoped.
+    """
+    if not node:
+        return None
+    from src.tools import mcp_client
+    from src.tools.agent_tools import SERVICE_ROLES
+    from src.utils.service_registry import DEFAULT_PACK
+
+    agents = config.get("agent") or {}
+    candidates = [mcp_client.opencode_agent(node, service)]
+    if node in SERVICE_ROLES:
+        candidates.append(mcp_client.opencode_agent(node, DEFAULT_PACK))
+    # A DLT role scoped to a service has no narrower agent to fall back to:
+    # its unscoped agent has every DLT tool, so a server started before the
+    # service was registered is refused instead, below (Phase 8).
+    for name in candidates:
+        if name in agents:
+            return name
+    if config.get("mcp"):
+        raise OpencodeUnavailable(
+            f"the opencode server has no agent for {node} ({service or 'no service'}), "
+            f"and its default agent would have every tool server's tools.")
+    return None
 
 
 def _permissions() -> Dict[str, Any]:
@@ -167,6 +223,9 @@ class Session:
         self.port = port or 4096
         self.password = secrets.token_urlsafe(24)
         self._process: Optional[subprocess.Popen] = None
+        #: The config this server was started with. An attached task uses it
+        #: too, so a task never asks for an agent its server does not have.
+        self.config: Dict[str, Any] = {}
 
     def __enter__(self) -> "Session":
         binary = _binary()
@@ -180,6 +239,7 @@ class Session:
         env["NO_PROXY"] = f"{env.get('NO_PROXY', '')},127.0.0.1,localhost".lstrip(",")
         env["no_proxy"] = env["NO_PROXY"]
         config = _harness_config(_model())
+        self.config = config
         if config:
             env["OPENCODE_CONFIG_CONTENT"] = json.dumps(config)
 
@@ -283,6 +343,9 @@ class _Trace:
         self.cost = 0.0
         self.last_text = ""
         self.tool_errors: list = []
+        #: Finished tool calls, one per call id, for the caller to keep as
+        #: evidence: {"tool", "input", "output", "status"}.
+        self._calls: Dict[str, Dict[str, Any]] = {}
 
     def add(self, event: Dict[str, Any]) -> None:
         if self.session_id is None:
@@ -314,10 +377,25 @@ class _Trace:
             status = str(state.get("status") or "")
             if status and status not in ("completed", "running", "pending"):
                 self.tool_errors.append(f"{name}: {status}")
+            if status in ("completed", "error"):
+                inputs = state.get("input")
+                output = (state.get("output") if status == "completed"
+                          else f"The tool failed, so nothing was read: {state.get('error')}")
+                key = str(part.get("callID") or part.get("id") or len(self._calls))
+                self._calls[key] = {
+                    "tool": name,
+                    "input": inputs if isinstance(inputs, dict) else {},
+                    "output": "" if output is None else str(output),
+                    "status": status,
+                }
         elif kind == "text":
             text = str(part.get("text") or "").strip()
             if text:
                 self.last_text = text
+
+    @property
+    def tool_calls(self) -> list:
+        return list(self._calls.values())
 
     def summary(self) -> Dict[str, Any]:
         return {
@@ -368,7 +446,8 @@ def _tool_detail(part: Dict[str, Any]) -> str:
 def run_task(prompt: str, output_path: str,
              session: Optional[Session] = None,
              timeout: Optional[int] = None,
-             node: Optional[str] = None) -> Dict[str, Any]:
+             node: Optional[str] = None,
+             service: Optional[str] = None) -> Dict[str, Any]:
     """Run one task via opencode and return what the agent wrote.
 
     The agent writes its output to `output_path` as a file on disk.
@@ -377,7 +456,9 @@ def run_task(prompt: str, output_path: str,
     `node` is the metrics label for the calling graph node (`investigator`,
     `reviewer`, `dlt_investigator`, `dlt_reviewer`). Given one, the task's
     LLM calls and tokens are metered under it, the same labels the direct
-    LLM path uses, so the two paths are comparable on one graph.
+    LLM path uses, so the two paths are comparable on one graph. `service` is
+    the packet's service pack, for a rejection node: the task runs as that
+    pack's opencode agent, and so reaches only its tools.
 
     Raises OpencodeUnavailable on failure.
     """
@@ -433,11 +514,20 @@ def run_task(prompt: str, output_path: str,
     # instead of the opencode API response.
     env["NO_PROXY"] = f"{env.get('NO_PROXY', '')},127.0.0.1,localhost".lstrip(",")
     env["no_proxy"] = env["NO_PROXY"]
-    config = _harness_config(_model())
-    if config:
-        env["OPENCODE_CONFIG_CONTENT"] = json.dumps(config)
 
     session = session or current_session()
+    # An attached task runs on its server, so it takes the server's config:
+    # an agent the server was not started with does not exist there.
+    config = session.config if session else _harness_config(_model())
+    if config:
+        env["OPENCODE_CONFIG_CONTENT"] = json.dumps(config)
+    # The role's own opencode agent for this pack, which may use only the MCP
+    # tools that role gets for it. With no tool servers configured there is
+    # none, and the task runs as opencode's default agent exactly as before.
+    agent = _task_agent(node, service, config)
+    if agent:
+        argv[argv.index("--dir"):argv.index("--dir")] = ["--agent", agent]
+
     if session:
         argv[2:2] = ["--attach", session.url]
         env["OPENCODE_SERVER_PASSWORD"] = session.password
@@ -571,18 +661,22 @@ def run_task(prompt: str, output_path: str,
         "seconds": round(elapsed, 1),
         "model": _model(),
         "trace": trace.summary(),
+        # What its tools returned; the caller keeps the MCP ones as evidence
+        # (mcp_client.evidence_from_harness).
+        "tool_calls": trace.tool_calls,
     }
 
 
 def run_task_json(prompt: str, output_path: str,
                   session: Optional[Session] = None,
                   timeout: Optional[int] = None,
-                  node: Optional[str] = None) -> Dict[str, Any]:
+                  node: Optional[str] = None,
+                  service: Optional[str] = None) -> Dict[str, Any]:
     """Run a task and parse the output as JSON.
 
     Extracts the first JSON object from the output file.
     """
-    result = run_task(prompt, output_path, session, timeout, node)
+    result = run_task(prompt, output_path, session, timeout, node, service)
     raw = result["output"]
 
     start, end = raw.find("{"), raw.rfind("}")

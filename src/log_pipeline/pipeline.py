@@ -14,6 +14,7 @@ import threading
 from typing import Optional
 
 from src.log_pipeline import redaction
+from src.log_pipeline import scope as log_scope
 from src.log_pipeline.catalog import TemplateCatalog
 from src.log_pipeline.config import MAX_REDUCED_CHARS
 from src.log_pipeline.reducer import (
@@ -34,14 +35,28 @@ logger = get_logger(__name__)
 
 
 _cached_catalog = None
+#: Each service's own catalog, by path (MULTI_SERVICE_PLAN.md Phase 6). Like
+#: the one above, read once per process: a catalog built later is picked up
+#: on restart.
+_cached_service_catalogs: dict = {}
 # TemplateCatalog() reads and parses the catalog JSON, so racing callers each
 # paid for a full parse and all but one result was discarded.
 _catalog_lock = threading.Lock()
 
 
-def _get_catalog() -> TemplateCatalog:
-    """Return a module-level cached catalog instance."""
+def _get_catalog(path: Optional[str] = None) -> TemplateCatalog:
+    """Return a module-level cached catalog instance: the one at `path`, or
+    with None the one at CATALOG_PATH."""
     global _cached_catalog
+    if path is not None:
+        cached = _cached_service_catalogs.get(path)
+        if cached is not None:
+            return cached
+        with _catalog_lock:
+            if path not in _cached_service_catalogs:
+                _cached_service_catalogs[path] = TemplateCatalog(path=path)
+            return _cached_service_catalogs[path]
+
     if _cached_catalog is not None:
         return _cached_catalog
 
@@ -66,7 +81,8 @@ def _default_window() -> TimeWindow:
 def reduce_logs(event_id: str, extra_identifiers: tuple = (),
                 storage_key: Optional[str] = None,
                 window: Optional[TimeWindow] = None,
-                storage=None) -> str:
+                storage=None,
+                service: Optional[str] = None) -> str:
     """Run the full log reduction pipeline for an event_id.
 
     `extra_identifiers` are additional correlation ids (refId, srn) that the
@@ -87,13 +103,26 @@ def reduce_logs(event_id: str, extra_identifiers: tuple = (),
     time, so the default two-hour look-back would search the wrong window
     entirely and find nothing (DLT_PLAN.md 3.2, Trap 2).
 
+    `service` is the pack the packet's logs are fetched for
+    (`scope.service_to_search`, MULTI_SERVICE_PLAN.md Phase 6): its apps are
+    searched, its catalog and parse tree reduce the result, and its decision
+    vocabulary is kept in full. None -- the DLT lane, the CLIs -- keeps the
+    behaviour from before services had logs of their own. A name with no
+    registered pack (`_default`) searches nothing.
+
     Returns a formatted string suitable for LLM context injection.
     Raw logs are also persisted to disk for audit.
     """
     extra_identifiers = tuple(v for v in (extra_identifiers or ()) if v)
     artifact_key = storage_key or event_id
+    scope = log_scope.for_service(service)
+    if not scope.searchable:
+        logger.bind(event_id=event_id).info(
+            "No logs searched; no service is known to hold this packet's logs",
+            service=service)
+        return log_scope.not_searched_message(event_id)
     # Load catalog (cached -- only reads disk once)
-    catalog = _get_catalog()
+    catalog = _get_catalog(scope.catalog_path)
 
     # ------------------------------------------------------------------
     # Stage 1: Fetch (through the LogSource seam -- see sources/base.py)
@@ -102,7 +131,8 @@ def reduce_logs(event_id: str, extra_identifiers: tuple = (),
         event_id,
         window or _default_window(),
         FetchContext(event_id=event_id, catalog=catalog,
-                     extra_identifiers=extra_identifiers),
+                     extra_identifiers=extra_identifiers,
+                     apps=scope.apps, pod_matches=scope.pod_matches),
     )
     raw_logs = fetch_result.records
 
@@ -119,7 +149,8 @@ def reduce_logs(event_id: str, extra_identifiers: tuple = (),
 
     total_fetched = len(raw_logs)
     log = logger.bind(event_id=event_id)
-    log.info("Log pipeline fetch completed", record_count=total_fetched)
+    log.info("Log pipeline fetch completed", record_count=total_fetched,
+             service=scope.service)
 
     # ------------------------------------------------------------------
     # Redaction -- after fetch, before ANY persistence.
@@ -210,12 +241,14 @@ def reduce_logs(event_id: str, extra_identifiers: tuple = (),
     # ------------------------------------------------------------------
     # Stage 3: Clustering (approve/reject path)
     # ------------------------------------------------------------------
-    clusters = cluster_logs(raw_logs, catalog=catalog)
+    clusters = cluster_logs(raw_logs, catalog=catalog,
+                            state_file=scope.drain3_state_file)
 
     # ------------------------------------------------------------------
     # Stage 4: Evidence guardrails
     # ------------------------------------------------------------------
-    assembled = apply_evidence_guardrails(clusters, raw_logs, catalog=catalog)
+    assembled = apply_evidence_guardrails(clusters, raw_logs, catalog=catalog,
+                                          vocabulary=scope.decision_vocabulary)
 
     # ------------------------------------------------------------------
     # Format for LLM injection

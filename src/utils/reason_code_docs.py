@@ -29,16 +29,18 @@ Three properties this module is built around:
 * **`lookup` never raises.** A documentation problem degrades one packet's
   prompt; it must never fail the packet. Every failure becomes outcome
   `error` and the pipeline carries on without the document.
-* **Nothing here has side effects.** No metrics, no state. The Investigator
-  counts the lookup outcome, so a validator run and a CLI run cannot inflate
-  the pipeline's counters.
+* **Nothing here has side effects.** No metrics, and no state beyond the memo
+  behind `services_for_code`. The Investigator counts the lookup outcome, so a
+  validator run and a CLI run cannot inflate the pipeline's counters.
 * **The files are read on every lookup**, as `prompt_loader.render` does. They
   are small, and edits in a mounted `REASON_CODE_DOCS_DIR` then take effect
-  without a restart.
+  without a restart. The memo keeps that property: it is keyed on each file's
+  size and modification time, so an edited file is indexed again.
 """
 import json
 import os
 import re
+import threading
 from typing import Optional
 
 from src.models.synthesis import ACTIONS, RESIDENT_ACTIONS
@@ -63,13 +65,11 @@ DEFAULT_MAX_CHARS = 16000
 #: Where the per-service files live, relative to the store root.
 SERVICES_DIRNAME = "services"
 
-#: Reserved for hosting the store outside the image. `docs_loader` already
-#: does this for the DROA corpus and is the model to follow: list the prefix,
-#: download into a temp directory, swap it into place, and degrade to whatever
-#: is on disk when S3 is unreachable. Nothing downloads yet -- the files ship
-#: in `src/reason_code_docs/` and `REASON_CODE_DOCS_DIR` can already point at
-#: a mounted volume, so this is a placeholder for the path, not a promise that
-#: the path works.
+#: Where the store is hosted outside the image: `<prefix>/<service>.json`, or
+#: `<prefix>/services/<service>.json`. Fetched by `download_service_docs` when
+#: REASON_CODE_DOCS_S3_DOWNLOAD is on; otherwise the files ship in
+#: `src/reason_code_docs/`, or REASON_CODE_DOCS_DIR points at a volume
+#: someone else populated.
 DEFAULT_S3_PREFIX = "nalanda/reason-codes"
 
 #: A raw enrolment type that is not a known alias is used as-is when it looks
@@ -96,10 +96,14 @@ _GUIDANCE_HEADING = "Resolution guidance"
 
 _HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
 
-#: How a matched enrolment type is described in the document's title line.
+#: How a matched enrolment type is described in the document's title line when
+#: the caller brings no labels of its own. A packet's service pack brings its
+#: own (`enrolment_types.family_labels`), so these are deliberately neutral:
+#: they are what a packet with no service-specific policy sees
+#: (MULTI_SERVICE_PLAN.md D10).
 _TYPE_DISPLAY = {
     "E": "New Enrolment (E)",
-    "U": "Biometric Update (U)",
+    "U": "Update (U)",
     ANY: "all enrolment types",
 }
 
@@ -146,24 +150,187 @@ def max_chars() -> int:
 
 
 def s3_prefix() -> str:
-    """Where the service files would be hosted. See DEFAULT_S3_PREFIX."""
+    """Where the service files are hosted. See DEFAULT_S3_PREFIX."""
     return os.environ.get("REASON_CODE_DOCS_S3_PREFIX",
                           DEFAULT_S3_PREFIX).strip("/")
 
 
-def download_service_docs() -> bool:
-    """Placeholder for fetching the store from S3. Downloads nothing yet.
+ENV_S3_DOWNLOAD = "REASON_CODE_DOCS_S3_DOWNLOAD"
+ENV_REFRESH = "REASON_CODE_DOCS_REFRESH_SECONDS"
 
-    The files ship in the image, so there is nothing to fetch and returning
-    False here is honest rather than degraded: it says "no download happened",
-    which is exactly true. Wiring it up means following
-    `docs_loader.download_corpus` against `s3_prefix()`; until then a
-    deployment that wants the files from elsewhere points
-    `REASON_CODE_DOCS_DIR` at a volume someone else populated.
+
+def s3_download_enabled() -> bool:
+    """Whether this process fetches the store from S3 (MULTI_SERVICE_PLAN.md
+    D10). Off by default: the files ship in the image, and a deployment whose
+    files are fetched by something else only points REASON_CODE_DOCS_DIR at
+    them."""
+    return get_bool_env(ENV_S3_DOWNLOAD, False)
+
+
+def refresh_seconds() -> float:
+    """How often to fetch the store again after the first time; 0 means only
+    at start-up. An unusable value is 0 rather than an error."""
+    try:
+        value = float(os.environ.get(ENV_REFRESH, "").strip() or 0)
+    except ValueError:
+        return 0.0
+    return value if value > 0 else 0.0
+
+
+def _s3_bucket() -> Optional[str]:
+    return os.environ.get("CASEBOOK_S3_BUCKET") or os.environ.get("S3_LOGS_BUCKET")
+
+
+def _s3_client():
+    from src.storage.s3 import _get_client
+    return _get_client()
+
+
+#: The part of a key after the prefix that names a service file: the file
+#: itself, or the file under `services/` for a store uploaded with its layout.
+#: Anything else under the prefix is not a service file and is ignored.
+_S3_SERVICE_KEY = re.compile(r"^(?:services/)?([A-Za-z0-9][A-Za-z0-9._-]*)\.json$")
+
+#: One download at a time: the start-up fetch and a refresh must never write
+#: the same staging directory together.
+_download_lock = threading.Lock()
+
+
+def download_service_docs() -> bool:
+    """Fetch the store from S3 into REASON_CODE_DOCS_DIR. True when a new copy
+    is in place.
+
+    The way `docs_loader.download_corpus` fetches the DROA corpus, with one
+    addition: the downloaded store is validated before it replaces the one on
+    disk. A download that fails, finds nothing, or does not validate changes
+    nothing -- the last good copy keeps serving -- and is logged. Never raises:
+    a documentation problem must not take the API down.
     """
-    logger.info("Reason-code document download is not wired up; using the "
-                "files on disk", prefix=s3_prefix(), directory=str(_root()))
-    return False
+    if not s3_download_enabled():
+        logger.info("Reason-code document download is off; using the files on "
+                    "disk", directory=str(_root()))
+        return False
+    bucket = _s3_bucket()
+    if not bucket:
+        logger.warning("Reason-code document download is on, but no S3 bucket "
+                       "is configured (CASEBOOK_S3_BUCKET or S3_LOGS_BUCKET)")
+        return False
+    with _download_lock:
+        try:
+            return _download(bucket)
+        except Exception as error:  # noqa: BLE001 - the contract is "never raises"
+            logger.warning("Reason-code document download failed; keeping the "
+                           "files on disk", error=f"{type(error).__name__}: {error}")
+            return False
+
+
+def _download(bucket: str) -> bool:
+    import shutil
+
+    prefix = s3_prefix()
+    listed = f"{prefix}/" if prefix else ""
+    root = _root()
+    staging = root.parent / f".{root.name}.download"
+    if staging.exists():
+        shutil.rmtree(staging)
+    (staging / SERVICES_DIRNAME).mkdir(parents=True)
+
+    try:
+        client = _s3_client()
+        count = 0
+        for page in client.get_paginator("list_objects_v2").paginate(
+                Bucket=bucket, Prefix=listed):
+            for item in page.get("Contents", []):
+                match = _S3_SERVICE_KEY.match(item["Key"][len(listed):])
+                if not match:
+                    continue
+                target = staging / SERVICES_DIRNAME / f"{match.group(1)}.json"
+                if target.exists():
+                    raise ReasonCodeDocError(
+                        f"two objects under {listed or 'the bucket root'} are "
+                        f"both {target.name}")
+                body = client.get_object(Bucket=bucket, Key=item["Key"])["Body"].read()
+                target.write_bytes(body)
+                count += 1
+
+        if count == 0:
+            logger.warning("Reason-code document download found no service files; "
+                           "keeping the files on disk", bucket=bucket, prefix=prefix)
+            return False
+
+        errors, warnings = validate(root=staging)
+        for warning in warnings:
+            logger.warning("Downloaded reason-code documentation warning",
+                           detail=warning)
+        if errors:
+            logger.error("Downloaded reason-code documentation failed validation; "
+                         "keeping the files on disk", errors=errors)
+            return False
+
+        _swap_in(staging / SERVICES_DIRNAME, root)
+        logger.info("Reason-code documentation downloaded", files=count,
+                    bucket=bucket, prefix=prefix, directory=str(root))
+        return True
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+def _swap_in(new_services, root) -> None:
+    """Put a validated `services/` in place, keeping the old one until the new
+    one is there. Two renames on one filesystem: a lookup between them finds
+    no files and reads as a miss, which `lookup` already survives."""
+    import shutil
+
+    root.mkdir(parents=True, exist_ok=True)
+    current = root / SERVICES_DIRNAME
+    previous = root / f".{SERVICES_DIRNAME}.previous"
+    if previous.exists():
+        shutil.rmtree(previous)
+    if current.exists():
+        current.rename(previous)
+    try:
+        new_services.rename(current)
+    except Exception:
+        if previous.exists() and not current.exists():
+            previous.rename(current)
+        raise
+    shutil.rmtree(previous, ignore_errors=True)
+
+
+def docs_available() -> bool:
+    """Whether /ready may pass as far as this store is concerned.
+
+    Always, unless the download is on and there is no copy on disk yet. A
+    copy already there -- from an earlier run or a refresh -- serves while a
+    new one is fetched, so a refresh never makes a ready pod unready.
+    """
+    if not s3_download_enabled():
+        return True
+    try:
+        return bool(_service_files(_root()))
+    except ReasonCodeDocError:
+        return False
+
+
+def start_background_download():
+    """Fetch the store now, off the caller's thread, and again every
+    REASON_CODE_DOCS_REFRESH_SECONDS when that is set. Returns the thread, or
+    None when the download is off."""
+    import time
+
+    if not s3_download_enabled():
+        return None
+
+    def run():
+        download_service_docs()
+        while refresh_seconds() > 0:
+            time.sleep(refresh_seconds())
+            download_service_docs()
+
+    thread = threading.Thread(target=run, name="reason-code-docs-download",
+                              daemon=True)
+    thread.start()
+    return thread
 
 
 def _root(root=None):
@@ -180,11 +347,13 @@ def _root(root=None):
 # Enrolment types
 # ======================================================================
 
-def normalize_doc_type(raw) -> Optional[str]:
+def normalize_doc_type(raw, families: Optional[dict] = None) -> Optional[str]:
     """The enrolment-type family a raw payload value belongs to (D4).
 
-    `N`, `E`, `ENROLMENT` and `ENROLLMENT` give `E`; `U` and `UPDATE` give
-    `U`; another value that looks like a type code is used as-is (`Z`);
+    `families` is a service pack's own map ({RAW OR ALIAS: family}, keys
+    upper-case) and is consulted first. Without it, or for a value it does not
+    name: `N`, `E`, `ENROLMENT` and `ENROLLMENT` give `E`; `U` and `UPDATE`
+    give `U`; another value that looks like a type code is used as-is (`Z`);
     anything else, including a missing value, gives None and can therefore
     only match ANY.
     """
@@ -193,6 +362,8 @@ def normalize_doc_type(raw) -> Optional[str]:
     text = str(raw).strip().upper()
     if not text:
         return None
+    if families and text in families:
+        return families[text]
 
     # Imported here rather than at module scope: tool_registry pulls in the
     # DB layer, the log pipeline and the LangChain tool decorators, and this
@@ -205,14 +376,15 @@ def normalize_doc_type(raw) -> Optional[str]:
     return text if _RAW_TYPE_PATTERN.match(text) else None
 
 
-def _rule_enrolment_type(condition_description: str) -> Optional[str]:
+def _rule_enrolment_type(condition_description: str,
+                         families: Optional[dict] = None) -> Optional[str]:
     """The type a CRE rule applies to, or None when it applies to every type.
 
     A condition that somehow names two different types is treated as naming
     none: including it everywhere is the safe reading, because the rule
     demonstrably fires for more than one.
     """
-    found = {normalize_doc_type(name)
+    found = {normalize_doc_type(name, families)
              for name in _RULE_TYPE_PATTERN.findall(condition_description or "")}
     found.discard(None)
     return found.pop() if len(found) == 1 else None
@@ -254,6 +426,33 @@ def _load_service_file(path) -> dict:
     if not isinstance(document, dict):
         raise ReasonCodeDocError(
             f"{path.name} holds a {type(document).__name__}, not an object.")
+    return document
+
+
+#: Parsed service files, {path: ((mtime, size), document)}. Every lookup used
+#: to re-read and re-parse every file, which with one file per service is a
+#: dozen parses per packet. Keyed on the file's mtime and size, so an edited
+#: or replaced file is parsed again -- the store keeps the property that an
+#: edit takes effect without a restart (MULTI_SERVICE_PLAN.md D10). Callers
+#: only read the documents; nothing may mutate one.
+_parsed_cache: dict = {}
+_parsed_lock = threading.Lock()
+
+
+def _parsed(path) -> dict:
+    try:
+        stat = path.stat()
+    except OSError as error:
+        raise ReasonCodeDocError(f"{path.name} could not be read: {error}") from error
+    signature = (stat.st_mtime_ns, stat.st_size)
+    key = str(path)
+    with _parsed_lock:
+        cached = _parsed_cache.get(key)
+    if cached is not None and cached[0] == signature:
+        return cached[1]
+    document = _load_service_file(path)
+    with _parsed_lock:
+        _parsed_cache[key] = (signature, document)
     return document
 
 
@@ -310,7 +509,7 @@ def _code_entry(document: dict, source: str, code: dict) -> dict:
     }
 
 
-def _rule_entry(source: str, rule: dict) -> dict:
+def _rule_entry(source: str, rule: dict, families: Optional[dict] = None) -> dict:
     """One `rules.rules[]` entry as a documentation block.
 
     The rule's `description` is its `condition_description` wrapped in
@@ -328,7 +527,7 @@ def _rule_entry(source: str, rule: dict) -> dict:
     else:
         outcome = description
 
-    enrolment_type = _rule_enrolment_type(condition)
+    enrolment_type = _rule_enrolment_type(condition, families)
     scope = (f"enrolment type {enrolment_type}" if enrolment_type
              else "all enrolment types")
     body = [
@@ -347,35 +546,126 @@ def _rule_entry(source: str, rule: dict) -> dict:
     }
 
 
-def _entries_for(root, reason_code: str) -> list:
-    """Every documentation block any service publishes for this reason code."""
+def _file_entries(path, reason_code: str, families: Optional[dict] = None) -> list:
+    """The documentation blocks one service file publishes for this code."""
+    document = _parsed(path)
+    source = f"{SERVICES_DIRNAME}/{path.name}"
     entries = []
-    for path in _service_files(root):
-        document = _load_service_file(path)
-        source = f"{SERVICES_DIRNAME}/{path.name}"
-        for code in document.get("codes") or []:
-            if isinstance(code, dict) and code.get("reason_code") == reason_code:
-                entries.append(_code_entry(document, source, code))
-        rules = document.get("rules") or {}
-        for rule in (rules.get("rules") or []) if isinstance(rules, dict) else []:
-            if isinstance(rule, dict) and rule.get("reject_reason_code") == reason_code:
-                entries.append(_rule_entry(source, rule))
+    for code in document.get("codes") or []:
+        if isinstance(code, dict) and code.get("reason_code") == reason_code:
+            entries.append(_code_entry(document, source, code))
+    rules = document.get("rules") or {}
+    for rule in (rules.get("rules") or []) if isinstance(rules, dict) else []:
+        if isinstance(rule, dict) and rule.get("reject_reason_code") == reason_code:
+            entries.append(_rule_entry(source, rule, families))
     return entries
+
+
+# ======================================================================
+# Which services document a code (MULTI_SERVICE_PLAN.md D1)
+# ======================================================================
+#
+# The last-resort way of telling which service a packet belongs to: a reason
+# code that exactly one service's file documents. A file is named after its
+# service, so the answer is the file's stem.
+
+#: Store root -> (signature, {reason_code: stems}). The signature is every
+#: service file's (name, mtime, size), so an edited, added or removed file
+#: rebuilds the index while an unchanged store is not re-parsed per packet.
+_code_index_cache: dict = {}
+_code_index_lock = threading.Lock()
+
+
+def _codes_in(document: dict) -> set:
+    """Every reason code a service file publishes, from codes[] and rules[]."""
+    codes = set()
+    for code in document.get("codes") or []:
+        if isinstance(code, dict) and isinstance(code.get("reason_code"), str):
+            codes.add(code["reason_code"])
+    rules = document.get("rules") or {}
+    for rule in (rules.get("rules") or []) if isinstance(rules, dict) else []:
+        if isinstance(rule, dict) and isinstance(rule.get("reject_reason_code"), str):
+            codes.add(rule["reject_reason_code"])
+    return codes
+
+
+def _code_index(root) -> dict:
+    files = _service_files(root)
+    signature = tuple((path.name, path.stat().st_mtime_ns, path.stat().st_size)
+                      for path in files)
+    key = str(root)
+    with _code_index_lock:
+        cached = _code_index_cache.get(key)
+    if cached is not None and cached[0] == signature:
+        return cached[1]
+
+    index: dict = {}
+    for path in files:
+        for code in _codes_in(_parsed(path)):
+            index.setdefault(code, set()).add(path.stem)
+    frozen = {code: tuple(sorted(stems)) for code, stems in index.items()}
+    with _code_index_lock:
+        _code_index_cache[key] = (signature, frozen)
+    return frozen
+
+
+def services_for_code(reason_code, root=None) -> tuple:
+    """The stems of the service files that document `reason_code`, sorted.
+
+    Never raises, for the same reason `lookup` does not: an unreadable store
+    costs the caller one way of resolving a packet's service, never the
+    packet. Any failure is logged and reads as "no service documents it".
+    """
+    if not reason_code:
+        return ()
+    try:
+        return _code_index(_root(root)).get(str(reason_code), ())
+    except Exception as error:  # noqa: BLE001 - the contract is "never raises"
+        logger.warning("Could not index the reason-code documentation by code",
+                       error=f"{type(error).__name__}: {error}")
+        return ()
+
+
+def documented_services(root=None) -> tuple:
+    """The stem of every service file in the store, sorted. Never raises."""
+    try:
+        return tuple(path.stem for path in _service_files(_root(root)))
+    except Exception as error:  # noqa: BLE001 - the contract is "never raises"
+        logger.warning("Could not list the reason-code documentation files",
+                       error=f"{type(error).__name__}: {error}")
+        return ()
 
 
 # ======================================================================
 # Rendering
 # ======================================================================
 
-def _render(reason_code: str, matched_type: str, entries: list):
+#: Said above entries taken from other services' files, because the packet's
+#: own service documents nothing for its code (MULTI_SERVICE_PLAN.md D10).
+OTHER_SERVICE_NOTE = (
+    "[Not documented by {service}. The entries below come from other "
+    "services' documentation: the code may be raised from a shared library "
+    "those services use, or this packet may have been placed in the wrong "
+    "service. Weigh them with that in mind.]")
+
+
+def _type_label(matched_type: str, type_labels: Optional[dict]) -> str:
+    if matched_type != ANY and type_labels and type_labels.get(matched_type):
+        return type_labels[matched_type]
+    return _TYPE_DISPLAY.get(matched_type, f"enrolment type {matched_type}")
+
+
+def _render(reason_code: str, matched_type: str, entries: list,
+            type_labels: Optional[dict] = None, note: Optional[str] = None):
     """The exact text the model is shown, and whether it had to be cut.
 
     Each block is attributed, so a claim in an investigation can be traced to
-    the service file and entry it came from.
+    the service file and entry it came from. `type_labels` are the packet's
+    service pack's words for its enrolment types; `note` opens the text when
+    the entries are not the packet's own service's.
     """
-    header = (f"# {reason_code} -- "
-              f"{_TYPE_DISPLAY.get(matched_type, f'enrolment type {matched_type}')}")
-    blocks = [header]
+    header = f"# {reason_code} -- {_type_label(matched_type, type_labels)}"
+    blocks = [header] + ([note] if note else [])
     for entry in entries:
         blocks.append(f"[Source: {entry['source']}, {entry['kind']} "
                       f"{entry['ref']}]\n{entry['body']}")
@@ -438,10 +728,20 @@ def _state(outcome: str, reason_code=None, requested_type=None, detail=None) -> 
         "refs": [],
         "text": None,
         "sha256": None,
+        "entries_sha256": None,
         "truncated": False,
         "resolution_guidance": [],
         "detail": detail,
+        "scope": None,
     }
+
+
+#: Where a hit's entries came from (MULTI_SERVICE_PLAN.md D10): the packet's
+#: own service's file, other services' files because its own documents
+#: nothing for the code, or every file because no service was named.
+SCOPE_OWN = "own"
+SCOPE_OTHER_SERVICE = "other_service"
+SCOPE_ALL = "all"
 
 
 def error_state(reason_code=None, detail=None) -> dict:
@@ -455,8 +755,17 @@ def error_state(reason_code=None, detail=None) -> dict:
     return _state("error", reason_code, None, detail)
 
 
-def lookup(reason_code, raw_enrolment_type, root=None) -> dict:
+def lookup(reason_code, raw_enrolment_type, root=None, service_file=None,
+           type_labels=None, type_families=None) -> dict:
     """The documentation for one packet, as the state shape in 5.7.
+
+    `service_file` is the stem of the packet's own service's file
+    (MULTI_SERVICE_PLAN.md D10). Its entries are used when it has any for the
+    code; only when it has none are the other files' entries used, under a
+    note saying whose they are. Without a `service_file`, every file's
+    entries are used together, as before services were known. `type_labels`
+    and `type_families` are the service pack's enrolment-type words and
+    families; without them the neutral defaults apply.
 
     Never raises: the caller is a graph node, and a documentation problem is
     a degraded prompt, not a failed packet.
@@ -471,8 +780,25 @@ def lookup(reason_code, raw_enrolment_type, root=None) -> dict:
         if not REASON_CODE_PATTERN.match(reason_code):
             return _state("miss", reason_code, detail="invalid reason code")
 
-        requested_type = normalize_doc_type(raw_enrolment_type)
-        entries = _entries_for(_root(root), reason_code)
+        requested_type = normalize_doc_type(raw_enrolment_type, type_families)
+        files = _service_files(_root(root))
+        note = None
+        if service_file is None:
+            scope = SCOPE_ALL
+            entries = [entry for path in files
+                       for entry in _file_entries(path, reason_code)]
+        else:
+            scope = SCOPE_OWN
+            entries = [entry for path in files if path.stem == service_file
+                       for entry in _file_entries(path, reason_code, type_families)]
+            if not entries:
+                # The service's own file says nothing about this code: not
+                # "documented, but not for this enrolment type", which stays
+                # a miss below.
+                scope = SCOPE_OTHER_SERVICE
+                note = OTHER_SERVICE_NOTE.format(service=service_file)
+                entries = [entry for path in files if path.stem != service_file
+                           for entry in _file_entries(path, reason_code)]
         if not entries:
             return _state("miss", reason_code, requested_type)
 
@@ -489,7 +815,8 @@ def lookup(reason_code, raw_enrolment_type, root=None) -> dict:
         if not selected:
             return _state("miss", reason_code, requested_type)
 
-        text, truncated = _render(reason_code, matched_type, selected)
+        text, truncated = _render(reason_code, matched_type, selected,
+                                  type_labels=type_labels, note=note)
         if truncated:
             logger.warning("Reason-code documentation was truncated",
                            reason_code=reason_code, matched_type=matched_type,
@@ -503,13 +830,35 @@ def lookup(reason_code, raw_enrolment_type, root=None) -> dict:
                      for e in selected],
             "text": text,
             "sha256": "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "entries_sha256": entries_digest(selected),
             "truncated": truncated,
             "resolution_guidance": parse_resolution_guidance(text),
             "detail": None,
+            "scope": scope,
         }
     except Exception as error:  # noqa: BLE001 - the contract is "never raises"
         return _state("error", reason_code if reason_code else None,
                       requested_type, f"{type(error).__name__}: {error}")
+
+
+def entries_digest(entries: list) -> str:
+    """SHA256 over the selected entries themselves: where each came from and
+    what it says, not the rendered text around them.
+
+    What a runbook of a service with no rules table is bound to
+    (MULTI_SERVICE_PLAN.md D11). The rendered text also carries the title
+    line, whose enrolment-type label comes from the service pack, and the
+    note heading another service's entries; hashing that would make every
+    runbook stale whenever a pack's label was reworded.
+    """
+    import hashlib
+
+    canonical = json.dumps(
+        [{"source": e["source"], "kind": e["kind"], "ref": e["ref"],
+          "enrolment_type": e["enrolment_type"], "body": e["body"]}
+         for e in entries],
+        sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def provenance(doc_state) -> Optional[dict]:
@@ -530,6 +879,9 @@ def provenance(doc_state) -> Optional[dict]:
         "sha256": doc_state.get("sha256"),
         "truncated": doc_state.get("truncated", False),
         "detail": doc_state.get("detail"),
+        # own, other_service or all: whether the text was this packet's own
+        # service's documentation (MULTI_SERVICE_PLAN.md D10).
+        "scope": doc_state.get("scope"),
     }
 
 
@@ -733,7 +1085,7 @@ def validate(root=None, coverage: bool = False):
                       f"expected at least one <service>.json.")
         return errors, warnings
 
-    services, published, skipped = {}, {}, set()
+    services, published, by_file, skipped = {}, {}, [], set()
     for path in files:
         entries = _validate_file(path, errors, warnings, skipped)
         try:
@@ -745,30 +1097,43 @@ def validate(root=None, coverage: bool = False):
                 errors.append(f"{path.name}: service {service!r} is already "
                               f"declared by {services[service]}.")
             services[service] = path.name
-        for reason_code, types in entries.items():
-            published.setdefault(reason_code, set()).update(types)
+            # The file name is how a packet's service finds its own
+            # documentation (MULTI_SERVICE_PLAN.md D10). A file named after
+            # anything else would be read as another service's.
+            if service != path.stem:
+                errors.append(f"{path.name}: 'service' is {service!r}, but a "
+                              f"file must be named after its service "
+                              f"({service}.json).")
+        by_file.append((path, entries))
+        # Per file: a runbook is checked against its own service's
+        # documentation, not against every service's.
+        published[path.stem] = set(entries)
 
-    # Render every reason code the store publishes, for every type it could be
-    # asked about, and check the text a model would actually be shown. A file
-    # whose fields are individually fine can still render a document that is
-    # over the cap or that carries a date.
-    for reason_code, types in sorted(published.items()):
-        candidates = sorted(t for t in types if t) or [ANY]
-        for requested in candidates:
-            state = lookup(reason_code, requested, root=store)
-            label = f"{reason_code} [{requested}]"
-            if state["outcome"] == "error":
-                errors.append(f"{label}: {state['detail']}")
-                continue
-            if state["outcome"] != "hit":
-                errors.append(f"{label}: the store publishes this reason code "
-                              f"but the lookup returned {state['outcome']!r}.")
-                continue
-            if state["truncated"]:
-                errors.append(f"{label}: the rendered documentation exceeds "
-                              f"REASON_CODE_DOC_MAX_CHARS ({max_chars()}).")
-            _check_content(label, state["text"], errors)
-            _check_guidance(label, state["text"], errors)
+    # Render every reason code each file publishes, for every type it could be
+    # asked about, and check the text a model would actually be shown: the
+    # file's own entries, as a packet of that service sees them. A file whose
+    # fields are individually fine can still render a document that is over
+    # the cap or that carries a date.
+    for path, entries in by_file:
+        for reason_code, types in sorted(entries.items()):
+            candidates = sorted(t for t in types if t) or [ANY]
+            for requested in candidates:
+                state = lookup(reason_code, requested, root=store,
+                               service_file=path.stem)
+                label = f"{path.name} {reason_code} [{requested}]"
+                if state["outcome"] == "error":
+                    errors.append(f"{label}: {state['detail']}")
+                    continue
+                if state["outcome"] != "hit":
+                    errors.append(f"{label}: the store publishes this reason "
+                                  f"code but the lookup returned "
+                                  f"{state['outcome']!r}.")
+                    continue
+                if state["truncated"]:
+                    errors.append(f"{label}: the rendered documentation exceeds "
+                                  f"REASON_CODE_DOC_MAX_CHARS ({max_chars()}).")
+                _check_content(label, state["text"], errors)
+                _check_guidance(label, state["text"], errors)
 
     if coverage:
         _check_coverage(published, warnings)
@@ -781,14 +1146,22 @@ def _check_coverage(published: dict, warnings: list) -> None:
 
     A runbook is a stored answer for a code the pipeline meets often, so a
     code with one and no documentation is the next document worth having.
+    `published` is {file stem: reason codes it documents}; each service's
+    runbooks are checked against that service's own file
+    (MULTI_SERVICE_PLAN.md D10, D11).
     """
-    from src.utils.runbook_store import RUNBOOK_DRAFT_DIR, RUNBOOK_FINAL_DIR
+    from src.utils import runbook_store, service_registry
 
-    for directory in (RUNBOOK_FINAL_DIR, RUNBOOK_DRAFT_DIR):
+    registry = service_registry.load()
+    for directory in (runbook_store.RUNBOOK_FINAL_DIR, runbook_store.RUNBOOK_DRAFT_DIR):
         if not directory.is_dir():
             continue
-        for path in sorted(directory.glob("*.json")):
+        for path in runbook_store._service_runbooks(directory):
+            service = runbook_store.service_of_path(path)
+            found = registry.packs.get(service)
+            stem = found.reason_code_docs_file if found else service
             reason_code = path.stem.rsplit("__", 1)[0]
-            if reason_code not in published:
+            if reason_code not in published.get(stem, ()):
                 warnings.append(f"{reason_code} has a runbook ({directory.name}/"
-                                f"{path.name}) but no documentation.")
+                                f"{service}/{path.name}) but no documentation "
+                                f"in {SERVICES_DIRNAME}/{stem}.json.")

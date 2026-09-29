@@ -103,6 +103,10 @@ ISOLATED_ENV_VARS = (
     "REJECTION_REASON_CODE_DOCS_ENABLED",
     "REASON_CODE_DOCS_DIR",
     "REASON_CODE_DOCS_S3_PREFIX",
+    # The download: on, it makes the store come from S3 and /ready wait for
+    # it, so a stray value would have tests reaching for a bucket.
+    "REASON_CODE_DOCS_S3_DOWNLOAD",
+    "REASON_CODE_DOCS_REFRESH_SECONDS",
     # A cap rather than a tunable: below a document's length it switches
     # truncation on, so a stray value changes which branch runs.
     "REASON_CODE_DOC_MAX_CHARS",
@@ -114,6 +118,42 @@ ISOLATED_ENV_VARS = (
     # guard for the whole session or make every live claim look abandoned.
     "PACKET_CLAIM_ENABLED",
     "PACKET_CLAIM_TTL_SECONDS",
+    # Agent tools: the process DB toolset's switch (the `process` database of
+    # agent_tools/_database.py; another key's AGENT_DB_<KEY>_ENABLED names a
+    # database no shipped tool reads), the MCP tool servers the
+    # agents use (and whether the API runs its own), and the per-role
+    # selections. Each decides which tools a built agent is offered, and so
+    # what its system prompt says; AGENT_MCP_SERVE also decides whether a
+    # tool server process is started at all.
+    "PROCESS_DB_ENABLED",
+    "AGENT_MCP_SERVE",
+    "AGENT_MCP_SERVERS",
+    "AGENT_MCP_HOST",
+    "AGENT_MCP_PORT",
+    "AGENT_TOOLS_INVESTIGATOR",
+    "AGENT_TOOLS_REVIEWER",
+    "AGENT_TOOLS_SYNTHESIS",
+    "AGENT_TOOLS_LOG_FILTER",
+    "AGENT_TOOLS_DLT_INVESTIGATOR",
+    "AGENT_TOOLS_DLT_REVIEWER",
+    "AGENT_TOOLS_DLT_SYNTHESIS",
+    # Undeclared tools treated as tools for every service: widens what every
+    # service's agents are offered.
+    "AGENT_TOOLS_COMMON",
+    # The service registry and the intake gate. The directory selects which
+    # packs exist; the other four decide whether a packet is analysed at all,
+    # and the pilot list also whether its Synthesis may stage a replay.
+    "SERVICE_PACKS_DIR",
+    "REJECTION_SERVICE_GATE",
+    "REJECTION_SERVICES_ENABLED",
+    "REJECTION_SERVICES_PILOT",
+    "REJECTION_UNRESOLVED_SERVICE",
+    # The DLT lane's own gate (Phase 8): whether a dead-lettered record of a
+    # service is analysed, and with which pack.
+    "DLT_SERVICE_GATE",
+    "DLT_SERVICES_ENABLED",
+    # A cap: below a pack's size it turns the pack into a boot error.
+    "SERVICE_PACK_MAX_CHARS",
     # LLM provider selection.
     "USE_HF",
     "MOCK_LLM_WITH_MISTRAL",
@@ -131,6 +171,8 @@ TEST_ENV_DEFAULTS = {
     "USE_MOCK_DB": "true",
     "CASEBOOK_STORAGE_BACKEND": "local",
     "CHECKPOINT_BACKEND": "sqlite",
+    # No tool server process unless a test starts one (tests/mcp_fixtures.py).
+    "AGENT_MCP_SERVE": "false",
 }
 
 
@@ -173,3 +215,69 @@ def hermetic_env():
         os.environ.setdefault(name, value)
 
     yield
+
+
+@pytest.fixture(autouse=True)
+def fresh_service_registry():
+    """Each test reads the service packs it points at, not a registry an
+    earlier test loaded and the process kept."""
+    from src.utils import service_registry
+
+    service_registry.reset()
+    yield
+    service_registry.reset()
+
+
+@pytest.fixture(autouse=True)
+def fresh_tool_catalog():
+    """Each test lists the tool servers it configures, not an earlier test's."""
+    from src.tools import mcp_client
+
+    mcp_client.reset()
+    yield
+    mcp_client.reset()
+
+
+@pytest.fixture
+def tool_server(monkeypatch):
+    """Start the real agent tool server over HTTP, in this process.
+
+    Yields a function: call it -- after registering any probe tools, since the
+    server serves what is registered when it starts -- to start a server on a
+    free loopback port and point AGENT_MCP_SERVERS at it. It returns the URL.
+    In-process so a test can patch what the tools read (a SQLite engine for
+    the process DB) and so every server stops with the test.
+    """
+    import json
+    import socket
+    import threading
+    import time
+
+    import uvicorn
+
+    from src.tools.mcp_server import build_app
+
+    started = []
+
+    def start(name: str = "agent_tools") -> str:
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        server = uvicorn.Server(uvicorn.Config(build_app("127.0.0.1"), host="127.0.0.1",
+                                               port=port, log_level="warning", ws="none"))
+        thread = threading.Thread(target=server.run, daemon=True)
+        thread.start()
+        deadline = time.monotonic() + 10
+        while not server.started:
+            if time.monotonic() > deadline or not thread.is_alive():
+                raise RuntimeError("the test tool server did not start")
+            time.sleep(0.02)
+        started.append((server, thread))
+        url = f"http://127.0.0.1:{port}/mcp"
+        monkeypatch.setenv("AGENT_MCP_SERVERS", json.dumps({name: {"url": url}}))
+        return url
+
+    yield start
+    for server, thread in started:
+        server.should_exit = True
+        thread.join(timeout=10)

@@ -54,7 +54,7 @@ class ElasticLogSource:
         started = time.monotonic()
         diagnostics: dict = {}
         raw_logs = es_breaker.call(fetch_logs, identifier, catalog=ctx.catalog,
-                                   out_diagnostics=diagnostics)
+                                   out_diagnostics=diagnostics, apps=ctx.apps)
         latency_ms = (time.monotonic() - started) * 1000.0
 
         records = self._stamp_source(raw_logs or [])

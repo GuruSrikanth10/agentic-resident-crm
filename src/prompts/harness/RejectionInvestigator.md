@@ -3,6 +3,7 @@ Investigate the rejection for event {{event_id}}.
 Read these files for the case evidence:
 - local_casesheets/casebook_{{event_id}}/context.json (payload, enrolment type, DB rule)
 - local_casesheets/casebook_{{event_id}}/supported_logs.txt (the log trace — may be absent or incomplete)
+- local_casesheets/casebook_{{event_id}}/reason_code_doc.md (the reason code documentation — present only for a service with no rules database, and then it is the rule)
 
 ## Reasoning hierarchy
 
@@ -25,7 +26,8 @@ runtime logs were not available to corroborate it.
 
 Read context.json first. It contains:
 - The Kafka payload (eventId, packetMetaData, flowMetaData.stage, etc.)
-- The enrolment type (N or E = new enrolment, U = biometric update)
+- The enrolment type (what each type means for this packet's service is in the
+  SERVICE CONTEXT at the end of this task)
 - The DB rule configuration — this is the business rule that rejected the packet
 
 Then read supported_logs.txt if it exists. If it is absent, empty, or contains
@@ -33,6 +35,10 @@ Then read supported_logs.txt if it exists. If it is absent, empty, or contains
 
 ## STEP 2 — Discover which service(s) are involved
 
+- When the SERVICE CONTEXT at the end of this task names the service this
+  packet was placed in, start from that service's documentation. It was
+  placed there by its payload, not by guesswork; still follow the evidence if
+  it shows the failure involved another service.
 - List the available services: Glob docs_cache/*/docs/architecture/components.md
 - Read docs_cache/MANIFEST.json for the full service list with file counts
 - Identify the relevant service(s) from the evidence:

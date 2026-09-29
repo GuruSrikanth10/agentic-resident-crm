@@ -248,9 +248,11 @@ def test_every_payload_enrolment_code_has_one_description():
     two different descriptions of "U"."""
     import src.core.agent_orchestrator as orch
     from src.tools.tool_registry import _ENROLMENT_TYPE_ALIASES
+    from src.utils import service_registry
 
+    # One map now lives in the enu-biometric pack, and both paths read it.
     payload_codes = {code for code in _ENROLMENT_TYPE_ALIASES if len(code) == 1}
-    assert payload_codes <= set(orch.ENROLMENT_TYPE_DISPLAY)
+    assert payload_codes <= set(service_registry.enrolment_labels("enu-biometric"))
 
     def display(code):
         return orch.enrolment_type_display({"packetMetaData": {"enrolmentType": code}})
@@ -285,9 +287,9 @@ def _rejection_reviewer(monkeypatch, agent):
     import src.core.agent_orchestrator as orch
 
     monkeypatch.setattr(orch, "_agent", None)
-    monkeypatch.setattr(orch, "_prompt_fingerprint", orch._prompt_fingerprint)
+    monkeypatch.setattr(orch, "_prompt_fingerprints", orch._prompt_fingerprints)
     monkeypatch.setattr(orch, "get_llm", lambda _tier: MagicMock())
-    monkeypatch.setattr(orch, "create_react_agent", lambda *a, **k: agent)
+    monkeypatch.setattr(orch, "build_agent", lambda *a, **k: agent)
     monkeypatch.setattr(orch, "get_checkpointer", lambda: None)
     graph = orch._build_agent()
     return graph.builder.nodes["review"].runnable.func
@@ -299,7 +301,7 @@ def _dlt_reviewer(monkeypatch, agent):
 
     monkeypatch.setattr(dlt, "_agent", None)
     monkeypatch.setattr(dlt, "get_llm", lambda _tier: MagicMock())
-    monkeypatch.setattr(dlt, "create_react_agent", lambda *a, **k: agent)
+    monkeypatch.setattr(dlt, "build_agent", lambda *a, **k: agent)
     graph = dlt._build_dlt_agent()
     return graph.builder.nodes["review"].runnable.func
 
@@ -320,7 +322,7 @@ def _harness_on(monkeypatch, tmp_path, verdict):
     monkeypatch.setenv(opencode_runner.ENV_DISABLE, "true")
     monkeypatch.setattr(paths, "LOCAL_CASESHEETS_DIR", tmp_path)
     monkeypatch.setattr(opencode_runner, "run_task_json",
-                        lambda prompt, output_path, node=None: {
+                        lambda prompt, output_path, node=None, service=None: {
                             "result": verdict, "seconds": 0,
                             "trace": {"llm_calls": 1, "tools": {},
                                       "tokens": {}, "cost": 0.0,
@@ -382,6 +384,29 @@ def test_harness_reviewer_rule_reaches_the_validated_queue(monkeypatch, tmp_path
 
     assert result["reviewer_feedback"] == "wrong enrolment type"
     assert proposed == ["Always state the enrolment type."]
+
+
+def test_harness_reviewer_rule_keeps_its_scope(monkeypatch, tmp_path):
+    """The harness Reviewer's JSON carries the rule's scope, and the queue
+    records it as the direct Reviewer's tool does (MULTI_SERVICE_PLAN.md D11)."""
+    import json
+    import src.core.agent_orchestrator as orch
+
+    pending = tmp_path / "pending_rules.jsonl"
+    monkeypatch.setattr(orch, "PENDING_RULES_FILE", str(pending))
+    monkeypatch.setattr(orch, "validate_learning_rule", lambda text: [])
+    review = _rejection_reviewer(monkeypatch, _StubAgent())
+    _harness_on(monkeypatch, tmp_path, {
+        "verdict": "REJECTED",
+        "feedback": "no citation",
+        "learning_rule": {"rule_text": "Always cite the log line relied on.",
+                          "reasoning": "a claim had none", "scope": "generic"},
+    })
+
+    review(dict(_REJECTION_STATE))
+
+    [entry] = [json.loads(line) for line in pending.read_text().splitlines()]
+    assert entry["scope"] == "generic"
 
 
 def test_an_approval_proposes_no_rule(monkeypatch, tmp_path):

@@ -268,7 +268,8 @@ def lookup_rule_by_reason_code(reason_code: str) -> str:
 
 
 def lookup_rule_for(reason_code: str,
-                    enrolment_type: Optional[str] = None) -> Optional[list]:
+                    enrolment_type: Optional[str] = None,
+                    type_filter: Optional[dict] = None) -> Optional[list]:
     """Return the parsed rule rows for a reason code, filtered by enrolment type.
 
     Returns None when the lookup failed or matched nothing -- callers that
@@ -284,11 +285,12 @@ def lookup_rule_for(reason_code: str,
     a harmless re-export invalidated every runbook.
     """
     raw = _lookup_rule_json(reason_code)
-    return _parse_and_filter_rules(raw, enrolment_type)
+    return _parse_and_filter_rules(raw, enrolment_type, type_filter)
 
 
 def lookup_rule_text(reason_code: str,
-                     enrolment_type: Optional[str] = None) -> str:
+                     enrolment_type: Optional[str] = None,
+                     type_filter: Optional[dict] = None) -> str:
     """Return the LLM-facing rule text for a reason code.
 
     Falls back to the raw lookup string when it isn't parseable JSON, because
@@ -296,20 +298,26 @@ def lookup_rule_text(reason_code: str,
     code: X") that the Investigator should see rather than an empty prompt.
     """
     raw = _lookup_rule_json(reason_code)
-    filtered = _parse_and_filter_rules(raw, enrolment_type)
+    filtered = _parse_and_filter_rules(raw, enrolment_type, type_filter)
     if filtered is None:
         return raw
     return json.dumps(filtered)
 
 
 def _parse_and_filter_rules(raw: str,
-                            enrolment_type: Optional[str] = None) -> Optional[list]:
+                            enrolment_type: Optional[str] = None,
+                            type_filter: Optional[dict] = None) -> Optional[list]:
     """Parse the lookup's JSON-array string and filter it by enrolment type.
 
     A rule carrying no `enrolmentType` condition applies to every type and is
     always kept. If filtering would leave nothing, the unfiltered rows are
     returned instead -- a rule that matched the reason code is better evidence
     than no rule at all.
+
+    `type_filter` is the service pack's own {RAW TYPE: rules-table type}
+    (`rule_source.enrolment_type_filter`, MULTI_SERVICE_PLAN.md D6); without
+    one, `_ENROLMENT_TYPE_ALIASES` applies. A type the map does not name is
+    not filtered on.
     """
     if not raw or not raw.lstrip().startswith("["):
         return None
@@ -323,7 +331,11 @@ def _parse_and_filter_rules(raw: str,
     if not isinstance(rules, list) or not rules:
         return None
 
-    target_type = normalize_enrolment_type(enrolment_type)
+    if type_filter is not None:
+        target_type = (type_filter.get(str(enrolment_type).strip().upper())
+                       if enrolment_type else None)
+    else:
+        target_type = normalize_enrolment_type(enrolment_type)
     if not target_type:
         return rules
 
@@ -390,7 +402,8 @@ def _lookup_rule_by_reason_code_impl(reason_code: str) -> str:
 
 
 @retry_transient
-def fetch_logs_for(event_id: str, extra_identifiers: tuple = ()) -> Optional[str]:
+def fetch_logs_for(event_id: str, extra_identifiers: tuple = (),
+                   service: Optional[str] = None) -> Optional[str]:
     """Fetch and reduce logs from Elastic using the 6-stage log reduction pipeline.
 
     Stages:
@@ -414,13 +427,18 @@ def fetch_logs_for(event_id: str, extra_identifiers: tuple = ()) -> Optional[str
     Elasticsearch fallback was refused too. The fallback chain was disabled
     by exactly the failure it exists to absorb (G10). Each source now owns
     its own breaker, where the failure is attributable.
+
+    `service` is the pack whose logs are searched (`reduce_logs`); None
+    searches the environment's lists.
     """
     log = logger.bind(event_id=event_id)
-    log.info("Log fetch started", extra_identifiers=list(extra_identifiers or ()))
+    log.info("Log fetch started", extra_identifiers=list(extra_identifiers or ()),
+             service=service)
 
     try:
         from src.log_pipeline.pipeline import reduce_logs
-        return reduce_logs(event_id, extra_identifiers=extra_identifiers)
+        return reduce_logs(event_id, extra_identifiers=extra_identifiers,
+                           service=service)
     except pybreaker.CircuitBreakerError:
         log.error("Elasticsearch circuit breaker is open; failing fast", breaker="es_breaker")
         return None
@@ -429,7 +447,8 @@ def fetch_logs_for(event_id: str, extra_identifiers: tuple = ()) -> Optional[str
         return None
 
 
-def fetch_and_persist_logs(event_id: str, payload: dict) -> Optional[str]:
+def fetch_and_persist_logs(event_id: str, payload: dict,
+                           service: Optional[str] = None) -> Optional[str]:
     """Fetch logs for a payload and persist the result as `fetched_logs.txt`.
 
     The single implementation shared by `POST /fetch-logs` and
@@ -447,6 +466,10 @@ def fetch_and_persist_logs(event_id: str, payload: dict) -> Optional[str]:
     not be cached: the same reasoning `_is_uncacheable_result` applies to rule
     lookups above applies here -- caching a failure would suppress every
     later retry's chance to succeed once the underlying issue clears.
+
+    `service` is the service whose logs are searched, from
+    `scope.service_to_search` (MULTI_SERVICE_PLAN.md Phase 6); None searches
+    the environment's lists, as every fetch did before.
     """
     if not get_bool_env("ENABLE_LOG_FETCHING", False):
         logs = "Log fetching disabled."
@@ -455,7 +478,8 @@ def fetch_and_persist_logs(event_id: str, payload: dict) -> Optional[str]:
             value for value in identifiers_from_payload(payload)
             if value != event_id
         )
-        logs = fetch_logs_for(event_id, extra_identifiers=extra_identifiers)
+        logs = fetch_logs_for(event_id, extra_identifiers=extra_identifiers,
+                              service=service)
         if logs is None:
             return None
 
@@ -573,6 +597,9 @@ def _queue_pending_replay(packet_id: str, payload: dict) -> str:
                      error=f"{type(e).__name__}: {e}")
         return f"Failed to queue packet {packet_id}: {e}"
 
+# The tools the orchestrator hands to an agent explicitly. Tools an agent gets
+# by role -- the process DB lookups among them -- live in
+# src/tools/agent_tools and are discovered, not listed here.
 _TOOLS_MAP = {
     "lookup_resident_database": lookup_resident_database,
     "lookup_error_code": lookup_error_code,

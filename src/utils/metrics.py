@@ -68,17 +68,43 @@ def _gauge(name, documentation, labelnames=()):
 # Packet lifecycle -----------------------------------------------------
 PACKETS_TOTAL = _counter(
     "agentic_resident_crm_packets_total",
-    "Packets processed, by terminal status and resolution source.",
-    ("status", "resolution_source"),
+    "Packets processed, by terminal status, resolution source and the "
+    "service the packet belongs to (`unknown` when it exited before its "
+    "service was resolved).",
+    ("status", "resolution_source", "service"),
 )
 
 # Buckets run to 600s because an investigation is minutes, not milliseconds --
 # the prometheus defaults top out at 10s and would put every packet in +Inf.
 PACKET_DURATION = _histogram(
     "agentic_resident_crm_packet_duration_seconds",
-    "Wall-clock duration of a full investigation.",
-    ("resolution_source",),
+    "Wall-clock duration of a full investigation, by resolution source and "
+    "service.",
+    ("resolution_source", "service"),
     buckets=(1, 5, 15, 30, 60, 120, 180, 300, 450, 600, float("inf")),
+)
+
+# Services (MULTI_SERVICE_PLAN.md D1, D5) ----------------------------
+# The `service` label is bounded by the registry and the reason-code
+# documentation files: a resolution only ever names one of those, or
+# `_unresolved`, never a value copied from a payload.
+SERVICE_RESOLUTIONS = _counter(
+    "agentic_resident_crm_service_resolutions_total",
+    "Rejection packets whose service was resolved, by service, by how "
+    "(flow_stage, source_topic, reason_code_docs, none) and by whether the "
+    "reason-code documentation named a different service (conflict). A "
+    "rising `none` is a missing mapping; a rising conflict is a mapping or a "
+    "documentation file worth checking.",
+    ("service", "source", "conflict"),
+)
+
+REJECTIONS_SKIPPED = _counter(
+    "agentic_resident_crm_rejections_skipped_total",
+    "Rejection packets acknowledged without analysis because their service "
+    "is unresolved, unregistered or not enabled. Counted only with "
+    "REJECTION_SERVICE_GATE=enforce; in record mode the same decision is "
+    "logged instead.",
+    ("service", "reason"),
 )
 
 INVESTIGATOR_RETRIES = _histogram(
@@ -90,19 +116,20 @@ INVESTIGATOR_RETRIES = _histogram(
 RUNBOOK_LOOKUPS = _counter(
     "agentic_resident_crm_runbook_lookups_total",
     "Runbook lookups by outcome (hit, shadow, miss, no_reason_code, "
-    "fingerprint_mismatch, error). Every outcome is recorded, so the hit rate "
-    "has a denominator.",
-    ("outcome",),
+    "no_service, fingerprint_mismatch, binding_unavailable, error) and "
+    "service. Every outcome is recorded, so the hit rate has a denominator.",
+    ("outcome", "service"),
 )
 
 REASON_CODE_DOC_LOOKUPS = _counter(
     "agentic_resident_crm_reason_code_doc_lookups_total",
     "Reason-code document lookups by outcome (hit, miss, error, "
-    "no_reason_code, disabled) and by which enrolment type matched (exact, "
-    "any, none). The miss rate per reason code is what says which document "
-    "to write next, so every outcome is counted and the rate has a "
-    "denominator.",
-    ("outcome", "match"),
+    "no_reason_code, disabled), by which enrolment type matched (exact, "
+    "any, none), by the packet's service, and by which files answered "
+    "(own, other_service, all, none). The miss rate per reason code is what "
+    "says which document to write next, so every outcome is counted and the "
+    "rate has a denominator.",
+    ("outcome", "match", "service", "scope"),
 )
 
 REJECTION_PROMPT_TRIMS = _counter(
@@ -171,8 +198,9 @@ LLM_TOKENS = _counter(
 
 LLM_CALLS = _counter(
     "agentic_resident_crm_llm_calls_total",
-    "LLM invocations by agent node and outcome (ok, error, invalid, ...).",
-    ("node", "outcome"),
+    "LLM invocations by agent node, outcome (ok, error, invalid, ...) and "
+    "service. `unknown` for the DLT lane, which does not resolve services yet.",
+    ("node", "outcome", "service"),
 )
 
 # Circuit breakers ------------------------------------------------------
@@ -186,6 +214,24 @@ DLT_CASES = _counter(
     "agentic_resident_crm_dlt_cases_total",
     "Dead-lettered records processed, by failure class (A/B/C/U).",
     ("failure_class",),
+)
+
+DLT_SERVICE_RESOLUTIONS = _counter(
+    "agentic_resident_crm_dlt_service_resolutions_total",
+    "Dead-lettered records whose service was resolved (MULTI_SERVICE_PLAN.md "
+    "Phase 8), by service, by how (consumer_group, flow_stage, "
+    "original_topic, java_package, source_topic, reason_code_docs, none) and "
+    "by whether later evidence named a different service (conflict).",
+    ("service", "source", "conflict"),
+)
+
+DLT_SKIPPED = _counter(
+    "agentic_resident_crm_dlt_skipped_total",
+    "Dead-lettered records acknowledged without analysis because their "
+    "service is unresolved, unregistered or not in DLT_SERVICES_ENABLED. "
+    "Counted only with DLT_SERVICE_GATE=enforce; in record mode the same "
+    "decision is logged instead.",
+    ("service", "reason"),
 )
 
 DLT_CORROBORATION = _counter(
@@ -278,6 +324,22 @@ def record_packet_claim(outcome: str) -> None:
         PACKET_CLAIMS.labels(outcome=outcome).inc()
 
 
+def record_service_resolution(resolution: dict) -> None:
+    """Count one freshly computed resolution -- not a stored one read back,
+    or a packet passing through both stages would be counted twice."""
+    resolution = resolution or {}
+    SERVICE_RESOLUTIONS.labels(
+        service=str(resolution.get("service") or "unknown"),
+        source=str(resolution.get("source") or "none"),
+        conflict="true" if resolution.get("conflict") else "false",
+    ).inc()
+
+
+def record_rejection_skipped(service: Optional[str], reason: Optional[str]) -> None:
+    REJECTIONS_SKIPPED.labels(service=service or "unknown",
+                              reason=reason or "unknown").inc()
+
+
 def record_dlt_claim(outcome: str) -> None:
     if DLT_CLAIMS is not None:
         DLT_CLAIMS.labels(outcome=outcome).inc()
@@ -291,6 +353,20 @@ def record_dlt_singleflight(outcome: str) -> None:
 def record_dlt_per_code_violation(pattern: str) -> None:
     if DLT_PER_CODE_VIOLATIONS is not None:
         DLT_PER_CODE_VIOLATIONS.labels(pattern=pattern).inc()
+
+
+def record_dlt_service_resolution(resolution: dict) -> None:
+    """Count one freshly computed DLT resolution, as for the rejection lane."""
+    resolution = resolution or {}
+    DLT_SERVICE_RESOLUTIONS.labels(
+        service=str(resolution.get("service") or "unknown"),
+        source=str(resolution.get("source") or "none"),
+        conflict="true" if resolution.get("conflict") else "false",
+    ).inc()
+
+
+def record_dlt_skipped(service: Optional[str], reason: Optional[str]) -> None:
+    DLT_SKIPPED.labels(service=service or "unknown", reason=reason or "unknown").inc()
 
 
 def record_dlt_case(failure_class: str) -> None:
@@ -351,15 +427,31 @@ def sample_breaker_states() -> None:
     Sampled on scrape rather than pushed on transition: pybreaker has no
     transition hook we control from here, and a breaker that resets on a
     timeout would otherwise leave a stale "open" reading behind.
+
+    The agent tools' databases each have their own breaker
+    (`src/tools/agent_tools/_database.py`), labelled `process_db_breaker` or
+    `agent_db_<key>_breaker`; they are the ones declared in this process. The
+    tools themselves run in the tool server, so a breaker sampled in the API
+    process reports this process's own calls -- the in-process CLI and tests
+    -- not the tool server's.
     """
     try:
+        import sys
+
         from src.utils import resilience
 
+        breakers = {}
         for name in ("db_breaker", "es_breaker", "llm_breaker", "k8s_breaker",
                      "bitbucket_breaker"):
             breaker = getattr(resilience, name, None)
-            if breaker is None:
-                continue
+            if breaker is not None:
+                breakers[name] = breaker
+        # Only when the tool modules are already loaded: sampling must not be
+        # what imports them.
+        database = sys.modules.get("src.tools.agent_tools._database")
+        if database is not None:
+            breakers.update(database.breakers())
+        for name, breaker in breakers.items():
             state = str(getattr(breaker, "current_state", "closed"))
             BREAKER_STATE.labels(breaker=name).set(
                 _BREAKER_STATE_VALUES.get(state, 0)

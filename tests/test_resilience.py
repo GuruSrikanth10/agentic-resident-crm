@@ -62,7 +62,7 @@ def test_loop_guard_max_retries():
         {"messages": [MagicMock(content="REJECTED: Needs fix")]},   # Reviewer run 3 (triggers escalate node)
     ]
     
-    with patch("src.core.agent_orchestrator.create_react_agent", return_value=mock_agent_instance):
+    with patch("src.core.agent_orchestrator.build_agent", return_value=mock_agent_instance):
         with patch("src.core.agent_orchestrator._agent", None):
             asyncio.run(process_rejection(MessagePayload(**DUMMY_PAYLOAD)))
             

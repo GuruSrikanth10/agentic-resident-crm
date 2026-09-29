@@ -24,7 +24,10 @@ def _isolated_store(tmp_path, monkeypatch):
 
 def _terminal_casebook(storage, event_id, reason_code="RC_1", packet_type="U"):
     storage.save(event_id, {
-        "packet_metadata": {"eid": event_id, "packet_type": packet_type},
+        # Every casebook since MULTI_SERVICE_PLAN.md Phase 1 records its
+        # service; build_runbooks groups by it.
+        "packet_metadata": {"eid": event_id, "packet_type": packet_type,
+                            "service": "enu-biometric"},
         "packet_status": {
             "status": "COMPLETED",
             "rejection_data": {"rejection_code": reason_code},
@@ -90,6 +93,7 @@ def test_build_runbooks_groups_casebooks_from_storage():
         _terminal_casebook(storage, f"evt-rb-{index}", reason_code="RC_SHARED")
 
     args = MagicMock()
+    args.service = None
     args.reason_code = None
     args.any_enrolment_type = False
     args.min_samples = 99          # stop before drafting
@@ -109,6 +113,7 @@ def test_build_runbooks_groups_casebooks_from_storage():
     assert skipped, "build_runbooks saw no casebooks at all"
     assert skipped[0].kwargs["samples"] == 3
     assert skipped[0].kwargs["reason_code"] == "RC_SHARED"
+    assert skipped[0].kwargs["service"] == "enu-biometric"
 
 
 def test_build_runbooks_builds_no_llm_when_there_is_nothing_to_draft():
@@ -118,6 +123,7 @@ def test_build_runbooks_builds_no_llm_when_there_is_nothing_to_draft():
     from src.tools import build_runbooks
 
     args = MagicMock()
+    args.service = None
     args.reason_code = None
     args.any_enrolment_type = False
     args.min_samples = 1
@@ -148,6 +154,7 @@ def test_build_runbooks_ignores_escalated_and_non_terminal_casebooks():
     })
 
     args = MagicMock()
+    args.service = None
     args.reason_code = None
     args.any_enrolment_type = False
     args.min_samples = 1

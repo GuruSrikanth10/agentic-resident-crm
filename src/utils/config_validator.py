@@ -104,6 +104,27 @@ def validate_config():
         except ValueError:
             pass
 
+    # 4b. Every agent tool module imports, the MCP tool server settings parse,
+    # and every AGENT_TOOLS_<ROLE> variable names a real role. Checked here
+    # because the agents are built lazily: a broken tool module or a typo in a
+    # setting would otherwise surface as every packet failing, not as a failed
+    # boot. (The tool names a selection lists are checked against the servers'
+    # listings when the first agent is built; the servers are not up yet. The
+    # tools' service scopes are checked against the registry by main_api.)
+    from src.tools import agent_tools, mcp_client
+    tool_module_errors = agent_tools.validate()
+    errors.extend(tool_module_errors)
+    errors.extend(mcp_client.validate())
+
+    # 4c. Every database the tools read (src/tools/agent_tools/_database.py)
+    # is fully configured when switched on -- PROCESS_DB_* for the process
+    # database, AGENT_DB_<KEY>_* for any other -- so a missing credential
+    # fails the boot rather than every lookup. The databases are the ones the
+    # tool modules declare, so this needs them imported (4b).
+    if not tool_module_errors:
+        from src.tools.agent_tools import _database
+        errors.extend(_database.validate())
+
     # 5. Storage and SQLite checkpointer paths are writable
     try:
         from src.storage.factory import get_casebook_storage

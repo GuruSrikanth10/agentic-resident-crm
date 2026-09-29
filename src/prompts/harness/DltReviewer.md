@@ -5,7 +5,7 @@ Read the investigation:
 
 Read the case evidence:
 - local_casesheets/casebook_{{ref_id}}/dlt_failure.json (parsed failure details)
-- local_casesheets/casebook_{{ref_id}}/dlt_evidence.txt (full evidence block, including logs)
+- local_casesheets/casebook_{{ref_id}}/dlt_evidence.txt (full evidence block, including logs and any tool results)
 
 ## Reasoning hierarchy
 
@@ -21,6 +21,9 @@ lacking log citations when no logs were available.
 - Read docs_cache/MANIFEST.json for the full service list
 - Check that the investigation identified the correct service(s) from the
   evidence (stack trace packages, origin topic, exception FQCN)
+- If this task ends with a SERVICE CONTEXT, the record was placed in that
+  service from its evidence; an investigation that ignores it without saying
+  why is a defect
 
 ## STEP 2 — Verify claims against the documentation
 

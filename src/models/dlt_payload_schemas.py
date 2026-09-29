@@ -362,6 +362,49 @@ def _summarise_enrolment_event_response(model: "EnrolmentEventResponse") -> str:
     return "\n".join(lines)
 
 
+def summarise_rejection_contract(model) -> str:
+    """A payload in the rejection lane's contract (`MessagePayload`).
+
+    Only the fields the rejection lane's own Investigator is shown
+    (`agent_orchestrator._project_payload`): where the packet was, what it
+    was, and the codes it carries. Nothing from `packetMetaData` beyond its
+    identifiers and enrolment type, which keeps resident data out of a text
+    that is stored with the fingerprint's group.
+    """
+    flow = model.flowMetaData
+    meta = model.packetMetaData
+    summary = model.packetExecutionSummary
+    codes = [error.errorReasonCode for error in (summary.errorData or [])
+             if error is not None and error.errorReasonCode]
+    lines = [
+        "Payload type: the rejection lane's packet event (MessagePayload)",
+        f"Category / event type / version: {model.category} / {model.eventType} "
+        f"/ {model.eventVersion or model.version}",
+        f"Stage / sub-stage: {flow.stage if flow else None} / "
+        f"{flow.subStage if flow else None}",
+        f"Source topic: {model.sourceTopic}",
+        f"Enrolment type: {meta.enrolmentType if meta else None}",
+        f"Packet status: {summary.packetStatus}",
+        f"Error reason codes: {', '.join(codes) if codes else '(none)'}",
+        f"Payload eventTimestamp: {model.eventTimestamp} "
+        f"(as the producer wrote it -- not a log anchor)",
+    ]
+
+    correlation: list = []
+    envelope: list = []
+    if meta and meta.refId:
+        correlation.append((f"refId = {meta.refId}",
+                            "At packetMetaData.refId -- the value the "
+                            "service writes into its pod lines"))
+    envelope.append((f"eventId = {model.eventId}",
+                     "The event's own id, not the refId: the logs were "
+                     "searched for the refId"))
+    if meta and meta.srn:
+        envelope.append((f"srn = {meta.srn}", "The packet's registration number"))
+    lines.append(identifier_block(correlation=correlation, envelope=envelope))
+    return "\n".join(lines)
+
+
 #: `__TypeId__` -> the function that describes that payload. The third and
 #: last per-type registry in this module, alongside `REFID_PATHS_BY_TYPE` and
 #: `MODELS_BY_TYPE`: between them they are everything a new DLT topic needs.
@@ -387,6 +430,15 @@ def summarise_payload(payload: Any, type_id: Optional[str] = None) -> Optional[s
     exactly the shape of the `event_id` mistake this module was written to
     prevent.
     """
+    # The rejection lane's contract, whatever `__TypeId__` the producer's
+    # serialiser stamped on it: every service's DLT record carries it from
+    # MULTI_SERVICE_PLAN.md Phase 8 on, and its fields are typed.
+    from src.dlt.payload import rejection_contract
+
+    contract = rejection_contract(payload)
+    if contract is not None:
+        return summarise_rejection_contract(contract)
+
     model = parse_payload(payload, type_id)
     summariser = SUMMARISERS_BY_TYPE.get(type_id or "")
     if model is not None and summariser is not None:

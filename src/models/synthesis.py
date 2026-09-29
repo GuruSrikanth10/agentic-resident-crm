@@ -205,12 +205,31 @@ def classify_logs(logs: Optional[str]) -> str:
     return "present"
 
 
-def _confidence_ceilings(logs: Optional[str]) -> list:
+def unresolved_service_ceiling() -> float:
+    """Highest confidence permitted for a packet analysed with the `_default`
+    pack (MULTI_SERVICE_PLAN.md D5).
+
+    Like the gap ceiling, a safety property rather than a calibration: no rule
+    placed the packet in a service, so no service's policy was applied, and a
+    confident answer would rest on reasoning nobody configured for it.
+    """
+    try:
+        return float(os.environ.get("SYNTHESIS_UNRESOLVED_SERVICE_CONFIDENCE_CEILING",
+                                    "0.6"))
+    except ValueError:
+        return 0.6
+
+
+def _confidence_ceilings(logs: Optional[str], default_pack: bool = False) -> list:
     """Every (ceiling, why) that the evidence behind a resolution imposes."""
     from src.log_pipeline.sources.k8s.gaps import BANNER_HEADER
 
     text = (logs or "").strip()
     ceilings = []
+    if default_pack:
+        ceilings.append((unresolved_service_ceiling(),
+                         "the packet's service was not resolved, so no "
+                         "service-specific policy was applied"))
     if BANNER_HEADER in text:
         ceilings.append((gap_confidence_ceiling(),
                          "the trace carries evidence gaps"))
@@ -225,8 +244,10 @@ def _confidence_ceilings(logs: Optional[str]) -> list:
     return ceilings
 
 
-def apply_confidence_policy(result: SynthesisResult, logs: Optional[str] = ""):
-    """Cap confidence on missing or incomplete logs, then abstain if too low.
+def apply_confidence_policy(result: SynthesisResult, logs: Optional[str] = "",
+                            default_pack: bool = False):
+    """Cap confidence on missing or incomplete logs, or on a packet analysed
+    with the `_default` pack, then abstain if too low.
 
     Returns (result, abstained, reason). The result is a copy -- callers hold
     the original for the audit trail.
@@ -234,7 +255,7 @@ def apply_confidence_policy(result: SynthesisResult, logs: Optional[str] = ""):
     confidence = result.confidence
     reason = None
 
-    ceilings = _confidence_ceilings(logs)
+    ceilings = _confidence_ceilings(logs, default_pack=default_pack)
     if ceilings and confidence is not None:
         ceiling, why = min(ceilings)
         if confidence > ceiling:

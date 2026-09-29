@@ -59,6 +59,15 @@ REASON_CODE_DOCS_DIR = Path(
     or REPO_ROOT / "src" / "reason_code_docs"
 )
 
+# The service registry (MULTI_SERVICE_PLAN.md D2): one directory per service,
+# each holding a `service.json`, read by `utils/service_registry.py`. Ships in
+# the image with the rest of `src/`; overridable, and a blank value falls back,
+# for the same reasons as REASON_CODE_DOCS_DIR above.
+SERVICE_PACKS_DIR = Path(
+    os.environ.get("SERVICE_PACKS_DIR", "").strip()
+    or REPO_ROOT / "src" / "service_packs"
+)
+
 
 def casebook_dir(event_id: str) -> Path:
     """Directory holding one event's casebook and log artifacts.

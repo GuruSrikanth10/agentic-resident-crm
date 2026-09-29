@@ -67,5 +67,13 @@ class DltMessage(BaseModel):
 
     #: True when the record key and the payload both carried an identifier and
     #: they disagreed. The key wins; this is what makes the disagreement
-    #: visible instead of silently resolved.
+    #: visible instead of silently resolved. For a payload in the rejection
+    #: lane's contract the payload's refId wins instead, and this means the
+    #: key equals none of the payload's identifiers.
     ref_id_mismatch: bool = False
+
+    #: The payload's `eventId`, when the payload is in the rejection lane's
+    #: contract (MULTI_SERVICE_PLAN.md Phase 8). Recorded in the casebook so a
+    #: DLT case can be matched to the packet's rejection-lane events; never
+    #: used as the log-correlation id.
+    event_id: Optional[str] = None

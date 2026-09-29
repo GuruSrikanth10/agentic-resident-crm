@@ -98,14 +98,20 @@ MAX_REDUCED_CHARS = int(os.environ.get("LOG_MAX_REDUCED_CHARS", "120000"))
 # Decision-vocabulary regex -- any raw log line matching this is *always*
 # forwarded to the LLM in full text, regardless of its Drain3 cluster
 # classification.  Build this from your domain; err on the side of inclusion.
-DECISION_VOCABULARY_REGEX = re.compile(
+#
+# Only the words every service's decisions share. A service adds its own in
+# its pack's `logs.decision_vocabulary`, and a packet's lines are matched
+# against this OR that (`scope.DecisionVocabulary`). The biometric words this
+# regex used to carry (`biometric.*match`, `MAN_DEDUP`, `dedup.*reject`,
+# `quality.*check.*fail`) are enu-biometric's pack vocabulary now, and a
+# caller with no service still matches them (MULTI_SERVICE_PLAN.md Phase 6).
+GENERIC_DECISION_VOCABULARY_REGEX = re.compile(
     os.environ.get(
         "LOG_DECISION_VOCAB_REGEX",
         r"(?i)"
         r"(?:approved|rejected|denied|final.?decision|rule\s.*triggered"
-        r"|score.?threshold|validation.?failed|dedup.*reject"
-        r"|packet.*status|enrolment.*result|biometric.*match"
-        r"|MAN_DEDUP|operator.*reject|quality.*check.*fail)",
+        r"|score.?threshold|validation.?failed"
+        r"|packet.*status|enrolment.*result|operator.*reject)",
     )
 )
 

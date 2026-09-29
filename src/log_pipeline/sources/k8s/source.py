@@ -82,7 +82,8 @@ class KubernetesLogSource:
                     ),
                 )
 
-        found = discovery.discover_targets(namespace=ctx.namespace, app=ctx.app)
+        found = discovery.discover_targets(namespace=ctx.namespace, app=ctx.app,
+                                           apps=ctx.apps, pod_matches=ctx.pod_matches)
         if not found.ok:
             log.warning("Kubernetes discovery failed", reason=found.reason)
             return FetchResult.failure(self.name, found.reason or "discovery failed")

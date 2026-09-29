@@ -48,6 +48,10 @@ def setup_logging():
     logging.getLogger("kafka").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    # The MCP SDK's HTTP client and the SDK itself: an INFO line per request
+    # would be three lines for every agent tool call.
+    logging.getLogger("httpx2").setLevel(logging.WARNING)
+    logging.getLogger("mcp").setLevel(logging.WARNING)
     
     log_format = os.environ.get("LOG_FORMAT", "TEXT").strip().upper()
     if log_format == "JSON":

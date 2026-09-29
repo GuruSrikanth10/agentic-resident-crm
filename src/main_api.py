@@ -28,9 +28,37 @@ def validate_reason_code_docs() -> None:
     design, because `lookup` never raises and every packet simply loses its
     documentation.
     """
+    from src.utils import reason_code_docs
     from src.utils.reason_code_docs import docs_enabled, validate
 
     if not docs_enabled():
+        return
+
+    if reason_code_docs.s3_download_enabled():
+        # The store is fetched in the background after the API has started, so
+        # there is nothing on disk to validate yet -- the download validates
+        # what it fetched before swapping it in, and /ready waits for the first
+        # copy. What can be checked now is that the fetch can work at all, and
+        # that it has somewhere of its own to write: left at the default the
+        # swap would replace the copy that ships inside `src/`.
+        errors = []
+        if not os.environ.get("REASON_CODE_DOCS_DIR", "").strip():
+            errors.append(
+                "REASON_CODE_DOCS_S3_DOWNLOAD is on but REASON_CODE_DOCS_DIR "
+                "is unset; set it to a writable directory outside src/ so the "
+                "download does not replace the files shipped in the image.")
+        if not (os.environ.get("CASEBOOK_S3_BUCKET", "").strip()
+                or os.environ.get("S3_LOGS_BUCKET", "").strip()):
+            errors.append(
+                "REASON_CODE_DOCS_S3_DOWNLOAD is on but no S3 bucket is "
+                "configured; set CASEBOOK_S3_BUCKET or S3_LOGS_BUCKET.")
+        for error in errors:
+            _docs_logger().error("Reason-code document store error", detail=error)
+            print(f"Reason-code document store error: {error}", file=sys.stderr)
+        if errors:
+            sys.exit(1)
+        _docs_logger().info("Reason-code documentation will be downloaded at "
+                            "start-up; skipping the on-disk check")
         return
 
     errors, warnings = validate()
@@ -49,8 +77,35 @@ def _docs_logger():
     return get_logger(__name__)
 
 
+def validate_service_registry() -> None:
+    """Refuse to boot on a broken service registry (MULTI_SERVICE_PLAN.md 5.7).
+
+    API-only, for the reason `validate_reason_code_docs` is: the consumers
+    never read a service pack. Always on, unlike the documentation check,
+    because every rejection packet is resolved to a service whatever the
+    gate mode. At run time a pack with errors is silently left out of the
+    registry, which under `enforce` would skip that service's packets; here
+    the same error stops the API instead.
+    """
+    from src.utils import service_registry
+
+    errors, warnings = service_registry.validate()
+    for warning in warnings:
+        _docs_logger().warning("Service registry warning", detail=warning)
+    if errors:
+        for error in errors:
+            _docs_logger().error("Service registry error", detail=error)
+            print(f"Service registry error: {error}", file=sys.stderr)
+        sys.exit(1)
+    _docs_logger().info("Service registry validated",
+                        services=list(service_registry.load().services()),
+                        enabled=sorted(service_registry.enabled_services()),
+                        gate_mode=service_registry.gate_mode())
+
+
 validate_config()
 validate_reason_code_docs()
+validate_service_registry()
 
 
 def _install_draining_signal_handlers():
@@ -114,6 +169,21 @@ async def lifespan(app: FastAPI):
         threading.Thread(target=s3_storage.probe_configured_endpoint,
                          name="s3-cas-probe", daemon=True).start()
 
+    # The bundled agent tool server (src/tools/mcp_server.py), when this
+    # deployment serves its own tools. Every agent reaches its tools over MCP,
+    # so it starts first: a child process, supervised and restarted if it
+    # dies, and /ready waits for it. Starting it returns at once.
+    from src.tools import mcp_server
+    tool_server = mcp_server.start_local_server()
+
+    # The reason-code store from S3, when this process fetches it
+    # (MULTI_SERVICE_PLAN.md D10): off the startup path like the harness
+    # below, and /ready fails until the first copy is on disk. Started even
+    # when the documents are switched off for the prompts, so a deployment can
+    # keep the store current before turning them on.
+    from src.utils import reason_code_docs
+    reason_code_docs.start_background_download()
+
     # Start the opencode harness in a background thread so the API binds
     # its port immediately. The corpus download and `opencode serve` cold
     # boot take 15-30s; doing them in the lifespan blocked the API from
@@ -131,6 +201,22 @@ async def lifespan(app: FastAPI):
         def _start_harness():
             try:
                 docs_loader.download_corpus()
+                # An enabled service with no corpus directory still runs, but
+                # its harness tasks start from documentation that is not there
+                # (MULTI_SERVICE_PLAN.md 5.7). Checked now, not at boot: the
+                # corpus only exists once this download has finished.
+                from src.utils import service_registry
+                missing = service_registry.missing_corpus_dirs(docs_loader.docs_cache_dir())
+                if missing:
+                    _docs_logger().warning(
+                        "Enabled services have no directory in the documentation "
+                        "corpus", services=missing)
+                # opencode connects to its MCP servers once, as it starts: a
+                # tool server that is not up yet would leave every harness task
+                # without tools until the next restart.
+                if tool_server is not None and not tool_server.wait_healthy(120):
+                    print("Agent tool server is not healthy after 120s; starting "
+                          "opencode anyway, and its tasks will lack the tools.")
                 global _opencode_session
                 _opencode_session = opencode_runner.session_scope()
                 _opencode_session.__enter__()
@@ -153,9 +239,12 @@ async def lifespan(app: FastAPI):
         if session:
             session.__exit__(None, None, None)
 
+    # Last: the drain above may still have been calling tools.
+    mcp_server.stop_local_server()
+
 app = FastAPI(
     title="Agentic Resident CRM API",
-    description="AI-driven, self-learning service to ingest, analyze, and resolve rejected biometric packets within the UIDAI ecosystem.",
+    description="AI-driven, self-learning service to ingest, analyze, and resolve rejected packets within the UIDAI ecosystem.",
     version="1.0.0",
     lifespan=lifespan
 )

@@ -73,7 +73,10 @@ def check_drift():
         drift_detected = True
         
     if drift_detected:
-        print("Please update the agent_policy_context.md and KNOWN_DB_COLUMNS to reflect these schema changes.")
+        # The rules table holds enu-biometric's rules, so its policy is the
+        # one that interprets these columns.
+        print("Please update src/service_packs/enu-biometric/policy.md and "
+              "KNOWN_DB_COLUMNS to reflect these schema changes.")
         sys.exit(2)
     else:
         print("No drift detected. rules.csv matches expected DB schema.")

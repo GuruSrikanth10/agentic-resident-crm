@@ -51,13 +51,15 @@ def test_investigator_prompt_trims_context_on_retry(monkeypatch):
     payload = _payload_with_event_id(event_id)
 
     try:
-        with patch.object(orch, "create_react_agent", return_value=mock_agent_instance), \
+        with patch.object(orch, "build_agent", return_value=mock_agent_instance), \
              patch.object(orch, "_agent", None):
             asyncio.run(process_rejection(MessagePayload(**payload)))
 
         calls = mock_agent_instance.invoke.call_args_list
-        first_investigator_prompt = calls[0].args[0]["messages"][1].content
-        retry_investigator_prompt = calls[2].args[0]["messages"][1].content
+        # The system prompt is fixed when the agent is built, so the user
+        # message is the last (and only) message each call sends.
+        first_investigator_prompt = calls[0].args[0]["messages"][-1].content
+        retry_investigator_prompt = calls[2].args[0]["messages"][-1].content
 
         # First attempt: the (projected) payload and rule config are present;
         # there is no "previous analysis" yet.
@@ -106,14 +108,14 @@ def test_reviewer_built_once_with_simple_llm(monkeypatch):
         llm_calls.append((tier, obj))
         return obj
 
-    create_react_agent_calls = []
+    build_agent_calls = []
 
-    def fake_create_react_agent(llm, tools):
-        create_react_agent_calls.append((llm, tools))
+    def fake_build_agent(role, llm, system_prompt, tools=(), pack=None):
+        build_agent_calls.append((llm, list(tools)))
         return MagicMock()
 
     with patch.object(orch, "get_llm", side_effect=fake_get_llm), \
-         patch.object(orch, "create_react_agent", side_effect=fake_create_react_agent):
+         patch.object(orch, "build_agent", side_effect=fake_build_agent):
         orch.get_agent()
 
     tiers_requested = [tier for tier, _ in llm_calls]
@@ -127,14 +129,14 @@ def test_reviewer_built_once_with_simple_llm(monkeypatch):
     simple_llm_obj = llm_by_tier["simple"]
 
     # investigator + synthesis + reviewer -- three agents, built exactly once.
-    assert len(create_react_agent_calls) == 3
+    assert len(build_agent_calls) == 3
 
-    reviewer_calls = [c for c in create_react_agent_calls if c[0] is simple_llm_obj]
+    reviewer_calls = [c for c in build_agent_calls if c[0] is simple_llm_obj]
     assert len(reviewer_calls) == 1
     _, reviewer_tools = reviewer_calls[0]
     assert [t.name for t in reviewer_tools] == ["add_learning_rule"]
 
-    complex_calls = [c for c in create_react_agent_calls if c[0] is complex_llm_obj]
+    complex_calls = [c for c in build_agent_calls if c[0] is complex_llm_obj]
     assert len(complex_calls) == 2
 
 
@@ -146,12 +148,13 @@ def test_add_learning_rule_uses_per_packet_contextvars(monkeypatch, tmp_path):
 
     captured = {}
 
-    def fake_create_react_agent(llm, tools):
+    def fake_build_agent(role, llm, system_prompt, tools=(), pack=None):
+        tools = list(tools)
         if tools and getattr(tools[0], "name", "") == "add_learning_rule":
             captured["tool"] = tools[0]
         return MagicMock()
 
-    with patch.object(orch, "create_react_agent", side_effect=fake_create_react_agent):
+    with patch.object(orch, "build_agent", side_effect=fake_build_agent):
         orch.get_agent()
 
     add_learning_rule = captured["tool"]

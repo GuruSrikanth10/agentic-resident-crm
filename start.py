@@ -100,38 +100,45 @@ def main():
         print("API server is listening.")
 
     # Step 2: if the opencode harness is enabled, wait for the corpus
-    # download AND the opencode server to be ready. The /ready endpoint
-    # returns 503 "Downloading documentation corpus" while downloading,
-    # 503 "Starting opencode server" while the server boots, and 503 with
-    # other details for Kafka/checkpoint issues (which we accept).
+    # download AND the opencode server to be ready; if the API runs its own
+    # agent tool server, wait for that too. The /ready endpoint returns 503
+    # "Downloading documentation corpus" while downloading, 503 "Starting
+    # opencode server" while that boots, 503 "Starting agent tool server"
+    # while the tool server does, and 503 with other details for
+    # Kafka/checkpoint issues (which we accept).
     #
-    # Whether a server is coming up at all is resolved by opencode_runner, not
-    # re-derived here: the lane switches and their fallback to the older single
-    # switch then have exactly one reader, so the supervisor can never disagree
-    # with the API about it. `load_dotenv()` already ran at module import.
+    # Whether a server is coming up at all is resolved by opencode_runner and
+    # mcp_config, not re-derived here: each switch then has exactly one
+    # reader, so the supervisor can never disagree with the API about it.
+    # `load_dotenv()` already ran at module import.
     from src.utils.opencode_runner import is_enabled as harness_enabled
-    if harness_enabled():
-        print("Waiting for documentation corpus and opencode server...")
+    from src.tools.mcp_config import serve_locally as tools_served_locally
+    if harness_enabled() or tools_served_locally():
+        print("Waiting for the agent tool server and/or the harness "
+              "(documentation corpus and opencode server)...")
         harness_ready = False
         for i in range(300):
             code, body = _http_get("/ready")
             if code == 200:
                 harness_ready = True
-                print("API ready (corpus + opencode + services).")
+                print("API ready (tools, harness and services).")
                 break
             if code == 503:
-                # "Downloading" and "Starting opencode" mean not ready
-                # Any other 503 (Kafka, checkpoint) is fine — consumers handle it
-                if "Downloading" not in body and "Starting opencode" not in body:
+                # "Downloading", "Starting opencode" and "Starting agent tool
+                # server" mean not ready. Any other 503 (Kafka, checkpoint) is
+                # fine -- consumers handle it.
+                if ("Downloading" not in body and "Starting opencode" not in body
+                        and "Starting agent tool server" not in body):
                     harness_ready = True
-                    print("Corpus and opencode ready; starting consumers.")
+                    print("Tools and harness ready; starting consumers.")
                     break
             if i % 15 == 0:
                 print(f"  ...still waiting ({i*2}s). /ready: {code} {body[:80] if body else ''}")
             time.sleep(2)
 
         if not harness_ready:
-            print("WARNING: Harness did not become ready within 600s; starting consumers anyway.")
+            print("WARNING: Tools/harness did not become ready within 600s; "
+                  "starting consumers anyway.")
 
     print("Starting the fast consumer (fast_consumer.py) -- rejections -> /fetch-logs.")
     _children.append(("FastConsumer", subprocess.Popen([sys.executable, "src/fast_consumer.py"])))

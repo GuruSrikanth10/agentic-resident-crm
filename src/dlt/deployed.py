@@ -29,6 +29,7 @@ only to *extract* a version from an image reference -- never to compare one.
 Comparing here would invite the lexical shortcut, and `"1.0.10" < "1.0.9"` is
 true as strings and wrong as versions (Trap T7).
 """
+import json
 import os
 import threading
 from dataclasses import dataclass, field
@@ -160,7 +161,8 @@ def _rows_from_pods(pods) -> tuple:
 # The read
 # ---------------------------------------------------------------------------
 
-def _read(app: Optional[str], namespace: Optional[str]) -> DeployedVersions:
+def _read(app: Optional[str], namespace: Optional[str],
+          match: Optional[dict] = None) -> DeployedVersions:
     """One uncached Kubernetes read. Never raises."""
     try:
         from src.log_pipeline.sources.k8s import discovery
@@ -170,7 +172,10 @@ def _read(app: Optional[str], namespace: Optional[str]) -> DeployedVersions:
 
     try:
         from src.utils.resilience import k8s_breaker
-        pods = k8s_breaker.call(discovery.list_pods_for_service, app, namespace)
+        # The pack's pod match only when there is one, so a caller -- or a
+        # fake -- that predates it is called exactly as before.
+        pods = k8s_breaker.call(discovery.list_pods_for_service, app, namespace,
+                                **({"match": match} if match else {}))
     except Exception as e:
         # Includes CircuitBreakerError. A tripped breaker means "we could not
         # look", which is an unknown version, not an absent one.
@@ -204,9 +209,36 @@ def _read(app: Optional[str], namespace: Optional[str]) -> DeployedVersions:
     )
 
 
+def for_service(service: Optional[str]) -> DeployedVersions:
+    """What a registered service's pods are running: its first app name and
+    its pack's pod match.
+
+    None reads the environment's default app, which is what every caller read
+    before the DLT lane resolved services -- and so does the pre-registry
+    service, enu-biometric, whose app `K8S_DEFAULT_APP` has always named: its
+    reading is exactly what it was.
+    """
+    from src.utils import service_registry
+
+    if not service or service == service_registry.PRE_REGISTRY_PACK:
+        return running_version()
+
+    options = service_registry.log_options(service)
+    apps = options["app_names"]
+    match = options["k8s_match"]
+    return running_version(apps[0] if apps else None,
+                           **({"match": match} if match else {}))
+
+
 def running_version(app: Optional[str] = None,
-                    namespace: Optional[str] = None) -> DeployedVersions:
+                    namespace: Optional[str] = None,
+                    match: Optional[dict] = None) -> DeployedVersions:
     """What the pods for `app` are running, cached on a short TTL.
+
+    `app` and `match` are the record's own service's (MULTI_SERVICE_PLAN.md
+    Phase 8, `for_service`): its first `logs.app_names` entry and its
+    `logs.k8s_match`. With neither, the environment's default app is read,
+    as before.
 
     Total: every failure mode -- no cluster, no namespace, a tripped breaker,
     pods with no image -- returns a `DeployedVersions` with `ok=False` and a
@@ -216,7 +248,7 @@ def running_version(app: Optional[str] = None,
     global _cache, _cache_ttl
 
     ttl = ttl_seconds()
-    key = (app or "", namespace or "")
+    key = (app or "", namespace or "", json.dumps(match or {}, sort_keys=True))
 
     if ttl > 0:
         with _lock:
@@ -231,7 +263,7 @@ def running_version(app: Optional[str] = None,
         if hit is not None:
             return hit
 
-    result = _read(app, namespace)
+    result = _read(app, namespace, match)
 
     # Only successful reads are cached. Caching a failure would hold a whole
     # TTL of cases at UNKNOWN after a transient blip, when the next call would

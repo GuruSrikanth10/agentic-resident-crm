@@ -1,10 +1,19 @@
 """Promote Reviewer-proposed learning rules into the Investigator prompt.
 
-Every rule approved here is appended to InvestigatorAgent.md and becomes part
-of the system prompt for every future investigation. That text originates from
-an LLM reading log content, and log content is influenced by upstream request
-data -- so this is the last gate on a path that runs from a log line to a
-permanent, privileged instruction (G19).
+Every rule carries a scope (MULTI_SERVICE_PLAN.md D11), proposed by the
+Reviewer and shown here for the operator to keep or change:
+  - `service` (the default): appended to the `learned_rules.md` of the
+    service pack it was learned under, and part of the Investigator's system
+    prompt for every future packet analysed with that pack;
+  - `generic`: appended to `src/prompts/learned_rules.md`, and part of the
+    Investigator's system prompt for every service.
+Never to InvestigatorAgent.md: a rule learned under one service's policy can
+be wrong under another's, which is also why `service` is the default -- a
+rule wrongly marked generic reaches every service, one wrongly kept to its
+service merely fails to spread. That text originates from an LLM reading log content, and
+log content is influenced by upstream request data -- so this is the last
+gate on a path that runs from a log line to a permanent, privileged
+instruction (G19).
 
 The gate is therefore deliberately awkward:
   - each rule is re-validated here, not only when it was proposed;
@@ -19,16 +28,77 @@ import subprocess
 
 from filelock import FileLock
 
+from src.core import prompt_composer
+from src.utils import paths, service_registry
 from src.utils.runbook_validator import validate_learning_rule
+
+SCOPE_SERVICE = "service"
+SCOPE_GENERIC = "generic"
+
+
+def target_pack_for(entry: dict) -> str:
+    """The pack a pending rule is promoted into: the one it was learned under.
+
+    An entry queued before rules recorded their pack was learned under the
+    pre-registry pack, the only one that existed, so it goes there -- and so
+    does one naming a pack this registry no longer has, rather than being
+    promoted somewhere it was not learned.
+    """
+    pack = entry.get("service_pack")
+    if isinstance(pack, str) and pack in service_registry.load().packs:
+        return pack
+    return service_registry.PRE_REGISTRY_PACK
+
+
+def scope_of(entry: dict) -> str:
+    """The scope a pending rule was proposed with. An entry queued before
+    rules carried one, or carrying anything but `generic`, is `service`."""
+    return SCOPE_GENERIC if entry.get("scope") == SCOPE_GENERIC else SCOPE_SERVICE
+
+
+def generic_rules_file() -> str:
+    return str(prompt_composer._prompts_dir() / prompt_composer.GENERIC_LEARNED_RULES)
+
+
+def target_file_for(entry: dict, scope: str = None) -> str:
+    """The file a pending rule is appended to under `scope` (by default the
+    scope it was proposed with)."""
+    if (scope or scope_of(entry)) == SCOPE_GENERIC:
+        return generic_rules_file()
+    return str(service_registry.packs_dir() / target_pack_for(entry)
+               / service_registry.LEARNED_RULES_FILE)
+
+
+def _show(entry: dict, scope: str, addition: str) -> None:
+    """The exact diff for `scope`, so approval is informed rather than nominal."""
+    pack = target_pack_for(entry)
+    target_file = target_file_for(entry, scope)
+    where = (os.path.relpath(target_file, paths.REPO_ROOT) if scope == SCOPE_GENERIC
+             else f"{pack}/{os.path.basename(target_file)}")
+    print(f"Scope: {scope}" + (" (as proposed)" if scope == scope_of(entry)
+                                else f" (proposed: {scope_of(entry)})"))
+    print(f"\nThis will append to {where}:")
+    print("-" * 70)
+    for diff_line in addition.strip("\n").splitlines():
+        print(f"+ {diff_line}")
+    print("-" * 70)
+    if scope == SCOPE_GENERIC:
+        print("It becomes part of the Investigator's system prompt for EVERY "
+              "future packet of EVERY service. Promote it as generic only if it "
+              "concerns evidence handling, citations or output format and names "
+              "no concept of any one service.")
+    else:
+        print(f"It becomes part of the Investigator's system prompt for "
+              f"EVERY future packet analysed with the {pack} pack.")
 
 
 def promote_rules(auto_commit: bool = False):
-    base_dir = os.path.dirname(os.path.dirname(__file__))
-    prompts_dir = os.path.join(base_dir, "prompts")
+    # The directory the composer reads the generic learned rules from.
+    prompts_dir = str(prompt_composer._prompts_dir())
+    packs_dir = str(service_registry.packs_dir())
     pending_file = os.path.join(prompts_dir, "pending_rules.jsonl")
     file_lock_path = pending_file + ".lock"
     promo_lock_path = os.path.join(prompts_dir, "promotion.lock")
-    target_file = os.path.join(prompts_dir, "InvestigatorAgent.md")
     
     # 1. Top-level lock to prevent concurrent promotions by multiple humans/scripts
     promo_lock = FileLock(promo_lock_path, timeout=0)
@@ -39,10 +109,12 @@ def promote_rules(auto_commit: bool = False):
         return
         
     try:
-        # 2. Git status check
-        result = subprocess.run(["git", "status", "--porcelain", prompts_dir], capture_output=True, text=True)
+        # 2. Git status check, over both places a promotion reads or writes.
+        result = subprocess.run(["git", "status", "--porcelain", prompts_dir, packs_dir],
+                                capture_output=True, text=True)
         if result.stdout.strip():
-            print(f"Refusing to promote: uncommitted changes exist in {prompts_dir}")
+            print(f"Refusing to promote: uncommitted changes exist in {prompts_dir} "
+                  f"or {packs_dir}")
             print(result.stdout)
             return
 
@@ -85,21 +157,28 @@ def promote_rules(auto_commit: bool = False):
                         print(f"  - {violation}")
                     continue
 
-                # The exact diff, so approval is informed rather than nominal.
+                pack = target_pack_for(entry)
                 addition = f"\n- CRITICAL RULE: {proposed}\n"
-                print(f"\nThis will append to {os.path.basename(target_file)}:")
-                print("-" * 70)
-                for diff_line in addition.strip("\n").splitlines():
-                    print(f"+ {diff_line}")
-                print("-" * 70)
-                print("It becomes part of the system prompt for EVERY future packet.")
+                print(f"Learned under service {entry.get('service') or 'unrecorded'}, "
+                      f"pack {pack}.")
 
-                choice = input("Type 'promote' to apply, anything else to skip: ").strip()
+                # The operator may change the proposed scope; the diff is
+                # shown again for the scope that would be applied.
+                scope = scope_of(entry)
+                while True:
+                    _show(entry, scope, addition)
+                    other = SCOPE_SERVICE if scope == SCOPE_GENERIC else SCOPE_GENERIC
+                    choice = input(f"Type 'promote' to apply, '{other}' to change the "
+                                   f"scope, anything else to skip: ").strip()
+                    if choice != other:
+                        break
+                    scope = other
+                target_file = target_file_for(entry, scope)
                 if choice == "promote":
                     with open(target_file, "a", encoding="utf-8") as f_target:
                         f_target.write(addition)
 
-                    print("Rule promoted.")
+                    print(f"Rule promoted ({scope}).")
                     promoted_count += 1
                     promoted_raw_lines.add(line.strip())
 

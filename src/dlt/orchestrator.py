@@ -13,18 +13,32 @@ The prompts are deliberately narrow. With no source access and no database
 access, the Investigator's job is to check the trace against the logs and to
 say clearly what the evidence cannot establish -- not to explain a bug it
 cannot see.
+
+The three agents are deep agents built by `core/agent_factory.py`, which
+gives each the tools its role gets from the MCP tool servers. They are built
+per service pack (MULTI_SERVICE_PLAN.md Phase 8): a record the DLT gate lets
+through is analysed by agents built for its service -- that pack's `dlt.md` in
+their system prompts, and the tools in its scope -- and any other record by
+agents built for no pack, exactly as before. No tool is
+meant for the dlt_* roles: the narrative here is stored per error code and
+re-served to every record with the same failure signature, and a tool that
+reads one packet's data would put that packet's facts into it. Should a tool
+be given to them, what it returns joins the evidence block below, so the
+Reviewer checks against it like any other evidence.
 """
 import json
 import os
 import threading
 from typing import Optional
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage
 from langgraph.graph import END, START, StateGraph
-from langgraph.prebuilt import create_react_agent
 from typing_extensions import TypedDict
 
+from src.core import prompt_composer
+from src.core.agent_factory import build_agent
 from src.dlt.corroborate import Corroboration
+from src.tools import mcp_client
 from src.models.dlt_synthesis import DltFinding
 from src.utils import metrics
 from src.utils.llm_utils import get_llm
@@ -34,6 +48,9 @@ from src.utils.resilience import llm_breaker, retry_transient
 logger = get_logger(__name__)
 
 _agent = None
+
+#: The tool catalog `_agent` was built from; see agent_orchestrator's.
+_agent_catalog = None
 
 #: Guards the lazy build. `/analyze-dlt` is a sync endpoint dispatched on
 #: Starlette's threadpool, so two concurrent DLT cases can already reach the
@@ -54,6 +71,15 @@ class DltGraphState(TypedDict, total=False):
     retry_count: int
     finding: Optional[dict]
     parse_error: Optional[str]
+    #: What the Investigator's MCP tools returned (mcp_client
+    #: records), merged across attempts. Empty while the dlt_* roles have no
+    #: tools, which is the default.
+    tool_evidence: list
+    #: The record's service resolution, and the pack its agents are built
+    #: from -- None for a record the DLT gate would skip (MULTI_SERVICE_PLAN.md
+    #: Phase 8).
+    service_resolution: Optional[dict]
+    service_pack: Optional[str]
 
 
 def is_approved(feedback: str) -> bool:
@@ -101,7 +127,12 @@ def _evidence_block(state: DltGraphState) -> str:
                      if registry else
                      "(No registry entry exists for this code.)")
 
+    note = prompt_composer.dlt_service_note(state.get("service_resolution"),
+                                            state.get("service_pack"))
+    service = f"### Service\n{note}\n\n" if note else ""
+
     return (
+        f"{service}"
         f"### Case\n{state.get('case_id')}\n"
         f"Original topic: {origin_topic}\n"
         f"Payload type (__TypeId__): {type_id}\n\n"
@@ -122,7 +153,35 @@ def _evidence_block(state: DltGraphState) -> str:
         f"Unexplained exceptions in the logs: "
         f"{', '.join(corroboration.get('unexplained') or []) or 'none'}\n\n"
         f"### Logs\n{logs[:MAX_EVIDENCE_CHARS]}\n"
+        f"{_tool_evidence_block(state)}"
     )
+
+
+def _tool_evidence_block(state: DltGraphState) -> str:
+    """The Investigator's tool results, as a final evidence section, or ""."""
+    rendered = mcp_client.render_evidence(state.get("tool_evidence"))
+    return f"\n### Evidence retrieved with tools\n{rendered}\n" if rendered else ""
+
+
+def _metric_service(state: DltGraphState) -> str:
+    """The `service` label of this record's LLM calls: its resolved service,
+    or `unknown` for one no rule placed."""
+    service = (state.get("service_resolution") or {}).get("service")
+    return str(service) if service else "unknown"
+
+
+def _with_harness_context(prompt: str, role: str, state: DltGraphState) -> str:
+    """A DLT harness prompt with the record's SERVICE CONTEXT, then its
+    AVAILABLE TOOLS section, appended -- as the rejection lane appends them."""
+    pack = state.get("service_pack")
+    context = prompt_composer.dlt_harness_service_context(
+        state.get("service_resolution"), pack)
+    if context:
+        prompt = f"{prompt.rstrip()}\n\n{context}\n"
+    tools_section = mcp_client.prompt_section(role, pack, opencode=True)
+    if tools_section:
+        prompt = f"{prompt.rstrip()}\n\n{tools_section}\n"
+    return prompt
 
 
 def _write_harness_case_files(case_dir, state: DltGraphState) -> None:
@@ -143,20 +202,21 @@ def _write_harness_case_files(case_dir, state: DltGraphState) -> None:
 def get_dlt_agent():
     """Build (and cache) the DLT analysis graph."""
     global _agent
-    if _agent is not None:
+    if _agent is not None and not mcp_client.is_stale(_agent_catalog):
         return _agent
 
     with _agent_lock:
-        if _agent is not None:
+        if _agent is not None and not mcp_client.is_stale(_agent_catalog):
             return _agent
         return _build_dlt_agent()
 
 
 def _build_dlt_agent():
     """Construct the graph. Caller must hold `_agent_lock`."""
-    global _agent
+    global _agent, _agent_catalog
 
     logger.info("Building the DLT agent graph")
+    _agent_catalog = mcp_client.current_catalog()
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     prompts_dir = os.path.join(base_dir, "prompts")
 
@@ -164,14 +224,38 @@ def _build_dlt_agent():
         with open(os.path.join(prompts_dir, filename), "r", encoding="utf-8") as handle:
             return handle.read()
 
-    investigator_prompt = load_prompt("DltInvestigatorAgent.md")
-    reviewer_prompt = load_prompt("DltReviewerAgent.md")
-    synthesis_prompt = load_prompt("DltSynthesisAgent.md")
+    prompts = {"dlt_investigator": load_prompt("DltInvestigatorAgent.md"),
+               "dlt_reviewer": load_prompt("DltReviewerAgent.md"),
+               "dlt_synthesis": load_prompt("DltSynthesisAgent.md")}
 
+    # Deep agents, each with the MCP tools its role gets -- none by default
+    # (see the module docstring). The system prompts are fixed when an agent
+    # is built, so every node below sends only its user message.
+    #
+    # One agent per (role, pack), built on first use and kept with the graph:
+    # the pack is part of the system prompt and decides the tools. The agents
+    # for no pack -- every record before services were resolved -- are built
+    # now, in the order they always were.
     llm = get_llm("complex")
-    investigator_agent = create_react_agent(llm, tools=[])
-    reviewer_agent = create_react_agent(llm, tools=[])
-    synthesis_agent = create_react_agent(llm, tools=[])
+    pool: dict = {}
+    pool_lock = threading.Lock()
+
+    def agent_for(role: str, pack: Optional[str]):
+        key = (role, pack)
+        agent = pool.get(key)
+        if agent is None:
+            with pool_lock:
+                agent = pool.get(key)
+                if agent is None:
+                    agent = build_agent(
+                        role, llm,
+                        prompt_composer.compose_dlt_system_prompt(prompts[role], pack),
+                        **({"pack": pack} if pack else {}))
+                    pool[key] = agent
+        return agent
+
+    for role in ("dlt_investigator", "dlt_reviewer", "dlt_synthesis"):
+        agent_for(role, None)
 
     def investigator_node(state: DltGraphState):
         log = logger.bind(case_id=state.get("case_id"))
@@ -203,23 +287,27 @@ def _build_dlt_agent():
                     time.sleep(1)
 
             from src.utils.prompt_loader import render as render_prompt
-            harness_prompt = render_prompt(
+            harness_prompt = _with_harness_context(render_prompt(
                 "DltInvestigator",
                 ref_id=ref_id,
                 output_path=output_path,
-            )
+            ), "dlt_investigator", state)
 
             try:
                 result = opencode_runner.run_task_json(
                     prompt=harness_prompt,
                     output_path=output_path,
                     node="dlt_investigator",
+                    service=state.get("service_pack"),
                 )
                 investigation = result["result"].get("investigation", "")
                 log.info("DLT investigator finished (opencode harness)",
                          elapsed=result.get("seconds"),
                          **(result.get("trace") or {}))
-                return {"investigation": investigation}
+                calls = mcp_client.evidence_from_harness(result.get("tool_calls"))
+                return {"investigation": investigation,
+                        "tool_evidence": mcp_client.merge_evidence(
+                            state.get("tool_evidence"), calls)}
             except Exception as e:
                 log.warning("opencode harness failed for DLT investigator; falling back to direct LLM",
                             error=f"{type(e).__name__}: {e}")
@@ -234,15 +322,20 @@ def _build_dlt_agent():
         @llm_breaker
         @retry_transient
         def invoke():
-            return investigator_agent.invoke({"messages": [
-                SystemMessage(content=investigator_prompt),
-                HumanMessage(content=prompt),
-            ]})
+            # Recorded per attempt, as in the rejection lane.
+            with mcp_client.recording() as calls:
+                result = agent_for("dlt_investigator", state.get("service_pack")).invoke({"messages": [
+                    HumanMessage(content=prompt),
+                ]})
+            return result, calls
 
-        res = invoke()
+        res, calls = invoke()
         metrics.record_llm_usage("dlt_investigator", res)
-        metrics.LLM_CALLS.labels(node="dlt_investigator", outcome="ok").inc()
-        return {"investigation": res["messages"][-1].content}
+        metrics.LLM_CALLS.labels(node="dlt_investigator", outcome="ok",
+                                  service=_metric_service(state)).inc()
+        return {"investigation": res["messages"][-1].content,
+                "tool_evidence": mcp_client.merge_evidence(
+                    state.get("tool_evidence"), calls)}
 
     def reviewer_node(state: DltGraphState):
         log = logger.bind(case_id=state.get("case_id"))
@@ -263,11 +356,11 @@ def _build_dlt_agent():
             output_path = str(case_dir / "dlt_review.json")
 
             from src.utils.prompt_loader import render as render_prompt
-            reviewer_harness_prompt = render_prompt(
+            reviewer_harness_prompt = _with_harness_context(render_prompt(
                 "DltReviewer",
                 ref_id=ref_id,
                 output_path=output_path,
-            )
+            ), "dlt_reviewer", state)
 
             try:
                 # Inside the try, and the evidence rewritten rather than
@@ -282,6 +375,7 @@ def _build_dlt_agent():
                     prompt=reviewer_harness_prompt,
                     output_path=output_path,
                     node="dlt_reviewer",
+                    service=state.get("service_pack"),
                 )
                 verdict = result["result"].get("verdict", "REJECTED").upper()
                 feedback = result["result"].get("feedback", "")
@@ -305,14 +399,14 @@ def _build_dlt_agent():
         @llm_breaker
         @retry_transient
         def invoke():
-            return reviewer_agent.invoke({"messages": [
-                SystemMessage(content=reviewer_prompt),
+            return agent_for("dlt_reviewer", state.get("service_pack")).invoke({"messages": [
                 HumanMessage(content=prompt),
             ]})
 
         res = invoke()
         metrics.record_llm_usage("dlt_reviewer", res)
-        metrics.LLM_CALLS.labels(node="dlt_reviewer", outcome="ok").inc()
+        metrics.LLM_CALLS.labels(node="dlt_reviewer", outcome="ok",
+                                  service=_metric_service(state)).inc()
         return {"reviewer_feedback": res["messages"][-1].content,
                 "retry_count": state.get("retry_count", 0) + 1}
 
@@ -344,14 +438,14 @@ def _build_dlt_agent():
         @llm_breaker
         @retry_transient
         def invoke():
-            return synthesis_agent.invoke({"messages": [
-                SystemMessage(content=synthesis_prompt),
+            return agent_for("dlt_synthesis", state.get("service_pack")).invoke({"messages": [
                 HumanMessage(content=prompt),
             ]})
 
         res = invoke()
         metrics.record_llm_usage("dlt_synthesis", res)
-        metrics.LLM_CALLS.labels(node="dlt_synthesis", outcome="ok").inc()
+        metrics.LLM_CALLS.labels(node="dlt_synthesis", outcome="ok",
+                                  service=_metric_service(state)).inc()
         raw = res["messages"][-1].content
 
         finding, error = parse_finding(raw)
@@ -365,8 +459,7 @@ def _build_dlt_agent():
         @llm_breaker
         @retry_transient
         def invoke_repair():
-            return synthesis_agent.invoke({"messages": [
-                SystemMessage(content=synthesis_prompt),
+            return agent_for("dlt_synthesis", state.get("service_pack")).invoke({"messages": [
                 HumanMessage(content=(
                     f"Your previous reply did not satisfy the contract: {error}\n\n"
                     f"Previous reply:\n{raw}\n\n"
@@ -411,17 +504,23 @@ def parse_finding(text: str):
 
 
 def investigate(ref_id: str, failure: dict, corroboration: Corroboration,
-                logs: str, payload_summary: Optional[str] = None) -> tuple:
+                logs: str, payload_summary: Optional[str] = None,
+                service_resolution: Optional[dict] = None,
+                service_pack: Optional[str] = None) -> tuple:
     """Run the analysis lane. Returns (finding, parse_error).
 
     `payload_summary` defaults to None so a caller without one still works --
-    a header-only case has no payload to describe.
+    a header-only case has no payload to describe. `service_pack` is the pack
+    the agents are built from (`service_registry.dlt_pack_for`); None builds
+    them for no pack, as before services were resolved.
     """
     agent = get_dlt_agent()
     result = agent.invoke({
         "case_id": ref_id,
         "failure": failure,
         "payload_summary": payload_summary,
+        "service_resolution": service_resolution,
+        "service_pack": service_pack,
         "corroboration": {
             "verdict": corroboration.verdict.value,
             "reason": corroboration.reason,
@@ -439,5 +538,6 @@ def investigate(ref_id: str, failure: dict, corroboration: Corroboration,
 
 def reset_agent_cache() -> None:
     """Drop the cached graph. For tests."""
-    global _agent
+    global _agent, _agent_catalog
     _agent = None
+    _agent_catalog = None
