@@ -184,10 +184,10 @@ flowchart TD
         POLL --> SEM{"worker slot free?<br/>_queue_semaphore"}
         SEM -->|"no: block BEFORE parsing"| POLL
         SEM -->|yes| TRK["OffsetTracker.dispatched tp, offset"]
-        TRK --> VAL{"decode utf-8, json.loads,<br/>MessagePayload validate"}
+        TRK --> VAL{"decode utf-8, json.loads,<br/>AUDIT -> packet event,<br/>MessagePayload validate"}
         VAL -->|"invalid: poison pill"| PP["publish_to_dlq raw string"]
         VAL -->|valid| RJ{"packetStatus == REJECTED?"}
-        RJ -->|no| SK1["skip: non-rejected packet"]
+        RJ -->|no| SK1["skip: non-rejected packet,<br/>or dead-lettered (ON_HOLD)"]
         RJ -->|yes| D1{"terminal casebook exists?<br/>storage.exists terminal_only"}
         D1 -->|"yes: DUPLICATE"| SK2["skip: already processed"]
         D1 -->|no| SUB["worker pool submit"]
@@ -828,6 +828,7 @@ agentic-resident-crm/
 │   │   └── parked.py               # C7: packets held until their fix deploys
 │   ├── models/
 │   │   ├── schemas.py              # Strict Pydantic data validation schemas
+│   │   ├── audit_contract.py       # AUDIT envelope -> packet event (MessagePayload), section 3.12
 │   │   ├── synthesis.py            # Rejection finding contract + confidence policy
 │   │   ├── dlt_schemas.py          # DltMessage: the DLT wire model
 │   │   ├── dlt_payload_schemas.py  # EnrolmentEventResponse payload models + refId path registry
@@ -1864,7 +1865,9 @@ each runbook's service and gives the full `<service>:<CODE>` allowlist entry.
 
 **The contract.** Every service dead-letters its records with the rejection
 lane's Kafka payload (`MessagePayload`) and key. Only the headers differ: they
-carry the exception and the stack trace.
+carry the exception and the stack trace. From 2026-09-29 that payload is the
+AUDIT envelope, with `executionStatus` ON_HOLD; `DltAdapter.parse`
+translates it into the packet event before anything reads it (section 3.12).
 
 - `dlt/payload.rejection_contract` recognises such a payload. The refId comes
   from `packetMetaData.refId` (`ref_id_source: contract`).
@@ -2267,7 +2270,8 @@ see the `CONSUMER_ROLE` block at the top of `kafkaConsumer.py`. No
 role-specific branching exists anywhere else in that file: the analysis
 queue carries the exact same payload the original topic did (still
 `packetStatus == "REJECTED"`, still validated by the same `MessagePayload`
-schema), so the existing poison-pill check and terminal-casebook dedupe are
+schema; an AUDIT message is translated into it by the fast consumer, section
+3.12), so the existing poison-pill check and terminal-casebook dedupe are
 exactly the right guards for both roles, unchanged.
 
 **`POST /fetch-logs`** (fast consumer's target): fetches Kubernetes and
@@ -2325,6 +2329,69 @@ and the DLT analysis route gets its own bounded executor
 (`MAX_CONCURRENT_DLT_ANALYSES`), a *sibling* of the rejection lane's rather
 than the same pool, so a DLT backlog cannot starve the rejection lane or vice
 versa. Section 4.4 covers what actually runs in each.
+
+### 3.12 The Kafka payload contract (AUDIT envelope)
+
+From 2026-09-29 the producers publish an AUDIT event instead of the packet
+event this system was built on. The rejections topic carries it, and so does
+the payload of every dead-lettered record. The DLT record's headers and key
+are unchanged, so the stack trace, the original coordinates and the
+timestamps still come from the headers.
+
+The packet's facts live under `edata`. Everything downstream -- the routes,
+the graph, the service registry, the log pipeline, the DLT lane -- reads the
+packet event (`MessagePayload`), so `src/models/audit_contract.py`
+translates the envelope once, where a record enters:
+
+- `RejectionAdapter.parse` translates before it validates, so the body
+  posted to `/fetch-logs` and republished to the analysis queue is the packet
+  event.
+- `DltAdapter.parse` translates the payload before it builds the
+  `DltMessage`, so the stored payload is the packet event and
+  `rejection_contract`, `resolve_dlt` and the payload summary read it as
+  before.
+- `MessagePayload` translates in a `before` validator, so an AUDIT message
+  posted straight to a route is accepted too.
+
+Any other payload -- the packet event itself, a DLT payload of another type,
+a value that is not a dict -- is returned unchanged.
+
+| Packet event | From the envelope |
+|---|---|
+| `eventId`, `packetMetaData.refId` | `edata.refId`. The envelope has no eventId and `mid` is one per message; the packet event's eventId equalled its refId |
+| `packetExecutionSummary.packetStatus` | `ON_HOLD` when `executionStatus` is ON_HOLD; else `REJECTED` when `validationStatus` is "false"; else `executionStatus` |
+| `packetExecutionSummary.errorData` | `edata.errorData`, as is |
+| `hasExecutionErrors` / `isExecutionSuccess` | `executionStatus` is ON_HOLD / is COMPLETED |
+| `hasValidationErrors` / `isValidationSuccess` | `validationStatus` is "false" / is "true" |
+| `flowMetaData.stage`, `subStage` | `edata.stage`, `edata.subStage` |
+| `sourceTopic` | `edata.publishedTopic` |
+| `sid` | `edata.sid` |
+| `sidDate` | The sid's last 14 digits, `yyyyMMddHHmmss`; None when they are not a date |
+| `eventTimestamp` | `ets` (epoch milliseconds) in ISO-8601 UTC. The packet event's was local time with no offset |
+| `category`, `eventType`, `version` | `messageType`, `edata.stageOutcome`, `ver` |
+| `packetMetaData.enrolmentType`, `pktSource`, `isMBU`, `isNRI`, `isForeignResident` | The `edata` fields of the same name. `isMBU` fills the casebook's `packet_metadata.is_mbu` |
+| `resubmissionSummary` | `edata.resubmissionCount`, `edata.resubmissionReason` |
+
+Nothing else in the envelope is carried: not the station, operator or
+payment fields, and not `context.pdata`, which names the producing pod.
+
+**What the rejection lane does with it.** A dead-lettered record's AUDIT
+event (`executionStatus` ON_HOLD) is skipped as `dead-lettered packet
+(ON_HOLD)`: the DLT lane analyses it from the dead-letter record, whose
+headers carry the stack trace. A stage that passed (`validationStatus`
+"true") is skipped as `non-rejected packet`, as before. An envelope with no
+`edata.refId` fails validation and is a poison pill.
+
+The producer's `executionStatus` ON_HOLD is not the DLT lane's own "ON HOLD"
+state, a replay parked until its fix deploys (section 4.4.1).
+
+**Stage values.** Service packs match `flowMetaData.stage`, which is now
+`edata.stage` (`REJECTINTERCEPTOR` and `QC` in the samples). A pack whose
+`match.stages` still lists a packet-event value matches nothing until it
+lists the AUDIT one.
+
+`tests/test_kafka_audit_contract.py` guards the translation against the two
+captured samples in `tests/fixtures/audit/`.
 
 ---
 

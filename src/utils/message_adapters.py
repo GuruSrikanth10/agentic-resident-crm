@@ -93,9 +93,13 @@ class RejectionAdapter:
     def parse(self, msg) -> ParseResult:
         payload = msg.value.decode("utf-8", errors="replace")
         try:
-            signal_payload = json.loads(payload)
+            from src.models.audit_contract import to_message_payload
             from src.models.schemas import MessagePayload
 
+            # An AUDIT message becomes the packet event here, so every step
+            # after this one, and the route it is posted to, reads one shape.
+            # A packet event passes through unchanged.
+            signal_payload = to_message_payload(json.loads(payload))
             MessagePayload(**signal_payload)
         except Exception as validation_err:
             logger.error("Poison-pill payload detected", error=str(validation_err))
@@ -106,8 +110,14 @@ class RejectionAdapter:
         return ParseResult(body=signal_payload, raw_text=payload)
 
     def should_skip(self, body: dict) -> Optional[str]:
-        summary = body.get("packetExecutionSummary", {})
-        if summary.get("packetStatus") != "REJECTED":
+        from src.models.audit_contract import STATUS_ON_HOLD, STATUS_REJECTED
+
+        status = body.get("packetExecutionSummary", {}).get("packetStatus")
+        if status == STATUS_ON_HOLD:
+            # Dead-lettered: its stack trace reaches the DLT lane on the
+            # dead-letter record's headers, and it is analysed there.
+            return "dead-lettered packet (ON_HOLD)"
+        if status != STATUS_REJECTED:
             return "non-rejected packet"
 
         from src.storage.factory import get_casebook_storage
@@ -161,6 +171,7 @@ class DltAdapter:
         from src.dlt.headers import decode_kafka_headers, parse_headers
         from src.dlt.identity import derive_case_id
         from src.dlt.payload import decode_key, rejection_contract, resolve_ref_id
+        from src.models.audit_contract import to_message_payload
         from src.models.dlt_schemas import DltMessage
 
         raw_text = None
@@ -189,6 +200,11 @@ class DltAdapter:
                 return ParseResult(raw_text=raw_text or "",
                                    error=f"DLT validation failed: {validation_err}")
             return ParseResult(body=message.model_dump(), raw_text=raw_text)
+
+        # An AUDIT payload is stored as the packet event it translates to, so
+        # the service resolution, the refId and the payload summary all read
+        # the fields they always read. Any other payload is unchanged.
+        payload = to_message_payload(payload)
 
         headers = decode_kafka_headers(msg.headers)
         parsed_headers = parse_headers(headers)

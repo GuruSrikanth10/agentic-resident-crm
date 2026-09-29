@@ -1,5 +1,7 @@
 from typing import Optional, List, Any, Dict
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from src.models.audit_contract import to_message_payload
 
 # eventId is interpolated directly into filesystem paths (local casebook
 # storage) and S3 keys. Left unconstrained, a value like "../../something"
@@ -51,6 +53,15 @@ class FlowMetaData(BaseModel):
 
 
 class MessagePayload(BaseModel):
+    """The packet event. A message in the AUDIT contract is translated into
+    it before validation (`src/models/audit_contract.py`), so every route and
+    reader that validates a payload accepts either contract."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _from_audit_envelope(cls, data):
+        return to_message_payload(data)
+
     eventId: str = Field(pattern=EVENT_ID_PATTERN)
     category: Optional[str] = None
     eventType: Optional[str] = None

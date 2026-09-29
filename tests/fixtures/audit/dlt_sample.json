@@ -1,0 +1,83 @@
+{
+	"error_input": null,
+	"input_error_description": null,
+	"messageType": "AUDIT",
+	"ets": "1790676376383",
+	"ver": "1.0.0",
+	"mid": "AUDIT:5285e6b4-e85b-485e-abd1-b92ed29cb11c",
+	"actor": {
+		"id": "59a1a4be-4c25-47ea-87a2-85d70615c678",
+		"type": "SYSTEM"
+	},
+	"context": {
+		"channel": "KAFKA",
+		"sessionId": "59a1a4be-4c25-47ea-87a2-85d70615c678",
+		"deviceId": null,
+		"rollup": {
+			"lx": null
+		},
+		"pdata": {
+			"id": null,
+			"pid": "enu-qc-alloc-dcdr-866bd949c6-bl6pz",
+			"ver": "1.0.0",
+			"platform": "UBUNTU",
+			"dc": "MNDC",
+			"env": "PROD"
+		},
+		"cdata": null
+	},
+	"platformObj": {
+		"id": null,
+		"type": null,
+		"ver": null,
+		"rollup": {
+			"lx": null
+		}
+	},
+	"tags": null,
+	"edata": {
+		"sid": "S291120734612020260927203545",
+		"refId": "59a1a4be-4c25-47ea-87a2-85d70615c678",
+		"priority": 999,
+		"resubmissionCount": 0,
+		"resubmissionReason": "",
+		"stage": "QC",
+		"executionStatus": "ON_HOLD",
+		"validationStatus": "true",
+		"stageOutcome": "DLT",
+		"errorData": [
+			{
+				"type": "APPLICATIONEXCEPTION",
+				"errorReasonCode": "UNHANDLED_EXCEPTION"
+			}
+		],
+		"stageEntryTimeStamp": "2026-09-29T15:36:16.383855194+05:30",
+		"stageExitTimeStamp": null,
+		"publishedTopic": "ENU.SMARTQC.PROCESS.COMPLETION.V1-dlt",
+		"stationRegistrarId": "985",
+		"stationAgencyCode": "0985",
+		"stationNumber": "99001",
+		"stationMachineCode": "771e8a5f90287211",
+		"stationClientType": "Online",
+		"stationReleaseVersion": null,
+		"stationApplicationVersion": "4.7.0.3",
+		"stationOperatorId": "JK15-ICDS-0008",
+		"enrolmentLangCode": "23",
+		"pktSource": "ECL",
+		"enrolmentType": "N",
+		"subStage": "SMART_QC",
+		"appointmentId": null,
+		"bitset": "00000000000001111011100101111110",
+		"isMBU": null,
+		"isNRI": null,
+		"isForeignResident": null,
+		"payableAmount": 0.0,
+		"gst": 0.0,
+		"totalPayableAmount": 0.0,
+		"subStageStatus": "COMPLETED",
+		"subStageResubmissionCount": 0,
+		"subStageResubmissionReason": null,
+		"dgn": false,
+		"whiteListed": false
+	}
+}

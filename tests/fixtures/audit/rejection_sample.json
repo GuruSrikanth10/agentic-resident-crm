@@ -1,0 +1,83 @@
+{
+	"error_input": null,
+	"input_error_description": null,
+	"messageType": "AUDIT",
+	"ets": "1790676268980",
+	"ver": "1.0.0",
+	"mid": "AUDIT:f55168c5-65ea-41eb-8283-4075df82780d",
+	"actor": {
+		"id": "e839f515-aad5-4552-91d6-c788cd5a62b8",
+		"type": "SYSTEM"
+	},
+	"context": {
+		"channel": "KAFKA",
+		"sessionId": "e839f515-aad5-4552-91d6-c788cd5a62b8",
+		"deviceId": null,
+		"rollup": {
+			"lx": null
+		},
+		"pdata": {
+			"id": "enu-esb",
+			"pid": "enu-esb-dcdr-696cbc6b86-jlk6h",
+			"ver": "1.0.0",
+			"platform": "UBUNTU",
+			"dc": "MNDC",
+			"env": "PROD"
+		},
+		"cdata": null
+	},
+	"platformObj": {
+		"id": null,
+		"type": null,
+		"ver": null,
+		"rollup": {
+			"lx": null
+		}
+	},
+	"tags": null,
+	"edata": {
+		"sid": "0000002120694020260926203812",
+		"refId": "e839f515-aad5-4552-91d6-c788cd5a62b8",
+		"priority": 999,
+		"resubmissionCount": 0,
+		"resubmissionReason": null,
+		"stage": "REJECTINTERCEPTOR",
+		"executionStatus": "COMPLETED",
+		"validationStatus": "false",
+		"stageOutcome": "REJECT INTERCEPTOR COMPLETED",
+		"errorData": [
+			{
+				"type": "BUSINESS_EXCEPTION",
+				"errorReasonCode": "RESIDENT_QC_POA_DOCUMENT_NOT_APPROVED"
+			}
+		],
+		"stageEntryTimeStamp": null,
+		"stageExitTimeStamp": "2026-09-29T15:34:28.980665780+05:30",
+		"publishedTopic": "ENU.REJECTINT.PROCESS.COMPLETION.V1",
+		"stationRegistrarId": "000",
+		"stationAgencyCode": "0000",
+		"stationNumber": "00555",
+		"stationMachineCode": "UID_MC_SSUP_UPDATE_555",
+		"stationClientType": "Online",
+		"stationReleaseVersion": "",
+		"stationApplicationVersion": "2.0.0.0",
+		"stationOperatorId": "ssup_operator",
+		"enrolmentLangCode": "06",
+		"pktSource": "SSUP",
+		"enrolmentType": "U",
+		"subStage": null,
+		"appointmentId": null,
+		"bitset": "00001000000000111001100000000000",
+		"isMBU": null,
+		"isNRI": null,
+		"isForeignResident": null,
+		"payableAmount": 0.0,
+		"gst": 0.0,
+		"totalPayableAmount": 0.0,
+		"subStageStatus": null,
+		"subStageResubmissionCount": 0,
+		"subStageResubmissionReason": null,
+		"dgn": false,
+		"whiteListed": false
+	}
+}
