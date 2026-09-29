@@ -147,6 +147,24 @@ def test_a_service_with_no_pack_gets_only_what_names_it(estate):
     assert _names("investigator", "svc-unregistered") == {"common_lookup", "common_noisy"}
 
 
+def test_a_packs_exclude_removes_a_docs_tool(estate):
+    """A docs tool is for every service, whatever its listing says, and a
+    pack's tools.exclude still removes it for that pack."""
+    import mcp_types
+
+    docs = mcp_config.ServerConfig(name="droa_docs", url="http://docs.example/mcp",
+                                   kind="docs")
+    catalog = mcp_client.Catalog(servers=(docs,), tools=tuple(
+        mcp_client._remote_tool(docs, mcp_types.Tool(
+            name=name, description="d", input_schema={"type": "object"}))
+        for name in ("common_noisy", "docs_search")))
+    for role in ("investigator", "reviewer"):
+        assert {tool.name for tool in mcp_client.selection(role, BIO, catalog=catalog)} \
+            == {"common_noisy", "docs_search"}
+        assert {tool.name for tool in mcp_client.selection(role, DEMO, catalog=catalog)} \
+            == {"docs_search"}
+
+
 def test_the_prompt_section_lists_the_scoped_tools(estate, monkeypatch):
     monkeypatch.setattr(mcp_client, "current_catalog", lambda: CATALOG)
     demo = mcp_client.prompt_section("investigator", DEMO)

@@ -22,6 +22,23 @@ AGENT_MCP_SERVERS
     token need not sit inside the JSON. Unset means the local server alone
     when it runs, and no servers otherwise. Moving to a hosted server is a
     change to this variable (and AGENT_MCP_SERVE=false), not to any agent.
+    Once it is set the local server is no longer added implicitly: list it
+    too when both are wanted.
+
+    A server's optional `kind` is "tools" (the default) or "docs":
+        {"agent_tools": {"url": "http://127.0.0.1:8765/mcp"},
+         "droa_docs": {"url": "http://docs.ns.svc.cluster.local:8080/mcp",
+                       "kind": "docs"}}
+    A "tools" server reads live systems, and what its tools return is
+    evidence about the packet. A "docs" server serves the DROA service
+    documentation corpus -- the same content as docs_cache/ -- and publishes
+    none of this repository's `_meta`. Its tools go to the AGENT_DOCS_ROLES
+    roles for every service, their results are never recorded as evidence,
+    and they reach only the deep agents: the opencode harness reads the
+    corpus from disk and is given no docs server (mcp_client).
+AGENT_DOCS_ROLES (default: every role)
+    The roles that get a docs server's tools: a comma-separated list of
+    agent roles, or `none`. AGENT_TOOLS_<ROLE> does not govern them.
 AGENT_MCP_TIMEOUT_SECONDS (default 60)
     One tool call or listing, end to end.
 AGENT_MCP_RETRY_SECONDS (default 30)
@@ -45,7 +62,9 @@ ENV_PORT = "AGENT_MCP_PORT"
 ENV_SERVERS = "AGENT_MCP_SERVERS"
 ENV_TIMEOUT = "AGENT_MCP_TIMEOUT_SECONDS"
 ENV_RETRY = "AGENT_MCP_RETRY_SECONDS"
-SETTINGS = (ENV_SERVE, ENV_HOST, ENV_PORT, ENV_SERVERS, ENV_TIMEOUT, ENV_RETRY)
+ENV_DOCS_ROLES = "AGENT_DOCS_ROLES"
+SETTINGS = (ENV_SERVE, ENV_HOST, ENV_PORT, ENV_SERVERS, ENV_TIMEOUT, ENV_RETRY,
+            ENV_DOCS_ROLES)
 
 #: The name the bundled server is known by, to opencode and in the default
 #: server list.
@@ -57,6 +76,13 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 DEFAULT_TIMEOUT_SECONDS = 60.0
 DEFAULT_RETRY_SECONDS = 30.0
+
+#: What a server serves: tools that read live systems, or the service
+#: documentation corpus.
+KIND_TOOLS = "tools"
+KIND_DOCS = "docs"
+KINDS = (KIND_TOOLS, KIND_DOCS)
+_NONE = "none"
 
 #: Keys of a tool listing's `_meta` that this repository's server publishes
 #: and its client reads. Reverse-DNS style, as MCP asks of custom keys.
@@ -81,6 +107,8 @@ class ServerConfig:
     #: Sorted (header, value) pairs; a tuple so the config is hashable and
     #: comparable, which is how a stale tool list is recognised.
     headers: tuple = ()
+    #: KIND_TOOLS or KIND_DOCS.
+    kind: str = KIND_TOOLS
 
     def header_dict(self) -> dict:
         return dict(self.headers)
@@ -170,9 +198,13 @@ def _parse_servers(raw: str) -> list:
             spec = {"url": spec}
         if not isinstance(spec, dict):
             raise ValueError(f"{where} must be a URL or an object with a url.")
-        unknown = sorted(set(spec) - {"url", "headers"})
+        unknown = sorted(set(spec) - {"url", "headers", "kind"})
         if unknown:
-            raise ValueError(f"{where} has unknown key(s) {unknown}; use url and headers.")
+            raise ValueError(f"{where} has unknown key(s) {unknown}; use url, headers "
+                             f"and kind.")
+        kind = spec.get("kind", KIND_TOOLS)
+        if kind not in KINDS:
+            raise ValueError(f"{where}.kind must be one of {list(KINDS)}, got {kind!r}.")
         url = _expand(str(spec.get("url") or ""), f"{where}.url")
         parsed = urlparse(url)
         if parsed.scheme not in ("http", "https") or not parsed.netloc:
@@ -183,7 +215,7 @@ def _parse_servers(raw: str) -> list:
             raise ValueError(f"{where}.headers must map header names to strings.")
         expanded = {k: _expand(v, f"{where}.headers[{k!r}]") for k, v in headers.items()}
         servers.append(ServerConfig(name=name, url=url,
-                                    headers=tuple(sorted(expanded.items()))))
+                                    headers=tuple(sorted(expanded.items())), kind=kind))
     return sorted(servers, key=lambda server: server.name)
 
 
@@ -203,6 +235,33 @@ def servers() -> list:
 
 def find_server(name: str) -> Optional[ServerConfig]:
     return next((server for server in servers() if server.name == name), None)
+
+
+def of_kind(configured, kind: str) -> tuple:
+    """The servers in `configured` of `kind`, in their order."""
+    return tuple(server for server in configured if server.kind == kind)
+
+
+def docs_roles() -> tuple:
+    """The roles that get a docs server's tools (AGENT_DOCS_ROLES), in
+    AGENT_ROLES order.
+
+    Raises ValueError on an unknown role; `validate()` reports the same at
+    boot, so a running process never meets it.
+    """
+    from src.tools.agent_tools import AGENT_ROLES
+
+    raw = os.environ.get(ENV_DOCS_ROLES, "").strip()
+    if not raw:
+        return AGENT_ROLES
+    if raw.lower() == _NONE:
+        return ()
+    named = {part.strip() for part in raw.split(",") if part.strip()}
+    unknown = sorted(named - set(AGENT_ROLES))
+    if unknown:
+        raise ValueError(f"{ENV_DOCS_ROLES} names unknown role(s) {unknown}; the roles "
+                         f"are {list(AGENT_ROLES)}, or {_NONE}.")
+    return tuple(role for role in AGENT_ROLES if role in named)
 
 
 def is_loopback(url: str) -> bool:
@@ -227,8 +286,9 @@ def validate() -> list:
         if not valid:
             errors.append(f"{variable} must be a positive number"
                           f"{' and a valid port' if variable == ENV_PORT else ''}; got {raw!r}.")
-    try:
-        servers()
-    except ValueError as e:
-        errors.append(str(e))
+    for check in (servers, docs_roles):
+        try:
+            check()
+        except ValueError as e:
+            errors.append(str(e))
     return errors

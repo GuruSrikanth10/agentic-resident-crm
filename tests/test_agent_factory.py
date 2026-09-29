@@ -7,6 +7,8 @@ chat model, with their tools served by the real tool server over HTTP (the
 trip, the `task` subagent and the limits all genuinely run. Only the model's
 replies are canned.
 """
+import json
+
 import pytest
 from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -18,6 +20,7 @@ from src.core import agent_factory
 from src.core.agent_factory import OPERATING_MODE, build_agent
 from src.tools import agent_tools, mcp_client
 from src.tools.agent_tools import Toolset, agent_tool
+from conftest import DOCS_TOOLS
 
 #: The pack every rejection agent here is built for; the probe tool is for
 #: every service, so any pack would do.
@@ -165,6 +168,30 @@ def test_limits_fall_back_on_unusable_settings(monkeypatch):
     monkeypatch.setenv("AGENT_MAX_MODEL_CALLS", "-3")
     assert agent_factory.max_tool_calls() == agent_factory.DEFAULT_MAX_TOOL_CALLS
     assert agent_factory.max_model_calls() == agent_factory.DEFAULT_MAX_MODEL_CALLS
+
+
+def test_the_investigator_gets_the_docs_tools_and_their_section(docs_server, monkeypatch):
+    monkeypatch.setenv("AGENT_MCP_SERVERS", json.dumps({
+        "droa_docs": {"url": docs_server(), "kind": "docs"}}))
+    model = ScriptedModel(replies=[calls_tool("docs_read", {"service": PACK, "path": "flows.md"},
+                                              "d1"),
+                                   AIMessage(content="FINAL")])
+    agent = build_agent("investigator", model, "ROLE PROMPT", pack=PACK)
+
+    with mcp_client.recording() as calls:
+        result = agent.invoke({"messages": [HumanMessage(content="go")]})
+
+    assert result["messages"][-1].content == "FINAL"
+    assert set(DOCS_TOOLS) <= set(model.bound[0])
+    assert "enu-biometric/flows.md: the document" in result["messages"][-2].content
+    assert calls == []
+    text = system_text(model.requests[0])
+    assert text.index("ROLE PROMPT") < text.index(mcp_client.DOCS_HEADING) \
+        < text.index("### OPERATING MODE")
+    assert "This packet's documentation service is `enu-biometric`." in text
+    # Docs tools alone: no evidence rules for them.
+    assert mcp_client.TOOLS_HEADING not in text
+    assert mcp_client.COMMON_RULES not in text
 
 
 def test_an_explicit_tool_may_not_share_a_registered_name(probe_tool):

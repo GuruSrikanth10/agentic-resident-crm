@@ -323,7 +323,9 @@ def _build_dlt_agent():
         @retry_transient
         def invoke():
             # Recorded per attempt, as in the rejection lane.
-            with mcp_client.recording() as calls:
+            with mcp_client.recording() as calls, \
+                    mcp_client.call_context(role="dlt_investigator",
+                                            case_id=state.get("case_id")):
                 result = agent_for("dlt_investigator", state.get("service_pack")).invoke({"messages": [
                     HumanMessage(content=prompt),
                 ]})
@@ -399,9 +401,10 @@ def _build_dlt_agent():
         @llm_breaker
         @retry_transient
         def invoke():
-            return agent_for("dlt_reviewer", state.get("service_pack")).invoke({"messages": [
-                HumanMessage(content=prompt),
-            ]})
+            with mcp_client.call_context(role="dlt_reviewer", case_id=state.get("case_id")):
+                return agent_for("dlt_reviewer", state.get("service_pack")).invoke({"messages": [
+                    HumanMessage(content=prompt),
+                ]})
 
         res = invoke()
         metrics.record_llm_usage("dlt_reviewer", res)
@@ -438,9 +441,10 @@ def _build_dlt_agent():
         @llm_breaker
         @retry_transient
         def invoke():
-            return agent_for("dlt_synthesis", state.get("service_pack")).invoke({"messages": [
-                HumanMessage(content=prompt),
-            ]})
+            with mcp_client.call_context(role="dlt_synthesis", case_id=state.get("case_id")):
+                return agent_for("dlt_synthesis", state.get("service_pack")).invoke({"messages": [
+                    HumanMessage(content=prompt),
+                ]})
 
         res = invoke()
         metrics.record_llm_usage("dlt_synthesis", res)
@@ -459,12 +463,13 @@ def _build_dlt_agent():
         @llm_breaker
         @retry_transient
         def invoke_repair():
-            return agent_for("dlt_synthesis", state.get("service_pack")).invoke({"messages": [
-                HumanMessage(content=(
-                    f"Your previous reply did not satisfy the contract: {error}\n\n"
-                    f"Previous reply:\n{raw}\n\n"
-                    f"Reply again with ONLY the JSON object.")),
-            ]})
+            with mcp_client.call_context(role="dlt_synthesis", case_id=state.get("case_id")):
+                return agent_for("dlt_synthesis", state.get("service_pack")).invoke({"messages": [
+                    HumanMessage(content=(
+                        f"Your previous reply did not satisfy the contract: {error}\n\n"
+                        f"Previous reply:\n{raw}\n\n"
+                        f"Reply again with ONLY the JSON object.")),
+                ]})
 
         repaired = invoke_repair()
         metrics.record_llm_usage("dlt_synthesis_repair", repaired)

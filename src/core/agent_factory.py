@@ -9,6 +9,13 @@ One builder for both lanes, so every agent gets the same things:
   (MULTI_SERVICE_PLAN.md D7) -- with the system-prompt section describing
   them, beside any tools the orchestrator passes itself (queue_for_replay,
   add_learning_rule);
+- when a docs server is configured (mcp_config, kind "docs"), the service
+  documentation tools, for the AGENT_DOCS_ROLES roles, with a SERVICE
+  DOCUMENTATION TOOLS section of their own after AVAILABLE TOOLS that names
+  the pack's documentation service. Their results are not evidence about the
+  packet and are not recorded. Reading documentation costs tool and model
+  calls, so a deployment with a docs server raises the limits below
+  (.env.example);
 - the deep-agent built-ins: planning (write_todos), a scratch filesystem held
   in the run's own state -- nothing is written to disk -- and `task`
   subagents;
@@ -94,7 +101,8 @@ def _limits() -> list:
 
 
 def system_prompt_for(role: str, system_prompt: str, pack: Optional[str] = None) -> str:
-    """The role's prompt, its AVAILABLE TOOLS section, then the operating note.
+    """The role's prompt, its AVAILABLE TOOLS and SERVICE DOCUMENTATION TOOLS
+    sections, then the operating note.
 
     deepagents appends its own base prompt and the built-in tools'
     instructions after this.

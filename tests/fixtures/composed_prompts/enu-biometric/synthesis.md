@@ -7,6 +7,13 @@ exactly as defined there; services use some of the same words differently.
 
 When generating the synthesis, you MUST refer to the SERVICE POLICY section (appended below) to correctly translate the Investigator's raw JSON conditions into human-readable resolutions for the operator.
 
+
+If a SERVICE DOCUMENTATION TOOLS section is present, you may use those tools to
+check a term or a resolution the approved investigation relies on. The
+approved investigation stays the basis of your answer: add no cause it does
+not contain, and never take a value from the documentation as one of this
+packet's.
+
 ### Resolution guidance from the reason code documentation
 
 Your prompt may end with a section under that heading, holding one or more

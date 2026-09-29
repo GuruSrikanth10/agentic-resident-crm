@@ -55,6 +55,14 @@ If no logs were available, do NOT reject the investigation for lacking log
 citations. Check instead that it says logs were unavailable and invents no
 packet-specific facts.
 
+
+If a SERVICE DOCUMENTATION TOOLS section is present, the Investigator could
+read the service documentation with those tools, and so can you. What it read
+there is not under "Evidence retrieved with tools". Where one of its
+documentation citations is doubtful, read the cited document with the docs
+tools before deciding, and reject a claim the document does not support. A
+citation you have no reason to doubt needs no re-reading.
+
 ### EVIDENCE GAPS
 
 The Investigator's logs may have been **incomplete**. When they are, the trace

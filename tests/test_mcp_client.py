@@ -19,6 +19,7 @@ from src.tools import agent_tools, mcp_client, mcp_config
 from src.tools.agent_tools import Toolset, agent_tool
 from src.tools.agent_tools.enu_biometric import _process_db
 from src.utils.resilience import process_db_breaker
+from conftest import DOCS_TOOLS
 
 #: The service the process DB tools are for, and the pack its agents use.
 BIO = "enu-biometric"
@@ -103,6 +104,7 @@ def test_explicit_servers_with_headers_from_the_environment(monkeypatch):
     ('{"tools": "ftp://x/mcp"}', "http(s) URL"),
     ('{"tools": {"url": "http://x/mcp", "headers": {"A": 1}}}', "headers"),
     ('{"tools": {"url": "http://x/mcp", "token": "t"}}', "unknown key"),
+    ('{"tools": {"url": "http://x/mcp", "kind": "doc"}}', "kind must be one of"),
     ('{"tools": {"url": "http://x/mcp", "headers": {"A": "${NOT_SET_ANYWHERE}"}}}',
      "NOT_SET_ANYWHERE"),
 ])
@@ -111,6 +113,44 @@ def test_malformed_server_settings_fail_validation(monkeypatch, value, message):
     with pytest.raises(ValueError, match=re.escape(message)):
         mcp_config.servers()
     assert any(message in error for error in mcp_client.validate())
+
+
+def test_a_server_kind_is_read_and_defaults_to_tools(monkeypatch):
+    monkeypatch.setenv("AGENT_MCP_SERVERS", json.dumps({
+        "agent_tools": {"url": "http://127.0.0.1:8765/mcp"},
+        "droa_docs": {"url": "http://docs.ns.svc.cluster.local:8080/mcp", "kind": "docs"}}))
+    tools, docs = mcp_config.servers()
+    assert (tools.kind, docs.kind) == ("tools", "docs")
+    assert mcp_config.of_kind([tools, docs], mcp_config.KIND_DOCS) == (docs,)
+    # Frozen, hashable and compared by kind too, so a changed kind makes a
+    # catalog stale.
+    assert hash(docs) == hash(mcp_config.ServerConfig(
+        name="droa_docs", url=docs.url, kind="docs"))
+    assert docs != mcp_config.ServerConfig(name="droa_docs", url=docs.url)
+
+
+@pytest.mark.parametrize("value, roles", [
+    (None, agent_tools.AGENT_ROLES),
+    ("", agent_tools.AGENT_ROLES),
+    ("none", ()),
+    ("NONE", ()),
+    ("reviewer, investigator,dlt_reviewer", ("investigator", "reviewer", "dlt_reviewer")),
+])
+def test_the_docs_roles_setting(monkeypatch, value, roles):
+    if value is None:
+        monkeypatch.delenv("AGENT_DOCS_ROLES", raising=False)
+    else:
+        monkeypatch.setenv("AGENT_DOCS_ROLES", value)
+    assert mcp_config.docs_roles() == roles
+    assert mcp_client.validate() == []
+
+
+def test_an_unknown_docs_role_fails_validation(monkeypatch):
+    monkeypatch.setenv("AGENT_DOCS_ROLES", "investigator,investigatr")
+    with pytest.raises(ValueError, match=re.escape("['investigatr']")):
+        mcp_config.docs_roles()
+    assert any("AGENT_DOCS_ROLES" in error and "investigatr" in error
+               for error in mcp_client.validate())
 
 
 def test_validate_reports_bad_switches_and_misspelt_roles(monkeypatch):
@@ -491,3 +531,344 @@ def test_cli_lists_prompts_and_calls(served, capsys):
     assert mcp_client.main(["call", "bio_get_packet_stage_summary", '{"refid": "R1"}']) == 0
     assert json.loads(capsys.readouterr().out)["found"] is True
     assert mcp_client.main(["call", "no_such_tool"]) == 1
+
+
+# ======================================================================
+# A documentation server (kind "docs")
+# ======================================================================
+
+DOCS = mcp_config.ServerConfig(name="droa_docs", url="http://docs.example/mcp", kind="docs")
+
+
+def _listed(name, meta=None):
+    import mcp_types
+
+    return mcp_types.Tool(name=name, description=f"{name} description",
+                          input_schema={"type": "object"}, _meta=meta)
+
+
+def _docs_tool(name):
+    """A docs tool as the catalog would take it from a listing."""
+    return mcp_client._remote_tool(DOCS, _listed(name))
+
+
+def _servers(monkeypatch, **urls):
+    """Point AGENT_MCP_SERVERS at the tools server and the docs server."""
+    config = {}
+    if "tools" in urls:
+        config["agent_tools"] = {"url": urls["tools"]}
+    if "docs" in urls:
+        config["droa_docs"] = {"url": urls["docs"], "kind": "docs"}
+    monkeypatch.setenv("AGENT_MCP_SERVERS", json.dumps(config))
+
+
+@pytest.fixture
+def docs_only(docs_server, monkeypatch):
+    """The fake documentation server, alone."""
+    url = docs_server()
+    _servers(monkeypatch, docs=url)
+    return url
+
+
+@pytest.fixture
+def both(served, docs_server, monkeypatch):
+    """The real tool server with the process DB tools, and the fake
+    documentation server."""
+    url = docs_server()
+    _servers(monkeypatch, tools=served, docs=url)
+    return served, url
+
+
+def _names(tools):
+    return [tool.name for tool in tools]
+
+
+class LogRecorder:
+    """Stands in for mcp_client's logger; keeps (level, event, fields)."""
+
+    def __init__(self):
+        self.lines = []
+
+    def __getattr__(self, level):
+        return lambda event, **fields: self.lines.append((level, event, fields))
+
+    def calls(self):
+        return [line for line in self.lines if line[1] == "Agent tool call"]
+
+
+@pytest.fixture
+def log(monkeypatch):
+    recorder = LogRecorder()
+    monkeypatch.setattr(mcp_client, "logger", recorder)
+    return recorder
+
+
+# ---------------------------------------------------------------- catalog
+
+def test_a_docs_listing_without_metadata_is_for_every_service_and_the_docs_roles(both):
+    catalog = mcp_client.current_catalog()
+    assert catalog.complete
+    docs = [tool for tool in catalog.tools if tool.is_docs]
+    assert sorted(_names(docs)) == sorted(DOCS_TOOLS)
+    for tool in docs:
+        assert tool.services == ("*",)
+        assert tool.agents == agent_tools.AGENT_ROLES
+        assert tool.toolset == mcp_client.DOCS_TOOLSET
+        assert tool.guidance == mcp_client.DOCS_GUIDANCE
+    # The tools server's tools are catalogued as before.
+    assert {tool.name for tool in catalog.tools if not tool.is_docs} == PROCESS_DB_TOOLS
+
+
+def test_a_docs_listing_may_name_its_toolset_and_guidance_but_not_its_audience(monkeypatch):
+    monkeypatch.setenv("AGENT_DOCS_ROLES", "reviewer")
+    tool = mcp_client._remote_tool(DOCS, _listed("docs_search", {
+        mcp_config.META_TOOLSET: "DROA corpus", mcp_config.META_GUIDANCE: "Read it.",
+        mcp_config.META_AGENTS: ["investigator"], mcp_config.META_SERVICES: [BIO]}))
+    assert (tool.toolset, tool.guidance) == ("DROA corpus", "Read it.")
+    assert (tool.agents, tool.services) == (("reviewer",), ("*",))
+
+
+def test_the_prefix_rule_accepts_a_tool_for_every_service_without_a_prefix():
+    from src.utils import service_registry
+
+    assert service_registry.tool_prefix_error("docs_search", ("*",)) is None
+    assert service_registry.tool_prefix_error("bio_docs_search", ("*",)) is not None
+
+
+# -------------------------------------------------------------- selection
+
+def test_docs_tools_follow_every_tools_server_tool(both):
+    assert _names(mcp_client.tools_for("investigator", BIO)) == \
+        sorted(PROCESS_DB_TOOLS) + sorted(DOCS_TOOLS)
+    # Every role, every scope, including the unresolved pack.
+    for role in agent_tools.SERVICE_ROLES:
+        for service in (BIO, "_default"):
+            assert set(DOCS_TOOLS) <= set(_names(mcp_client.tools_for(role, service)))
+
+
+def test_docs_tools_survive_a_role_override_and_none(both, monkeypatch):
+    monkeypatch.setenv("AGENT_TOOLS_INVESTIGATOR", "bio_get_parking_status")
+    assert _names(mcp_client.tools_for("investigator", BIO)) == \
+        ["bio_get_parking_status", *sorted(DOCS_TOOLS)]
+    monkeypatch.setenv("AGENT_TOOLS_INVESTIGATOR", "none")
+    assert _names(mcp_client.tools_for("investigator", BIO)) == sorted(DOCS_TOOLS)
+
+
+def test_a_role_override_may_not_name_a_docs_tool(both, monkeypatch):
+    monkeypatch.setenv("AGENT_TOOLS_INVESTIGATOR", "bio_get_parking_status,docs_search")
+    with pytest.raises(ValueError, match="controlled by AGENT_DOCS_ROLES"):
+        mcp_client.tools_for("investigator", BIO)
+
+
+def test_a_role_outside_the_docs_roles_gets_no_docs_tool(monkeypatch):
+    monkeypatch.setenv("AGENT_DOCS_ROLES", "investigator")
+    catalog = _catalog_of(_docs_tool("docs_search"))
+    assert _names(mcp_client.selection("investigator", BIO, catalog=catalog)) == ["docs_search"]
+    assert mcp_client.selection("reviewer", BIO, catalog=catalog) == []
+    assert mcp_client.selection("dlt_investigator", catalog=catalog) == []
+    monkeypatch.setenv("AGENT_DOCS_ROLES", "none")
+    catalog = _catalog_of(_docs_tool("docs_search"))
+    assert mcp_client.selection("investigator", BIO, catalog=catalog) == []
+
+
+def test_dlt_roles_get_docs_tools_with_and_without_a_service():
+    catalog = _catalog_of(_docs_tool("docs_search"))
+    for role in agent_tools.DLT_ROLES:
+        assert _names(mcp_client.selection(role, catalog=catalog)) == ["docs_search"]
+        assert _names(mcp_client.selection(role, BIO, catalog=catalog)) == ["docs_search"]
+
+
+# --------------------------------------------------------- prompt section
+
+def test_the_docs_section_follows_the_tools_section_and_names_the_service(both):
+    section = mcp_client.prompt_section("investigator", BIO)
+    assert section.startswith(mcp_client.TOOLS_HEADING)
+    assert section.count(mcp_client.COMMON_RULES) == 1
+    docs = section[section.index(mcp_client.DOCS_HEADING):]
+    assert section.index(mcp_client.COMMON_RULES) < section.index(mcp_client.DOCS_HEADING)
+    assert docs.startswith(f"{mcp_client.DOCS_HEADING}\nTools: {', '.join(sorted(DOCS_TOOLS))}.")
+    assert "This packet's documentation service is `enu-biometric`." in docs
+    assert docs.endswith(mcp_client.DOCS_GUIDANCE)
+    # The docs tools are never listed under the evidence rules.
+    assert not any(name in section[:section.index(mcp_client.DOCS_HEADING)]
+                   for name in DOCS_TOOLS)
+
+
+def test_an_unresolved_packet_is_told_to_find_its_service(both):
+    for role, service in (("investigator", "_default"), ("dlt_investigator", None)):
+        section = mcp_client.prompt_section(role, service)
+        assert mcp_client.DOCS_SERVICE_UNRESOLVED in section
+        assert "documentation service is" not in section
+    assert "documentation service is `enu-biometric`" in \
+        mcp_client.prompt_section("dlt_investigator", BIO)
+
+
+def test_a_role_with_only_docs_tools_gets_only_the_docs_section(both):
+    section = mcp_client.prompt_section("reviewer", BIO)
+    assert section.startswith(mcp_client.DOCS_HEADING)
+    assert mcp_client.TOOLS_HEADING not in section
+    assert mcp_client.COMMON_RULES not in section
+
+
+def _every_section(opencode=False):
+    sections = {}
+    for role in agent_tools.SERVICE_ROLES:
+        for service in (BIO, "_default"):
+            sections[role, service] = mcp_client.prompt_section(role, service,
+                                                                opencode=opencode)
+    for role in agent_tools.DLT_ROLES:
+        for service in (None, BIO):
+            sections[role, service] = mcp_client.prompt_section(role, service,
+                                                                opencode=opencode)
+    return sections
+
+
+def test_sections_are_byte_identical_for_a_role_without_docs_tools(served, docs_server,
+                                                                   monkeypatch):
+    without = _every_section()
+    harness = _every_section(opencode=True)
+    assert without[("investigator", BIO)].startswith(mcp_client.TOOLS_HEADING)
+
+    _servers(monkeypatch, tools=served, docs=docs_server())
+    monkeypatch.setenv("AGENT_DOCS_ROLES", "none")
+    mcp_client.reset()
+    assert _every_section() == without
+    # The harness never sees docs tools, whoever gets them.
+    monkeypatch.delenv("AGENT_DOCS_ROLES")
+    mcp_client.reset()
+    assert _every_section(opencode=True) == harness
+
+
+def test_the_fingerprint_moves_with_the_docs_server(served, docs_server, monkeypatch):
+    without = mcp_client.fingerprint_material(BIO)
+    _servers(monkeypatch, tools=served, docs=docs_server())
+    mcp_client.reset()
+    with_docs = mcp_client.fingerprint_material(BIO)
+    assert with_docs != without
+    assert mcp_client.DOCS_HEADING in with_docs and "docs_search" in with_docs
+    monkeypatch.setenv("AGENT_DOCS_ROLES", "investigator")
+    mcp_client.reset()
+    assert mcp_client.fingerprint_material(BIO) not in (without, with_docs)
+
+
+# --------------------------------------------------------------- evidence
+
+def test_docs_calls_are_not_evidence_and_tool_calls_still_are(both):
+    docs = _tool("investigator", "docs_read")
+    lookup = _tool("investigator", "bio_get_packet_stage_summary")
+    with mcp_client.recording() as calls:
+        assert docs.invoke({"service": BIO, "path": "flows.md"}) == \
+            "enu-biometric/flows.md: the document"
+        asyncio.run(docs.ainvoke({"service": BIO, "path": "flows.md"}))
+        lookup.invoke({"refid": "R1"})
+    assert [call["tool"] for call in calls] == ["bio_get_packet_stage_summary"]
+
+
+# ---------------------------------------------------------------- harness
+
+def test_the_harness_never_sees_a_docs_server(both):
+    tools_url, _ = both
+    config = mcp_client.opencode_config()
+    assert config["mcp"] == {"agent_tools": {"type": "remote", "url": tools_url,
+                                             "enabled": True}}
+    for agent in config["agent"].values():
+        assert not any(name.startswith("droa_docs_") for name in agent["tools"])
+    records = mcp_client.evidence_from_harness([
+        {"tool": "droa_docs_docs_search", "input": {"query": "x"}, "output": "hits"},
+        {"tool": "agent_tools_bio_get_parking_status", "input": {"refid": "R1"},
+         "output": "{}"},
+    ])
+    assert [record["tool"] for record in records] == ["bio_get_parking_status"]
+    assert mcp_client.prompt_section("reviewer", BIO, opencode=True) == ""
+
+
+def test_the_harness_gets_nothing_with_only_a_docs_server(docs_only):
+    assert mcp_client.current_catalog().tools
+    assert mcp_client.opencode_config() == {}
+    assert mcp_client.evidence_from_harness([
+        {"tool": "droa_docs_docs_search", "input": {}, "output": "hits"}]) == []
+
+
+def test_the_cli_list_shows_each_servers_kind(both, capsys):
+    assert mcp_client.main(["list"]) == 0
+    listed = json.loads(capsys.readouterr().out)
+    assert {server["name"]: server["kind"] for server in listed["servers"]} == {
+        "agent_tools": "tools", "droa_docs": "docs"}
+
+
+# ---------------------------------------------------------------- logging
+
+def test_an_answered_call_is_logged_once_at_info(docs_only, log):
+    tool = _tool("investigator", "docs_read")
+    result = tool.invoke({"service": BIO, "path": "flows.md"})
+    [(level, _, fields)] = log.calls()
+    assert level == "info"
+    assert fields["server"] == "droa_docs" and fields["server_kind"] == "docs"
+    assert fields["tool"] == "docs_read" and fields["outcome"] == "ok"
+    assert isinstance(fields["duration_ms"], int) and fields["duration_ms"] >= 0
+    assert fields["result_chars"] == len(result)
+    assert json.loads(fields["args"]) == {"service": BIO, "path": "flows.md"}
+    # Outside a call context: no role, no ids, not even as None.
+    assert not {"role", "event_id", "case_id", "error"} & set(fields)
+    # The result body is never in an INFO line.
+    assert result not in json.dumps(fields)
+
+
+def test_a_tool_error_is_logged_once_at_warning(docs_only, log):
+    result = _tool("investigator", "docs_read").invoke({"service": BIO, "path": "boom"})
+    assert result.startswith("The tool reported an error")
+    [(level, _, fields)] = log.calls()
+    assert (level, fields["outcome"]) == ("warning", "tool_error")
+    assert "error" not in fields
+
+
+def test_a_failed_call_is_logged_once_at_error(log):
+    remote = mcp_client.RemoteTool(server=mcp_config.ServerConfig(
+        name="gone", url="http://127.0.0.1:9/mcp"), name="lookup", description="d",
+        input_schema={"type": "object", "properties": {"refid": {"type": "string"}}})
+    with mcp_client.call_context(role="investigator", event_id="e-1"):
+        mcp_client._langchain_tool(remote).invoke({"refid": "R1"})
+    [(level, _, fields)] = log.calls()
+    assert (level, fields["outcome"]) == ("error", "call_failed")
+    assert fields["server_kind"] == "tools"
+    assert fields["error"].startswith(("ConnectError", "ConnectionRefusedError", "OSError"))
+    assert (fields["role"], fields["event_id"]) == ("investigator", "e-1")
+    assert not [line for line in log.lines if line[1] == "Agent tool call failed"]
+
+
+def test_the_result_is_logged_only_at_debug_and_only_its_start(docs_only, log):
+    _tool("investigator", "docs_search").invoke({"query": "q" * 1000})
+    debug = [fields for level, _, fields in log.lines if level == "debug"]
+    assert len(debug) == 1
+    assert len(debug[0]["result"]) == mcp_client.MAX_LOGGED_RESULT_CHARS
+
+
+def test_long_arguments_are_cut(docs_only, log):
+    _tool("investigator", "docs_search").invoke({"query": "q" * 2000})
+    [(_, _, fields)] = log.calls()
+    assert len(fields["args"]) == mcp_client.MAX_LOGGED_ARGS_CHARS
+    assert fields["args"].endswith("...")
+
+
+def test_the_call_context_reaches_the_log_from_a_worker_thread(docs_only, log):
+    """As the graphs run tools: on a worker thread with a copy of the
+    caller's context -- and, with a loop running there, the call itself on
+    `_run_sync`'s helper thread, which has none."""
+    import contextvars
+    from concurrent.futures import ThreadPoolExecutor
+
+    tool = _tool("dlt_investigator", "docs_search", service=None)
+
+    async def with_a_running_loop():
+        return tool.invoke({"query": "q"})
+
+    with mcp_client.call_context(role="dlt_investigator", case_id="case-7", event_id=None):
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pool.submit(contextvars.copy_context().run, tool.invoke, {"query": "q"}).result()
+            pool.submit(contextvars.copy_context().run,
+                        lambda: asyncio.run(with_a_running_loop())).result()
+    lines = log.calls()
+    assert len(lines) == 2
+    for _, _, fields in lines:
+        assert (fields["role"], fields["case_id"]) == ("dlt_investigator", "case-7")
+        assert "event_id" not in fields

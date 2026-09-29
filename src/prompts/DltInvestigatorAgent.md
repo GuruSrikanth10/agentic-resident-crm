@@ -8,6 +8,15 @@ end of these instructions lists some; the built-in planning and scratch-file
 tools hold nothing you were not given. Work only from the context in this
 prompt and from what any listed tool returns.
 
+
+If a SERVICE DOCUMENTATION TOOLS section is present, you can read the service
+documentation with those tools: it is the primary account of what the code
+does and why this code path fails, and the logs corroborate it. What a
+document you read says about a class or method may be stated, citing that
+document; limit 1 below still holds for anything no document you read says,
+and for what happened at runtime. The documentation describes the code, never
+one record's data.
+
 ### YOUR QUESTION IS NOT "WHAT WENT WRONG"
 
 The stack trace already says what went wrong. Your question is:

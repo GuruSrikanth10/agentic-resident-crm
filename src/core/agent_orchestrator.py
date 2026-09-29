@@ -1001,9 +1001,10 @@ def _build_agent():
         @llm_breaker
         @retry_transient
         def invoke_filter():
-            return log_filter_agent.invoke({"messages": [
-                HumanMessage(content=prompt)
-            ]})
+            with mcp_client.call_context(role="log_filter", event_id=event_id):
+                return log_filter_agent.invoke({"messages": [
+                    HumanMessage(content=prompt)
+                ]})
             
         res = _counted("log_filter", invoke_filter, _service_of(state))
         filtered_logs = res["messages"][-1].content
@@ -1235,7 +1236,8 @@ def _build_agent():
             # Recorded per attempt: a retried call starts a fresh list, so the
             # lookups of an attempt that raised never pose as the evidence of
             # the run that produced the answer.
-            with mcp_client.recording() as calls:
+            with mcp_client.recording() as calls, \
+                    mcp_client.call_context(role="investigator", event_id=event_id):
                 result = agent_for("investigator", pack).invoke({"messages": [
                     HumanMessage(content=prompt)
                 ]})
@@ -1376,9 +1378,10 @@ def _build_agent():
         @llm_breaker
         @retry_transient
         def invoke_reviewer():
-            return agent_for("reviewer", pack).invoke({"messages": [
-                HumanMessage(content=prompt)
-            ]})
+            with mcp_client.call_context(role="reviewer", event_id=event_id):
+                return agent_for("reviewer", pack).invoke({"messages": [
+                    HumanMessage(content=prompt)
+                ]})
 
         res = _counted("reviewer", invoke_reviewer, service)
         metrics.record_llm_usage("reviewer", res)
@@ -1460,9 +1463,10 @@ def _build_agent():
         @llm_breaker
         @retry_transient
         def invoke_synthesis():
-            return agent_for("synthesis", pack, pilot).invoke({"messages": [
-                HumanMessage(content=prompt)
-            ]})
+            with mcp_client.call_context(role="synthesis", event_id=event_id):
+                return agent_for("synthesis", pack, pilot).invoke({"messages": [
+                    HumanMessage(content=prompt)
+                ]})
 
         res = _counted("synthesis", invoke_synthesis, service)
         metrics.record_llm_usage("synthesis", res)
@@ -1491,9 +1495,10 @@ def _build_agent():
             @llm_breaker
             @retry_transient
             def invoke_repair():
-                return agent_for("synthesis", pack, pilot).invoke({"messages": [
-                    HumanMessage(content=repair_prompt)
-                ]})
+                with mcp_client.call_context(role="synthesis", event_id=event_id):
+                    return agent_for("synthesis", pack, pilot).invoke({"messages": [
+                        HumanMessage(content=repair_prompt)
+                    ]})
 
             res = _counted("synthesis", invoke_repair, service)
             metrics.record_llm_usage("synthesis", res)

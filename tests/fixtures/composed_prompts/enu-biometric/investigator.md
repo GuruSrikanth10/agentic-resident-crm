@@ -8,6 +8,14 @@ prompt and, when an "AVAILABLE TOOLS" section appears at the end of these
 instructions, what those tools return. The built-in planning and scratch-file
 tools hold nothing you were not given.
 
+
+If a SERVICE DOCUMENTATION TOOLS section is present, read this service's
+documentation with those tools before you conclude: it is the primary account
+of what the code does and why it fails, and the logs and tool results
+corroborate it. Cite the document each claim relies on. The documentation
+describes the service, not this packet: never present a value read there as a
+fact about this packet.
+
 ### REASON CODE DOCUMENTATION -- READ THIS FIRST WHEN IT IS PRESENT
 
 The prompt may include a "Reason Code Documentation" section. When it does:

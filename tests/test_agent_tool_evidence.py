@@ -67,6 +67,9 @@ class ToolUsingAgent:
 
 def rejection_node(monkeypatch, name, agent):
     monkeypatch.setattr(orch, "_agent", None)
+    # Restored after the test too: a catalog left behind from a server that
+    # is gone would be stale for every later test's graph.
+    monkeypatch.setattr(orch, "_agent_catalog", None)
     monkeypatch.setattr(orch, "get_llm", lambda _tier: MagicMock())
     monkeypatch.setattr(orch, "build_agent", lambda *a, **k: agent)
     monkeypatch.setattr(orch, "get_checkpointer", lambda: None)
@@ -75,6 +78,9 @@ def rejection_node(monkeypatch, name, agent):
 
 def dlt_node(monkeypatch, name, agent):
     monkeypatch.setattr(dlt, "_agent", None)
+    # Restored after the test too: a catalog left behind from a server that
+    # is gone would be stale for every later test's graph.
+    monkeypatch.setattr(dlt, "_agent_catalog", None)
     monkeypatch.setattr(dlt, "get_llm", lambda _tier: MagicMock())
     monkeypatch.setattr(dlt, "build_agent", lambda *a, **k: agent)
     return dlt._build_dlt_agent().builder.nodes[name].runnable.func
@@ -294,3 +300,60 @@ def test_dlt_agents_are_built_with_dlt_roles(monkeypatch):
                         lambda role, *a, **k: roles.append(role) or MagicMock())
     dlt._build_dlt_agent()
     assert roles == ["dlt_investigator", "dlt_reviewer", "dlt_synthesis"]
+
+
+# ----------------------------------------------------------------------
+# Every agent runs inside a call context, for the tool call log
+# ----------------------------------------------------------------------
+
+class ContextAgent:
+    """Answers with `reply`, and keeps the call context of every invoke."""
+
+    def __init__(self, reply="not json"):
+        self.reply = reply
+        self.contexts = []
+
+    def invoke(self, request):
+        self.contexts.append(dict(mcp_client._call_context.get() or {}))
+        return {"messages": [AIMessage(content=self.reply)]}
+
+
+@pytest.mark.parametrize("node_name, role, invokes, state", [
+    ("filter_logs", "log_filter", 1, {"logs": "a log line"}),
+    ("investigate", "investigator", 1, {}),
+    ("review", "reviewer", 1, {"investigation": "findings"}),
+    # An invalid answer and its repair: two invokes, both in context.
+    ("synthesize", "synthesis", 2, {"investigation": "findings"}),
+])
+def test_every_rejection_agent_runs_in_its_call_context(monkeypatch, node_name, role,
+                                                        invokes, state):
+    monkeypatch.setattr(orch, "get_casebook_storage", lambda: MagicMock())
+    agent = ContextAgent()
+    node = rejection_node(monkeypatch, node_name, agent)
+    node(dict(REJECTION_STATE, **state))
+    assert agent.contexts == [{"role": role, "event_id": "evt-tools"}] * invokes
+    assert mcp_client._call_context.get() is None
+
+
+@pytest.mark.parametrize("node_name, role, invokes, state", [
+    ("investigate", "dlt_investigator", 1, {}),
+    ("review", "dlt_reviewer", 1, {"investigation": "findings"}),
+    ("synthesise", "dlt_synthesis", 2, {"investigation": "findings"}),
+])
+def test_every_dlt_agent_runs_in_its_call_context(monkeypatch, node_name, role, invokes,
+                                                  state):
+    agent = ContextAgent()
+    node = dlt_node(monkeypatch, node_name, agent)
+    node(dict(DLT_STATE, **state))
+    assert agent.contexts == [{"role": role, "case_id": "dlt-case-1"}] * invokes
+
+
+def test_the_investigators_tool_calls_are_logged_with_its_packet(monkeypatch, probe):
+    lines = []
+    monkeypatch.setattr(mcp_client, "logger", MagicMock(
+        info=lambda event, **fields: lines.append((event, fields))))
+    monkeypatch.setattr(orch, "get_casebook_storage", lambda: MagicMock())
+    rejection_node(monkeypatch, "investigate", ToolUsingAgent(probe))(dict(REJECTION_STATE))
+    [(event, fields)] = [line for line in lines if line[0] == "Agent tool call"]
+    assert (fields["tool"], fields["role"], fields["event_id"], fields["outcome"]) == \
+        (probe, "investigator", "evt-tools", "ok")

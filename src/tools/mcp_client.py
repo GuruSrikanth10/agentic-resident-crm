@@ -36,6 +36,24 @@ none. Tool names are global across servers, and a tool scoped to one service
 carries that service's prefix (D8): a served tool that breaks the prefix rule
 is left out of the catalog like a reserved name.
 
+Documentation servers
+---------------------
+A server of kind "docs" (mcp_config) serves the DROA service documentation
+corpus and publishes none of this repository's `_meta`. Its tools are
+catalogued as tools for every service ("*") and for the AGENT_DOCS_ROLES
+roles; AGENT_TOOLS_<ROLE> governs only the other servers' tools, and names a
+docs tool only as an error. A pack's `tools.exclude` still removes one. They
+differ from the other tools in three ways:
+
+- the prompt lists them in a section of their own (DOCS_HEADING, with
+  DOCS_GUIDANCE and the service to read), never under COMMON_RULES, which is
+  about evidence from live systems;
+- their results are not evidence about the packet, so they are never
+  recorded (`recording()`) and never reach the Reviewer or tool_evidence;
+- they are for the deep agents alone: the opencode harness reads the corpus
+  from disk, so `opencode_config`, `evidence_from_harness` and the harness
+  prompt section leave docs servers out (`mcp_config.of_kind`).
+
 Calling a tool
 --------------
 Each call opens its own session: the servers are stateless, a call is a
@@ -44,8 +62,11 @@ concern of the agent's. Tools run synchronously for the pipeline's
 synchronous graphs and asynchronously for anything else. A call that cannot
 complete -- server down, timeout, a tool error -- returns a message saying
 nothing was read instead of raising, because an exception would end the
-whole agent run; and every call is recorded while a node holds `recording()`
-open, which is how the Investigator's tool results reach the Reviewer.
+whole agent run; and every call to a tools server is recorded while a node
+holds `recording()` open, which is how the Investigator's tool results reach
+the Reviewer. Every call, to either kind of server, is logged once ("Agent
+tool call"), with the role and the packet or case the orchestrator named in
+`call_context()`.
 """
 import asyncio
 import contextlib
@@ -96,6 +117,39 @@ packet, with the same standing as the logs. For every one of them:
 3. A lookup that ran and found nothing is a finding in its own right.
 4. Never state a value that no tool returned and no other evidence shows."""
 
+#: Heading of the section listing a role's documentation tools. The agent
+#: prompts refer to it by this name.
+DOCS_HEADING = "### SERVICE DOCUMENTATION TOOLS"
+
+#: The toolset a docs server's tools get when its listing names none.
+DOCS_TOOLSET = "Service documentation"
+
+DOCS_GUIDANCE = """The service documentation is the primary account of what the code does and
+why it fails. The logs and the tool evidence corroborate it.
+
+1. Start with the documentation service named above. Read, in roughly this
+   order, its components, its dataflow, its packet flows and its error
+   paths, then the module doc for the class the stack trace or rule names.
+2. Search the corpus for the error codes, reason codes, method names and
+   Kafka topics in the evidence.
+3. Read another service's documentation only where the evidence points to it.
+4. Cite the document path or identifier the tool returned for every claim
+   that relies on it.
+5. A documentation tool that failed means the documentation was not read:
+   say so, and never guess what it says.
+6. Placeholders and example values in the documentation, such as <refId>,
+   are not values of this packet."""
+
+#: How a docs section names the service to read.
+DOCS_SERVICE = "This packet's documentation service is `{name}`."
+DOCS_SERVICE_UNRESOLVED = ("The service is not resolved: identify it from the "
+                           "evidence, and list the documented services to find it.")
+
+#: What one "Agent tool call" log line keeps of the call's arguments, and
+#: what a DEBUG line keeps of its result.
+MAX_LOGGED_ARGS_CHARS = 500
+MAX_LOGGED_RESULT_CHARS = 300
+
 #: Evidence bounds. A tool bounds its own output; these bound what is kept
 #: in graph state (and so in every checkpoint) and what a prompt carries.
 MAX_RECORDED_RESULT_CHARS = 16000
@@ -132,6 +186,11 @@ class RemoteTool:
     def opencode_name(self) -> str:
         """What opencode calls this tool: the server's name, then the tool's."""
         return f"{self.server.name}_{self.name}"
+
+    @property
+    def is_docs(self) -> bool:
+        """Whether a documentation server serves it."""
+        return self.server.kind == mcp_config.KIND_DOCS
 
 
 @dataclass(frozen=True)
@@ -237,6 +296,14 @@ def _remote_tool(server: mcp_config.ServerConfig, tool) -> RemoteTool:
         if isinstance(services, list) else ()
     toolset = meta.get(mcp_config.META_TOOLSET)
     guidance = meta.get(mcp_config.META_GUIDANCE)
+    if server.kind == mcp_config.KIND_DOCS:
+        # A docs server knows nothing of this repository: its tools are for
+        # every service, and the roles are this deployment's choice.
+        agents = mcp_config.docs_roles()
+        services = (service_registry.ALL_SERVICES,)
+        toolset = toolset if isinstance(toolset, str) and toolset.strip() else DOCS_TOOLSET
+        guidance = guidance if isinstance(guidance, str) and guidance.strip() \
+            else DOCS_GUIDANCE
     annotations = tool.annotations
     return RemoteTool(
         server=server,
@@ -292,22 +359,56 @@ async def _list_tools(server: mcp_config.ServerConfig) -> list:
     raise RuntimeError(f"the server returned more than {MAX_LISTING_PAGES} listing pages")
 
 
-async def _call_text(server: mcp_config.ServerConfig, name: str, arguments: dict) -> str:
-    """Call one tool and return its result as text; never raises."""
+async def _call_text(server: mcp_config.ServerConfig, name: str, arguments: dict,
+                     context: Optional[dict] = None) -> str:
+    """Call one tool and return its result as text; never raises.
+
+    Logs the call once, with `context` -- the caller's `call_context()`,
+    read in the caller's thread, since this may run on a helper thread
+    that does not share it.
+    """
     import anyio
 
+    started = time.monotonic()
     try:
         with anyio.fail_after(mcp_config.timeout_seconds()):
             async with _session(server) as client:
                 result = await client.call_tool(name, arguments)
     except Exception as e:
         cause = root_cause(e)
-        logger.error("Agent tool call failed", server=server.name, tool=name,
-                     error=describe_error(e))
-        return (f"The tool {name} could not be called on the {server.name} server "
+        text = (f"The tool {name} could not be called on the {server.name} server "
                 f"({type(cause).__name__}), so nothing was read. Treat this as an "
                 f"evidence gap, not a finding.")
-    return _result_text(result)
+        _log_call(server, name, arguments, context, "call_failed", started, text,
+                  error=describe_error(e))
+        return text
+    text = _result_text(result)
+    _log_call(server, name, arguments, context,
+              "tool_error" if result.is_error else "ok", started, text)
+    return text
+
+
+def _log_call(server: mcp_config.ServerConfig, name: str, arguments: dict,
+              context: Optional[dict], outcome: str, started: float, text: str,
+              **extra) -> None:
+    """The one "Agent tool call" line of a call: INFO when it answered,
+    WARNING when the tool reported an error, ERROR when it could not be
+    called. The result itself is logged only at DEBUG, and only its start."""
+    fields = {"server": server.name, "server_kind": server.kind, "tool": name,
+              **(context or {}), "outcome": outcome,
+              "duration_ms": round((time.monotonic() - started) * 1000),
+              "result_chars": len(text), "args": _logged_args(arguments), **extra}
+    level = {"ok": logger.info, "tool_error": logger.warning}.get(outcome, logger.error)
+    level("Agent tool call", **fields)
+    logger.debug("Agent tool call result", server=server.name, tool=name,
+                 **(context or {}), result=text[:MAX_LOGGED_RESULT_CHARS])
+
+
+def _logged_args(arguments: dict) -> str:
+    text = json.dumps(arguments, sort_keys=True, default=str, ensure_ascii=False)
+    if len(text) <= MAX_LOGGED_ARGS_CHARS:
+        return text
+    return text[:MAX_LOGGED_ARGS_CHARS - 3] + "..."
 
 
 def root_cause(error: BaseException) -> BaseException:
@@ -420,14 +521,27 @@ def selection(role: str, service: Optional[str] = None, *,
     `service` is required for the rejection roles (MULTI_SERVICE_PLAN.md
     5.6). For the DLT roles it is optional: with one they are scoped the same
     way; with none they keep the role-only selection (Phase 8).
+
+    The tools servers' tools come first, chosen as AGENT_TOOLS_<ROLE> says;
+    then the docs servers' tools the role gets (AGENT_DOCS_ROLES), which that
+    variable neither adds nor removes. The scope applies to both.
     """
     _check_scope(role, service)
     catalog = catalog or current_catalog()
+    docs = [tool for tool in catalog.tools if tool.is_docs]
+    served = [tool for tool in catalog.tools if not tool.is_docs]
     chosen_names = _override(role)
     if chosen_names is None:
-        chosen = [tool for tool in catalog.tools if role in tool.agents]
+        chosen = [tool for tool in served if role in tool.agents]
     else:
-        known = {tool.name: tool for tool in catalog.tools}
+        named_docs = [name for name in chosen_names
+                      if name in {tool.name for tool in docs}]
+        if named_docs:
+            raise ValueError(f"{ENV_ROLE_PREFIX}{role.upper()} names documentation "
+                             f"tool(s) {named_docs}; docs tools are controlled by "
+                             f"{mcp_config.ENV_DOCS_ROLES}, not by "
+                             f"{ENV_ROLE_PREFIX}<ROLE>.")
+        known = {tool.name: tool for tool in served}
         unknown = [name for name in chosen_names if name not in known]
         if unknown and catalog.complete:
             # Every server answered and none serves these: a typo, not an outage.
@@ -438,11 +552,17 @@ def selection(role: str, service: Optional[str] = None, *,
                            "unreachable", role=role, tools=unknown,
                            failed=sorted(catalog.failures))
         chosen = [known[name] for name in chosen_names if name in known]
+    chosen = sorted(chosen, key=_order) + sorted(
+        (tool for tool in docs if role in tool.agents), key=_order)
     if service is not None:
         # After the override, never before it: AGENT_TOOLS_<ROLE> can narrow
         # or replace a role's list, but not add a tool outside the scope.
         chosen = [tool for tool in chosen if in_scope(tool, service)]
-    return sorted(chosen, key=lambda tool: (tool.toolset or "", tool.name))
+    return chosen
+
+
+def _order(tool: RemoteTool) -> tuple:
+    return (tool.toolset or "", tool.name)
 
 
 def tools_for(role: str, service: Optional[str] = None) -> list:
@@ -452,14 +572,21 @@ def tools_for(role: str, service: Optional[str] = None) -> list:
 
 
 def _langchain_tool(remote: RemoteTool) -> BaseTool:
+    # The call context is read here, in the caller's thread or task:
+    # `_run_sync` may run the call on a helper thread that does not share it.
+    # A docs tool's result is not evidence about the packet, so it is never
+    # recorded.
     def run(**arguments) -> str:
-        text = _run_sync(lambda: _call_text(remote.server, remote.name, arguments))
-        _record(remote.name, arguments, text)
+        context = _call_context.get()
+        text = _run_sync(lambda: _call_text(remote.server, remote.name, arguments, context))
+        if not remote.is_docs:
+            _record(remote.name, arguments, text)
         return text
 
     async def arun(**arguments) -> str:
-        text = await _call_text(remote.server, remote.name, arguments)
-        _record(remote.name, arguments, text)
+        text = await _call_text(remote.server, remote.name, arguments, _call_context.get())
+        if not remote.is_docs:
+            _record(remote.name, arguments, text)
         return text
 
     # The listing's JSON schema is used as it is: the server validates the
@@ -474,28 +601,54 @@ def prompt_section(role: str, service: Optional[str] = None, *,
     pack `service`, or "" for none.
 
     `opencode` names the tools the way opencode exposes them
-    (`<server>_<tool>`), for the harness prompts.
-    """
-    tools = selection(role, service)
-    if not tools:
-        return ""
-    groups: dict = {}
-    for tool in tools:
-        key = tool.toolset or f"tools from the {tool.server.name} server"
-        groups.setdefault(key, []).append(tool)
+    (`<server>_<tool>`), for the harness prompts, and leaves the docs tools
+    out: the harness is given no docs server.
 
-    parts = [TOOLS_HEADING, COMMON_RULES]
-    if opencode:
-        parts.append("Here each tool's name carries its server's prefix: "
-                     f"{tools[0].name} is {tools[0].opencode_name}.")
-    for heading, members in groups.items():
-        names = [tool.opencode_name if opencode else tool.name for tool in members]
-        body = f"Tools: {', '.join(names)}."
-        guidance = next((tool.guidance for tool in members if tool.guidance.strip()), "")
-        if guidance:
-            body += "\n\n" + guidance.strip()
-        parts.append(f"#### {heading}\n{body}")
+    The tools servers' tools come under TOOLS_HEADING and COMMON_RULES; the
+    docs tools in a section of their own after it, since COMMON_RULES is
+    about evidence from live systems and they are not. A role with no docs
+    tools gets exactly the section it got before docs servers existed.
+    """
+    chosen = selection(role, service)
+    tools = [tool for tool in chosen if not tool.is_docs]
+    docs = [] if opencode else [tool for tool in chosen if tool.is_docs]
+    parts = []
+    if tools:
+        groups: dict = {}
+        for tool in tools:
+            key = tool.toolset or f"tools from the {tool.server.name} server"
+            groups.setdefault(key, []).append(tool)
+
+        parts += [TOOLS_HEADING, COMMON_RULES]
+        if opencode:
+            parts.append("Here each tool's name carries its server's prefix: "
+                         f"{tools[0].name} is {tools[0].opencode_name}.")
+        for heading, members in groups.items():
+            names = [tool.opencode_name if opencode else tool.name for tool in members]
+            body = f"Tools: {', '.join(names)}."
+            guidance = next((tool.guidance for tool in members if tool.guidance.strip()), "")
+            if guidance:
+                body += "\n\n" + guidance.strip()
+            parts.append(f"#### {heading}\n{body}")
+    if docs:
+        guidance = next((tool.guidance for tool in docs if tool.guidance.strip()),
+                        DOCS_GUIDANCE)
+        parts.append(f"{DOCS_HEADING}\n"
+                     f"Tools: {', '.join(tool.name for tool in docs)}.\n\n"
+                     f"{_docs_service_line(service)}\n\n{guidance.strip()}")
     return "\n\n".join(parts)
+
+
+def _docs_service_line(service: Optional[str]) -> str:
+    """Which documentation service the agent of the pack `service` reads:
+    its pack's DROA corpus directory, which is how the docs servers name
+    services. `_default`, no pack, or a pack that is not registered leave
+    the service to be found from the evidence."""
+    found = service_registry.pack(service) \
+        if service and service != service_registry.DEFAULT_PACK else None
+    if found is None or not found.droa_corpus_dir:
+        return DOCS_SERVICE_UNRESOLVED
+    return DOCS_SERVICE.format(name=found.droa_corpus_dir)
 
 
 def _fingerprint_scope(role: str, service: Optional[str]):
@@ -546,7 +699,8 @@ def describe() -> dict:
     for the rejection roles, per role for the DLT roles."""
     catalog = current_catalog()
     return {
-        "servers": [{"name": server.name, "url": server.url} for server in catalog.servers],
+        "servers": [{"name": server.name, "url": server.url, "kind": server.kind}
+                    for server in catalog.servers],
         "failed": dict(catalog.failures),
         "tools": [{"name": tool.name, "server": tool.server.name, "toolset": tool.toolset,
                    "default_agents": list(tool.agents), "services": list(tool.services),
@@ -601,7 +755,8 @@ def opencode_agent(role: str, service: Optional[str] = None) -> str:
 
 
 def opencode_config() -> dict:
-    """The `mcp` and `agent` blocks opencode needs, or {} with no servers.
+    """The `mcp` and `agent` blocks opencode needs, or {} with no tools
+    servers.
 
     One opencode agent per harness role and scope, each allowed exactly the
     tools that role gets here for that scope: for a rejection role, one per
@@ -612,20 +767,25 @@ def opencode_config() -> dict:
     provider block it already has is left alone. Built when `opencode serve`
     starts, so a pack added later needs a restart -- it ships with a deploy
     anyway.
+
+    Docs servers are left out entirely: a harness task reads the corpus from
+    disk, and opencode is never told a docs server exists.
     """
     catalog = current_catalog()
-    if not catalog.servers:
+    tool_servers = mcp_config.of_kind(catalog.servers, mcp_config.KIND_TOOLS)
+    if not tool_servers:
         return {}
     servers = {server.name: {"type": "remote", "url": server.url, "enabled": True,
                              **({"headers": server.header_dict()} if server.headers else {})}
-               for server in catalog.servers}
+               for server in tool_servers}
     agents = {}
     for role in HARNESS_ROLES:
         for service in (scopes() if role in SERVICE_ROLES
                         else (None, *service_registry.load().services())):
-            tools = {f"{server.name}_*": False for server in catalog.servers}
+            tools = {f"{server.name}_*": False for server in tool_servers}
             for tool in selection(role, service, catalog=catalog):
-                tools[tool.opencode_name] = True
+                if not tool.is_docs:
+                    tools[tool.opencode_name] = True
             agents[opencode_agent(role, service)] = {
                 "mode": "primary",
                 "description": (f"Agentic Resident CRM harness task: {role}"
@@ -638,11 +798,13 @@ def opencode_config() -> dict:
 def evidence_from_harness(calls) -> list:
     """Evidence records from the tool calls of an opencode task.
 
-    Keeps only calls to the configured servers' tools, named as the agents
-    know them (the server prefix removed): the file reads and searches a
-    harness task also makes are not evidence about the packet.
+    Keeps only calls to the configured tools servers' tools, named as the
+    agents know them (the server prefix removed): the file reads and searches
+    a harness task also makes are not evidence about the packet, and neither
+    is a docs server's answer.
     """
-    prefixes = {f"{server.name}_": server.name for server in mcp_config.servers()}
+    prefixes = {f"{server.name}_": server.name
+                for server in mcp_config.of_kind(mcp_config.servers(), mcp_config.KIND_TOOLS)}
     records = []
     for call in calls or []:
         name = str(call.get("tool") or "")
@@ -682,6 +844,30 @@ def recording():
         yield calls
     finally:
         _recorder.reset(token)
+
+
+#: Who is calling -- the role, and the packet's event_id or the record's
+#: case_id -- for the "Agent tool call" log line. A ContextVar for the reason
+#: `_recorder` is one.
+_call_context: contextvars.ContextVar = contextvars.ContextVar(
+    "agent_tool_call_context", default=None)
+
+
+@contextlib.contextmanager
+def call_context(role: Optional[str] = None, **ids):
+    """Name the role and the packet (event_id=...) or record (case_id=...)
+    of every tool call made until the block exits, in its log line.
+
+    A field given as None is left out of the line, as is everything when no
+    context is open (the CLI's `call`).
+    """
+    fields = {key: value for key, value in {"role": role, **ids}.items()
+              if value is not None}
+    token = _call_context.set(fields)
+    try:
+        yield fields
+    finally:
+        _call_context.reset(token)
 
 
 def _record(tool_name: str, arguments: dict, result: str) -> None:

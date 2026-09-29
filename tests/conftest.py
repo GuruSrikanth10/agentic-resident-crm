@@ -249,35 +249,90 @@ def tool_server(monkeypatch):
     the process DB) and so every server stops with the test.
     """
     import json
-    import socket
-    import threading
-    import time
-
-    import uvicorn
 
     from src.tools.mcp_server import build_app
 
     started = []
 
     def start(name: str = "agent_tools") -> str:
-        with socket.socket() as probe:
-            probe.bind(("127.0.0.1", 0))
-            port = probe.getsockname()[1]
-        server = uvicorn.Server(uvicorn.Config(build_app("127.0.0.1"), host="127.0.0.1",
-                                               port=port, log_level="warning", ws="none"))
-        thread = threading.Thread(target=server.run, daemon=True)
-        thread.start()
-        deadline = time.monotonic() + 10
-        while not server.started:
-            if time.monotonic() > deadline or not thread.is_alive():
-                raise RuntimeError("the test tool server did not start")
-            time.sleep(0.02)
-        started.append((server, thread))
-        url = f"http://127.0.0.1:{port}/mcp"
+        url = _serve_in_process(build_app("127.0.0.1"), started)
         monkeypatch.setenv("AGENT_MCP_SERVERS", json.dumps({name: {"url": url}}))
         return url
 
     yield start
+    _stop_servers(started)
+
+
+#: The tools the fake documentation server serves.
+DOCS_TOOLS = ("docs_list_services", "docs_read", "docs_search")
+
+
+@pytest.fixture
+def docs_server():
+    """Start a fake DROA documentation server over HTTP, in this process.
+
+    Like the real one it publishes none of this repository's `_meta`. Yields
+    a function that starts one and returns its URL, without touching
+    AGENT_MCP_SERVERS: a test lists it with `"kind": "docs"` itself.
+    `docs_read` of the path "boom" raises, so the server answers with a tool
+    error.
+    """
+    from mcp.server.mcpserver import MCPServer
+
+    started = []
+
+    def docs_list_services() -> str:
+        """List the documented services."""
+        return "enu-biometric\nenu-demographic"
+
+    def docs_search(query: str, service: str = "") -> str:
+        """Search the documentation corpus."""
+        return f"hits for {query} in {service or 'every service'}"
+
+    def docs_read(service: str, path: str) -> str:
+        """Read one document."""
+        if path == "boom":
+            raise RuntimeError("no such document")
+        return f"{service}/{path}: the document"
+
+    def start() -> str:
+        server = MCPServer(name="droa_docs")
+        for function in (docs_list_services, docs_search, docs_read):
+            server.add_tool(function, structured_output=False)
+        app = server.streamable_http_app(streamable_http_path="/mcp", json_response=True,
+                                         stateless_http=True, host="127.0.0.1")
+        return _serve_in_process(app, started)
+
+    yield start
+    _stop_servers(started)
+
+
+def _serve_in_process(app, started: list) -> str:
+    """Serve `app` on a free loopback port on a daemon thread, once it is
+    up; returns its MCP URL and adds the server to `started`."""
+    import socket
+    import threading
+    import time
+
+    import uvicorn
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port,
+                                           log_level="warning", ws="none"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 10
+    while not server.started:
+        if time.monotonic() > deadline or not thread.is_alive():
+            raise RuntimeError("the test tool server did not start")
+        time.sleep(0.02)
+    started.append((server, thread))
+    return f"http://127.0.0.1:{port}/mcp"
+
+
+def _stop_servers(started: list) -> None:
     for server, thread in started:
         server.should_exit = True
         thread.join(timeout=10)
