@@ -104,13 +104,55 @@ pack. They differ between staging and production; the pack does not.
 
 In order, the first step that names exactly one service decides:
 
-1. `flowMetaData.stage` (and `subStage`, for a service that lists sub-stages);
-2. `sourceTopic`, against `match.source_topics`;
-3. the packet's reason code, when exactly one documentation file documents it;
-4. otherwise the packet is `_unresolved`.
+1. the packet's reason code, when the reason-code service map lists it under
+   exactly one service (below);
+2. `flowMetaData.stage` (and `subStage`, for a service that lists sub-stages);
+3. `sourceTopic`, against `match.source_topics`;
+4. the packet's reason code, when exactly one documentation file documents it;
+5. otherwise the packet is `_unresolved`.
 
-When the documentation names a different service than the stage or topic did,
-the stage or topic still wins, and the resolution records a `conflict`.
+When a later step names a different service than the one chosen, the chosen
+one still wins, and the resolution records a `conflict` keyed by that step's
+source (`flow_stage`, `source_topic`, `reason_code_docs`).
+
+### The reason-code service map
+
+A rejection's `edata.stage` is `REJECTINTERCEPTOR` -- the service that
+publishes every rejection -- so it does not say which service rejected the
+packet. The map says so, and places the packet before anything else:
+
+```json
+{
+  "schema_version": 1,
+  "description": "optional free text",
+  "services": {
+    "enu-biometric": ["RESIDENT_MAN_DEDUP_REJECT_ANOMALOUS", "..."],
+    "enu-qc": ["RESIDENT_QC_POA_DOCUMENT_NOT_APPROVED", "..."]
+  }
+}
+```
+
+- Keys are service names (the pack names); each lists the reason codes that
+  service raises, exactly as `errorReasonCode` carries them.
+- A service need not have a pack. Its packets resolve to it and the gate
+  reports them `service_not_registered`, so list every service whose codes you
+  know, not only the analysed ones.
+- A code listed under two services decides nothing; the next step places it.
+- Any error rejects the whole file: unknown keys, a bad service name or code,
+  or a service key written twice. A code under two services, or twice under
+  one, is a warning.
+
+It is `reason_code_services.json` in `REASON_CODE_DOCS_DIR`, or
+`REASON_CODE_SERVICE_MAP_FILE`. With `REASON_CODE_SERVICE_MAP_S3_KEY` set it
+is fetched from S3 at start-up (and every
+`REASON_CODE_SERVICE_MAP_REFRESH_SECONDS`), validated before it replaces the
+copy on disk, and `/ready` fails until the first copy is there. It is
+re-read when it changes; no restart is needed. Without a file, packets are
+placed from step 2 on, as before the map existed. The API validates it at
+boot with the registry. The DLT lane does not read it (below).
+
+To analyse only some services' rejections, list them in
+`REJECTION_SERVICES_ENABLED` and set `REJECTION_SERVICE_GATE=enforce`.
 
 Two services may share a stage only on disjoint, non-empty `sub_stages`; any
 other overlap is a boot error. Topic patterns cannot be checked for overlap in
@@ -200,11 +242,17 @@ key; the headers carry the stack trace (`MULTI_SERVICE_PLAN.md` Phase 8). A
 record is placed in a service by, in order:
 
 1. its consumer group (`dlt.consumer_groups`);
-2. `flowMetaData.stage`, as for a rejection;
+2. `flowMetaData.stage` -- the AUDIT payload's `edata.stage` and `subStage`,
+   which on a dead-lettered record are the failing service's own (`QC` /
+   `SMART_QC`), so list those values in `match.stages` / `match.sub_stages`;
 3. its original topic (`dlt.original_topics`);
 4. its failure site's Java package (`dlt.java_packages`);
 5. `sourceTopic`;
 6. its reason code's documentation file.
+
+The reason-code service map is not consulted: a dead-lettered record's code
+is usually a generic one such as `UNHANDLED_EXCEPTION`, and its stage already
+names the service.
 
 A service's dead-lettered records are analysed with its pack only once it is
 in `DLT_SERVICES_ENABLED`; with `DLT_SERVICE_GATE=enforce`, other services'

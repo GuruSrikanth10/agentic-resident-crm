@@ -59,6 +59,14 @@ REASON_CODE_DOCS_DIR = Path(
     or REPO_ROOT / "src" / "reason_code_docs"
 )
 
+# The reason-code -> service map, read by `utils/reason_code_service_map.py`.
+# None means `<REASON_CODE_DOCS_DIR>/reason_code_services.json`, resolved at
+# call time so it follows the documentation store wherever that is pointed.
+REASON_CODE_SERVICE_MAP_FILE = (
+    Path(os.environ["REASON_CODE_SERVICE_MAP_FILE"].strip())
+    if os.environ.get("REASON_CODE_SERVICE_MAP_FILE", "").strip() else None
+)
+
 # The service registry (MULTI_SERVICE_PLAN.md D2): one directory per service,
 # each holding a `service.json`, read by `utils/service_registry.py`. Ships in
 # the image with the rest of `src/`; overridable, and a blank value falls back,

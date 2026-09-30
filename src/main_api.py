@@ -184,6 +184,11 @@ async def lifespan(app: FastAPI):
     from src.utils import reason_code_docs
     reason_code_docs.start_background_download()
 
+    # The reason-code -> service map, when it is fetched from S3: the same
+    # way, and /ready fails until the first copy is on disk.
+    from src.utils import reason_code_service_map
+    reason_code_service_map.start_background_download()
+
     # Start the opencode harness in a background thread so the API binds
     # its port immediately. The corpus download and `opencode serve` cold
     # boot take 15-30s; doing them in the lifespan blocked the API from

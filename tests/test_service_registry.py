@@ -362,7 +362,10 @@ def test_the_shipped_registry_is_valid():
     assert "enu-biometric" in sr.load().services()
 
 
-def test_the_shipped_registry_places_a_biometric_packet():
+def test_the_shipped_registry_places_a_biometric_packet(tmp_path, monkeypatch):
+    # The registry alone: the shipped reason-code service map, which would
+    # place it first, is tested in test_reason_code_service_map.py.
+    monkeypatch.setattr(paths, "REASON_CODE_SERVICE_MAP_FILE", tmp_path / "no-map.json")
     resolution = sr.resolve({
         "flowMetaData": {"stage": "Biometric", "subStage": "MDD_POLICY_BATCH_1"},
         "packetExecutionSummary": {"errorData": [

@@ -54,6 +54,14 @@ def _count(counter, **labels):
     return counter.labels(**labels)._value.get()
 
 
+@pytest.fixture(autouse=True)
+def no_reason_code_service_map(tmp_path, monkeypatch):
+    """These tests place packets by their stage. The shipped reason-code
+    service map would place them by their code first; it has its own tests
+    (test_reason_code_service_map.py)."""
+    monkeypatch.setattr(paths, "REASON_CODE_SERVICE_MAP_FILE", tmp_path / "no-map.json")
+
+
 @pytest.fixture
 def storage(tmp_path, monkeypatch):
     """Real local storage and a private checkpoint DB, isolated to tmp_path.

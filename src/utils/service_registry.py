@@ -8,18 +8,23 @@ Nothing in that structure names the service outright, and every later choice
 it. So the service is resolved once per packet, here, by rules a person wrote
 down, and never by a model:
 
-1. `flowMetaData.stage` (and `subStage`, for a service that lists sub-stages)
-   against each pack's `match.stages` / `match.sub_stages`;
-2. otherwise `sourceTopic`, against `match.source_topics`;
-3. otherwise the reason code, when exactly one service's reason-code
+1. the reason code, when the reason-code service map
+   (`reason_code_service_map`) lists it under exactly one service;
+2. otherwise `flowMetaData.stage` (and `subStage`, for a service that lists
+   sub-stages) against each pack's `match.stages` / `match.sub_stages`;
+3. otherwise `sourceTopic`, against `match.source_topics`;
+4. otherwise the reason code, when exactly one service's reason-code
    documentation file documents it;
-4. otherwise unresolved.
+5. otherwise unresolved.
 
-The stage comes first because it is the producer's own statement of where the
-packet failed. A reason code can be raised from a shared library, so the
-documentation is only a fallback -- and when it names a different service
-than the stage did, the stage still wins and the disagreement is recorded as
-a `conflict`, never silently resolved.
+The map comes first because under the AUDIT contract a rejection's stage is
+the reject interceptor's, which publishes every service's rejections, so it
+does not say which service rejected the packet; the map is the one statement
+of that. Without a map the stage comes first, as the producer's own statement
+of where the packet failed. A reason code can be raised from a shared
+library, so the documentation is only a fallback. Whenever a later step names
+a different service than the one chosen, the chosen one still wins and the
+disagreement is recorded as a `conflict`, never silently resolved.
 
 The registry is one directory per service under SERVICE_PACKS_DIR, each with a
 `service.json` (see `src/service_packs/README.md`). It is loaded once per
@@ -97,6 +102,7 @@ DEFAULT_PACK_MAX_CHARS = 20000
 RESOLUTION_ARTIFACT = "service_resolution.json"
 
 #: How a service was resolved.
+SOURCE_REASON_CODE_MAP = "reason_code_map"
 SOURCE_FLOW_STAGE = "flow_stage"
 SOURCE_SOURCE_TOPIC = "source_topic"
 SOURCE_REASON_CODE_DOCS = "reason_code_docs"
@@ -772,11 +778,15 @@ class ServiceResolution:
     source: str = SOURCE_NONE
     #: The payload value that decided it: the stage, the topic or the code.
     matched: Optional[str] = None
-    #: {"reason_code_docs": <service>} when the documentation named a
-    #: different service than the one chosen.
+    #: {<source>: <service>} for each later step that named a different
+    #: service than the one chosen, e.g. {"reason_code_docs": "enu-qc"}.
     conflict: Optional[dict] = None
     detail: dict = field(default_factory=dict)
     registry_sha256: Optional[str] = None
+    #: Digest of the reason-code service map consulted, or None when there
+    #: was none (and always for a dead-lettered record, which is not placed
+    #: by it).
+    reason_code_map_sha256: Optional[str] = None
 
     def as_dict(self) -> dict:
         return {
@@ -786,6 +796,7 @@ class ServiceResolution:
             "conflict": dict(self.conflict) if self.conflict else None,
             "detail": dict(self.detail),
             "registry_sha256": self.registry_sha256,
+            "reason_code_map_sha256": self.reason_code_map_sha256,
         }
 
 
@@ -811,13 +822,18 @@ def _reason_code_of(payload: dict) -> Optional[str]:
 
 
 def resolve(payload, registry: Optional[Registry] = None,
-            docs_root=None) -> ServiceResolution:
+            docs_root=None, service_map=None) -> ServiceResolution:
     """Which service `payload` belongs to, and how that was decided.
 
     Tolerant of any payload shape: a missing or malformed field is simply
-    evidence that is not there.
+    evidence that is not there. `service_map` is the reason-code service map
+    on disk unless one is given.
     """
+    from src.utils import reason_code_service_map
+
     registry = registry or load()
+    if service_map is None:
+        service_map = reason_code_service_map.current()
     payload = payload if isinstance(payload, dict) else {}
     flow = payload.get("flowMetaData")
     flow = flow if isinstance(flow, dict) else {}
@@ -829,13 +845,28 @@ def resolve(payload, registry: Optional[Registry] = None,
     detail = {"stage": stage, "sub_stage": sub_stage, "source_topic": topic,
               "reason_code": code}
 
-    candidate, source, matched = None, SOURCE_NONE, None
+    candidate, source, matched, conflict = None, SOURCE_NONE, None, {}
 
+    def consider(step_source, service, value):
+        nonlocal candidate, source, matched
+        if candidate is None:
+            candidate, source, matched = service, step_source, value
+        elif service != candidate:
+            conflict[step_source] = service
+
+    # A code the map lists under several services decides nothing here.
+    mapped_to = service_map.services_for(code)
+    if len(mapped_to) == 1:
+        consider(SOURCE_REASON_CODE_MAP, mapped_to[0], code)
+
+    # The stage, else the topic: whichever names the service the payload
+    # itself points at.
+    by_payload = None
     if stage:
         found = registry.by_stage(stage.lower(),
                                   sub_stage.lower() if sub_stage else None)
         if len(found) == 1:
-            candidate, source, matched = found[0], SOURCE_FLOW_STAGE, stage
+            by_payload = (SOURCE_FLOW_STAGE, found[0], stage)
         elif found:
             # Boot validation refuses overlapping stages, so this is a registry
             # that was never validated. Deciding between them would be a guess.
@@ -843,34 +874,31 @@ def resolve(payload, registry: Optional[Registry] = None,
                          "nothing", stage=stage, sub_stage=sub_stage,
                          services=found)
 
-    if candidate is None and topic:
+    if by_payload is None and topic:
         found = registry.by_topic(topic)
         if len(found) == 1:
-            candidate, source, matched = found[0], SOURCE_SOURCE_TOPIC, topic
+            by_payload = (SOURCE_SOURCE_TOPIC, found[0], topic)
         elif found:
             # Topic patterns are regular expressions, so overlap cannot be
             # proved at boot. Reported here instead, every time it happens.
             logger.error("Several services' source_topics match one topic; "
                          "the topic decides nothing", source_topic=topic,
                          services=found)
+    if by_payload is not None:
+        consider(*by_payload)
 
     documented_by = _documented_by(code, registry, docs_root)
-
-    conflict = None
-    if candidate is None:
-        if len(documented_by) == 1:
-            candidate, source, matched = (documented_by[0],
-                                          SOURCE_REASON_CODE_DOCS, code)
-    elif len(documented_by) == 1 and documented_by[0] != candidate:
-        conflict = {"reason_code_docs": documented_by[0]}
+    if len(documented_by) == 1:
+        consider(SOURCE_REASON_CODE_DOCS, documented_by[0], code)
 
     return ServiceResolution(
         service=candidate or UNRESOLVED,
         source=source,
         matched=matched,
-        conflict=conflict,
+        conflict=conflict or None,
         detail=detail,
         registry_sha256=registry.sha256,
+        reason_code_map_sha256=service_map.sha256,
     )
 
 
@@ -1421,6 +1449,15 @@ def validate(root=None, docs_root=None) -> tuple:
         warnings.append(f"The reason-code documentation file {stem}.json has "
                         f"no service pack; a packet placed by one of its codes "
                         f"is reported as {SKIP_NOT_REGISTERED}.")
+
+    # The reason-code service map, which places a rejection before anything
+    # else does. A map that does not parse would place nothing, and under
+    # `enforce` that skips every packet it should have placed.
+    from src.utils import reason_code_service_map
+
+    map_errors, map_warnings = reason_code_service_map.validate(registry)
+    errors.extend(map_errors)
+    warnings.extend(map_warnings)
 
     # The local tools' service scopes and names (MULTI_SERVICE_PLAN.md 5.7,
     # Phase 4). Judged here because only the registry can say whether a

@@ -615,6 +615,12 @@ def readiness_check():
     if reason_code_docs.s3_download_enabled() and not reason_code_docs.docs_available():
         raise HTTPException(status_code=503,
                             detail="Downloading reason-code documentation")
+    # And the reason-code -> service map: a packet placed before it is there
+    # could be skipped, under an enforcing gate, as belonging to no service.
+    from src.utils import reason_code_service_map
+    if not reason_code_service_map.available():
+        raise HTTPException(status_code=503,
+                            detail="Downloading reason-code service map")
 
     kafka_ready = _check_kafka_producer_ready()
 

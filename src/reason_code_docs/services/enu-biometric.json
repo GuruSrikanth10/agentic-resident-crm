@@ -1,9 +1,8 @@
 {
-  "schema_version": 1,
-  "title": "ENU Biometric Stage - Rejection/Reason Codes (Code-Verified)",
-  "description": "All rejection and reason codes for the enu-biometric service (BIO stage, substage BIO_DEDUP). Each code has been traced through the actual Java source to confirm: (1) whether it is actively thrown or dead (defined but never used), (2) the exact method and line that triggers it, (3) the condition that causes it, (4) what happens to the packet, (5) whether it is retryable, and (6) what a CRM agent should advise the resident.",
+  "title": "ENU Biometric Stage - Rejection/Reason Codes (Code-Verified, Release Branch)",
+  "description": "All rejection and reason codes for the enu-biometric service (BIO stage, substage BIO_DEDUP). Each code has been traced through the actual Java source on the release/release branch to confirm: (1) whether it is actively thrown or dead (defined but never used), (2) the exact method and line that triggers it, (3) the condition that causes it, (4) whether it is retryable, and (5) what a CRM agent should advise the resident. Codes are sourced from BioDedupExceptionHelper.java (69 numeric-ID entries), BioBusinessExceptionConstants.java (6 enum constants), BioTechnicalExceptionConstants.java (82 enum constants including 34 in the 'NEW NEW' block), EnrlReasonCodeHelper.java (biometric quality codes), and BioDeDuplicationServiceImpl.java (codes from the common-library BusinessReasonCode enum).",
   "service": "enu-biometric",
-  "total_codes": 105,
+  "total_codes": 124,
   "codes": [
     {
       "numeric_code": 2301,
@@ -689,6 +688,188 @@
       "reason_code": "PKT_RBIO_QUALITY_FACE_LIVENESS_ERROR",
       "description": "The packet was rejected because the face liveness check failed. Liveness detection verifies the face is from a live human, not a photograph, video, or 3D mask. A failure may indicate spoofing or sensor malfunction.",
       "category": "Biometric Quality Rejection",
+      "is_retryable": false
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "RESIDENT_MAN_DEDUP_REJECT_ANOMALOUS",
+      "description": "Set as a ValidationError (terminal reject) when the reject-interceptor returns a non-empty anomalousEids set but an empty tdEids set. This means the applicant's biometrics matched existing records as anomalous (not a confirmed true duplicate), and the system rejects to prevent potential duplicate Aadhaar issuance. Thrown in handleRejectInterceptorAndDetermineValidationError at BioDeDuplicationServiceImpl.java:3884. This code cannot be overridden by policy-batch reject reasons (listed in handlePolicyOverride at line 3902).",
+      "category": "Business",
+      "is_retryable": false
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "EXT_PKT_BIOMETRIC_CAPTURE_TRAIL_DATA_MISSING",
+      "description": "Thrown as an ApplicationException when any Exception is raised while extracting/handling the biometric capture trail from the packet (e.g. malformed or missing trail data). Thrown in EventValidationServiceImpl.getBiometricModalityCounts at line 224.",
+      "category": "Technical",
+      "is_retryable": false
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "BIO_STAGE_TRACKER_DB_READ_EXCEPTION",
+      "description": "Thrown as an ApplicationException when a DB read failure, unexpected response code, or JSON deserialization error occurs while reading from the bio_stage_tracker table. Thrown at multiple sites in StageTrackerHandlerServiceImpl (lines 278, 433, 441, 496, 504) across methods extractEventMessage, fetchBioStageTrackers, and getBioStageTrackers.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "BIO_STAGE_TRACKER_DB_WRITE_EXCEPTION",
+      "description": "Thrown as an ApplicationException when a failure occurs inserting one or more BioStageTracker entries into the DB (non-success response code or ProcessDataException). Thrown in StageTrackerHandlerServiceImpl.stageTrackerEntries at lines 202 and 222.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "BIO_HELPER_CACHE_STORE_DB_READ_EXCEPTION",
+      "description": "Thrown as an ApplicationException when a DB read failure or unexpected response code occurs while reading from the bio_helper_cache_store table. Thrown at multiple sites: BioDeDuplicationServiceImpl.java:2347,2351 (getBioHelperCacheStoreRecordFromDb), AbisMwResponseOperations.java:96,100 (getBioHelperCacheStoreRecordFromDb), CandidateParkingService.java:461 (getParkingHelperRecordFromDb).",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "BIO_HELPER_CACHE_STORE_DB_INSERT_EXCEPTION",
+      "description": "Thrown as an ApplicationException when an insert into bio_helper_cache_store returns a non-success status code. Thrown in BioDeDuplicationServiceImpl.insertDataToBioHelperCacheStoreDb at line 1319. BUG: The enum constant's string-code argument is mistakenly set to 'BIO_HELPER_CACHE_STORE_DB_READ_EXCEPTION' (copy-paste from the READ constant above it) instead of 'BIO_HELPER_CACHE_STORE_DB_INSERT_EXCEPTION'. At runtime, insert failures are indistinguishable from read failures — any consumer matching on getErrorCode() sees the READ code for an INSERT problem.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "BIO_HELPER_CACHE_STORE_DB_UPDATE_EXCEPTION",
+      "description": "Thrown as an ApplicationException when a DB update failure occurs for bio_helper_cache_store (null response or non-success update code). Thrown in BioDeDuplicationServiceImpl.insertDataToBioHelperCacheStoreDb at lines 1331 and 1342.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "BIO_PARKING_QUEUE_STORE_DB_INSERT_EXCEPTION",
+      "description": "Thrown as an ApplicationException when a failure occurs inserting parking records into bio_parking_queue_store (non-success insert code or catch-all Exception). Thrown in CandidateParkingService.insertBioParkingQueueStoreRecords at lines 331 and 364.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "BIO_PARKING_QUEUE_STORE_DB_UPDATE_EXCEPTION",
+      "description": "Thrown as an ApplicationException when a DB update failure occurs for bio_parking_queue_store during parking, unparking, or deadlock-handling operations. Thrown at multiple sites in CandidateParkingService (lines 186, 193, 351, 425, 432) across methods applicantFirstInDeadlockHandling, insertBioParkingQueueStoreRecords, and updateParkedRecordInBioQueueStoreDb.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "BIO_PARKING_QUEUE_STORE_DB_READ_EXCEPTION",
+      "description": "Thrown as an ApplicationException when a DB read failure, record-inconsistency, or JSON serialization failure occurs for bio_parking_queue_store. Thrown at multiple sites in CandidateParkingService (lines 304, 338, 356, 408, 411) across methods getParkingRecordToString, insertBioParkingQueueStoreRecords, and getParkedRecordValueFromDb.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "BIO_HELPER_CACHE_STORE_DB_DATA_NOT_FOUND",
+      "description": "Thrown as an ApplicationException when a bio_helper_cache_store lookup for PARKING_HELPER_RECORD returns DB_NO_RECORDS_FOUND or an empty response — no parking helper record exists for the applicant. Thrown in CandidateParkingService.getParkingHelperRecordFromDb at line 454. This is the actually-thrown replacement for the dead code 17038 (ABISMW_BIO_HELPER_CACHE_STORE_DATA_NOT_FOUND) which exists in BioDedupExceptionHelper but is never thrown under that name.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "UID_ORIGIN_TRACKER_DB_READ_EXCEPTION",
+      "description": "Thrown as an ApplicationException when a DB lookup for UidOriginTracker returns an error code that is none of DB_SELECT_EXECUTION_SUCCESS, DB_RETURNED_TOO_MANY_RESULTS, or DB_NO_RECORDS_FOUND. Thrown in BioDataBaseHelperServiceImpl.getUidOriginTrackerMasterPacketData at line 515.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "CANDIDATE_DISPOSITION_TRACKER_DB_READ_EXCEPTION",
+      "description": "Thrown as an ApplicationException when the pre-insert existence check for a candidate disposition tracker record returns an unexpected code (not SUCCESS, not TOO_MANY, not NO_RECORDS). Thrown in BioScoreSyncServiceImpl.insertCandidateDispositionTrackerRecord at line 1147.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "CONSISTENCY_RESPONSE_VALIDATION_FAIL",
+      "description": "Thrown as an ApplicationException when any unexpected Exception occurs during consistency-check response validation (biometrics presence, BDR counts, SDK-error filtering). Thrown in EventValidationServiceImpl.validateConsistencyCheckResponse at line 494. NOTE: Two other throw sites (lines 565 and 609) exist but are DEAD — they are inside validateBDRCountsWithPacketModalityCounts (suppressed with @SuppressWarnings for unused private method) and its downstream checkModality, which are never called. This is the actually-thrown replacement for the dead code BDR_COUNT_MISMATCH (37027).",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "CONSISTENCY_CHECK_PROCESSING_TO_CROSS_MATCH",
+      "description": "Thrown as an ApplicationException when an error occurs while handing off the consistency-check response to the SDK cross-match service (preparing/publishing the cross-match request, writing stage-tracker entries). Thrown in BioDeDuplicationServiceImpl.processConsistencyResponseToSdkCrossMatchService at line 2396.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "CONSISTENCY_CHECK_PROCESSING_TO_ESB",
+      "description": "DEAD CODE — defined in BioTechnicalExceptionConstants.java:84 but never thrown, imported, or compared anywhere in the codebase. Zero references outside its own definition.",
+      "category": "Technical",
+      "is_retryable": null
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "CROSS_MATCH_RESPONSE_VALIDATION_FAIL",
+      "description": "Thrown as an ApplicationException when a catch-all Exception (non-ApplicationException) occurs during cross-match response validation (biometrics presence, candidate counts, modality scores). Thrown in EventValidationServiceImpl.validateCrossMatchResponse at line 767.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "SLA_DATA_BREACH_PROCESSING_FAILED",
+      "description": "Thrown as an ApplicationException when a catch-all Exception (non-ApplicationException) occurs while replaying a stored SLA-breach event back to its target topic (ABIS dedup/update/rverify/identify, MDD policy batches, MFC portal). Thrown in BioDeDuplicationServiceImpl.processSlaBreachEvent at line 4593.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "REDIS_CACHE_WRITE_EXCEPTION",
+      "description": "Thrown as an ApplicationException when a Redis cache write failure occurs (EnuApplicationException during writeJSONAsync or audit-tracker cache write). Thrown at two sites in BioCacheHandlerServiceImpl: insertDataToCache (line 67) and populateAuditTrackerCache (line 106).",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "ERROR_FETCHING_HSM_KEY",
+      "description": "Thrown as an ApplicationException when any Exception occurs while logging into the Luna HSM (hsmHelper.hsmLogin()) or fetching the private key from the Luna keystore (lunaStore.getKey()). Thrown in HSMCryptoImpl.getKeyFromHSM at line 109. This is the actually-thrown replacement for the dead code FAILED_TO_LOAD_PRIVATE_KEY (37021).",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "UPDATE_CHECKER_RACE_CONDITION",
+      "description": "Thrown as an ApplicationException when the PB0 orchestration lock is currently held by the concurrent ABIS path (distributedLockService.tryAcquirePB0Lock returns false). Thrown in BioDeDuplicationServiceImpl.processUpdateCheckerResponse at line 4618. This is NOT a terminal rejection — it is caught explicitly in UpdateCheckerResponseConsumer.processPayload (line 110) by matching e.getCode() against UPDATE_CHECKER_RACE_CONDITION.name(). The consumer retries up to 3 times locally with a 2-second Thread.sleep backoff. If exhausted, the exception bubbles up to trigger transaction rollback and a 1-hour Kafka retry. No DB write occurs before the throw, so the local retry is safe.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "ABIS_IDENTIFY_RACE_CONDITION",
+      "description": "Thrown as an ApplicationException when the PB0 lock is held by the concurrent Update-Checker path (distributedLockService.tryAcquirePB0Lock returns false). Thrown in BioDeDuplicationServiceImpl.processAbisMwOnlyIdentifyResponsePostUC at line 1546. This is NOT a terminal rejection — it is caught explicitly in AbisMwResponseConsumer.processPayload (line 74) by matching e.getCode() against ABIS_IDENTIFY_RACE_CONDITION.name(). Same retry pattern as UPDATE_CHECKER_RACE_CONDITION: 3 local retries with 2s sleep, then Kafka retry on exhaustion. No DB write before the throw.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "UPDATE_CHECKER_RESPONSE_EVALUATION_FAILED",
+      "description": "Thrown as an ApplicationException when a catch-all Exception (non-ApplicationException) occurs while processing/evaluating update-checker match results (building quality lookups, computing per-candidate overall match results, anomaly-to-TD special-case handling, inserting match-analysis records). Thrown in BioScoreSyncServiceImpl.processUpdateCheckerResponseForMatchResult at line 1435.",
+      "category": "Technical",
+      "is_retryable": true
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "UPDATE_CHECKER_RESPONSE_VALIDATION_CONDITION_FAILED",
+      "description": "Thrown as an ApplicationException as a deliberate guard: there exist update-checker-exclusive candidates (shouldProcessUpdateChecker is true) but environmentProperty.isEnableUpdateCheckerFilteringForAllCandidates() is false. The system reached a state requiring update-checker filtering that the feature flag has disabled. Thrown in BioDeDuplicationServiceImpl.processCrossMatchCalculations at lines 2731-2734.",
+      "category": "Technical",
+      "is_retryable": false
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "UNSUPPORTED_ENUM_OPERATION",
+      "description": "Thrown as an ApplicationException when approve() or reject() is called on a SubstageType that is not a policy batch (i.e. isPolicyBatch() returns false for any SubstageType other than MDD_POLICY_BATCH_0/1/2 and their _RESUBMISSION variants). Thrown in SubstageType.java at lines 75 and 83. This is a programming/logic error, not a data or infrastructure issue.",
+      "category": "Technical",
+      "is_retryable": false
+    },
+    {
+      "numeric_code": null,
+      "reason_code": "UNKNOWN_MODALITY_IN_UPDATE_CHECKER_RESPONSE",
+      "description": "Thrown as an ApplicationException when UpdateCheckerModalityType.valueOf(modality.toUpperCase()) throws IllegalArgumentException — the modality string from the UpdateCheckerResponse MatchResult.modality field does not match any enum constant. Thrown in UpdateCheckerModalityType.fromString at lines 81-84.",
+      "category": "Technical",
       "is_retryable": false
     }
   ],

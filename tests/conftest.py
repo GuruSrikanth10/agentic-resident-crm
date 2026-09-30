@@ -148,6 +148,12 @@ ISOLATED_ENV_VARS = (
     "REJECTION_SERVICES_ENABLED",
     "REJECTION_SERVICES_PILOT",
     "REJECTION_UNRESOLVED_SERVICE",
+    # The reason-code -> service map: which file places rejections, and
+    # whether it comes from S3 (and /ready waits for it).
+    "REASON_CODE_SERVICE_MAP_FILE",
+    "REASON_CODE_SERVICE_MAP_S3_KEY",
+    "REASON_CODE_SERVICE_MAP_S3_BUCKET",
+    "REASON_CODE_SERVICE_MAP_REFRESH_SECONDS",
     # The DLT lane's own gate (Phase 8): whether a dead-lettered record of a
     # service is analysed, and with which pack.
     "DLT_SERVICE_GATE",

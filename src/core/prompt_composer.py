@@ -51,6 +51,8 @@ NO_ROLE_INSTRUCTIONS = "No service-specific instructions are configured for this
 
 #: How each way of placing a packet is described to the agents.
 _PLACED_BY = {
+    service_registry.SOURCE_REASON_CODE_MAP:
+        "its reason code, which the reason-code service map assigns to this service",
     service_registry.SOURCE_FLOW_STAGE: "its flowMetaData.stage",
     service_registry.SOURCE_SOURCE_TOPIC: "its sourceTopic",
     service_registry.SOURCE_REASON_CODE_DOCS:

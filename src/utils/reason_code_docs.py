@@ -44,7 +44,7 @@ import threading
 from typing import Optional
 
 from src.models.synthesis import ACTIONS, RESIDENT_ACTIONS
-from src.utils import paths
+from src.utils import paths, reason_code_service_map
 from src.utils.env import get_bool_env
 from src.utils.logging_config import get_logger
 from src.utils.runbook_store import REASON_CODE_PATTERN
@@ -242,7 +242,10 @@ def _download(bucket: str) -> bool:
                 Bucket=bucket, Prefix=listed):
             for item in page.get("Contents", []):
                 match = _S3_SERVICE_KEY.match(item["Key"][len(listed):])
-                if not match:
+                # The reason-code service map may be kept beside the store; it
+                # is not a service file, and as one it would fail validation
+                # and cost every refresh.
+                if not match or match.group(1) == reason_code_service_map.FILE_STEM:
                     continue
                 target = staging / SERVICES_DIRNAME / f"{match.group(1)}.json"
                 if target.exists():
