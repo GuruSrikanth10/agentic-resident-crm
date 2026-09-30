@@ -76,9 +76,17 @@ def test_is_reviewer_approved(feedback, expected):
 # (is_stale, has_active_checkpoint), not fall through to a reprocess.
 # ======================================================================
 
-def test_idempotency_in_progress_not_stale_no_checkpoint_short_circuits():
+def test_idempotency_in_progress_not_stale_no_checkpoint_short_circuits(monkeypatch):
     """Not stale + no active checkpoint (a run in flight between checkpoint
-    writes) must short-circuit, not silently reprocess the whole packet."""
+    writes) must short-circuit, not silently reprocess the whole packet.
+
+    The duplicate is acknowledged only once the run in flight is terminal, so
+    the consumer never commits an offset that run still depends on. Here the
+    holder never finishes: the duplicate is refused with a 503, which the
+    consumer dead-letters, rather than acknowledged."""
+    from fastapi import HTTPException
+
+    monkeypatch.setenv("DUPLICATE_WAIT_SECONDS", "0")
     storage = get_casebook_storage()
     storage.save("test-1234", {
         "packet_metadata": {"eid": "test-1234", "started_at": time.time()},
@@ -91,9 +99,10 @@ def test_idempotency_in_progress_not_stale_no_checkpoint_short_circuits():
     mock_agent.get_state.return_value = mock_state
 
     with patch("src.api.routes.get_agent", return_value=mock_agent):
-        res = asyncio.run(process_rejection(MessagePayload(**DUMMY_PAYLOAD)))
+        with pytest.raises(HTTPException) as raised:
+            asyncio.run(process_rejection(MessagePayload(**DUMMY_PAYLOAD)))
 
-    assert res["status"] == "already_processing"
+    assert raised.value.status_code == 503
     mock_agent.invoke.assert_not_called()
 
 

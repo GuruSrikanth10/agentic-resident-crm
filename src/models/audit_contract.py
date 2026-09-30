@@ -12,10 +12,9 @@ The packet's facts live under `edata`. What the translation decides:
 
 * **Dead-lettered or rejected.** `executionStatus` ON_HOLD is a record the
   service dead-lettered: its packetStatus is ON_HOLD, which the rejection
-  lane skips. Otherwise `validationStatus` "false" is a business rejection:
-  packetStatus REJECTED. Anything else keeps its `executionStatus`
-  (COMPLETED for a stage that passed), which the rejection lane skips as it
-  always skipped a status other than REJECTED.
+  lane skips and leaves to the DLT lane. Every other record is a rejection:
+  packetStatus REJECTED, whatever its `validationStatus`, which plays no part
+  in the decision.
 * **The eventId is the refId.** The envelope has no eventId, and `mid` is
   one per message. The packet event's eventId equalled its refId, so
   casebooks stay keyed, and findable, by the refId.
@@ -37,8 +36,8 @@ EXECUTION_ON_HOLD = "ON_HOLD"
 #: packetStatus given to a dead-lettered record.
 STATUS_ON_HOLD = "ON_HOLD"
 
-#: packetStatus given to a business rejection, the one the rejection lane
-#: investigates.
+#: packetStatus given to every record that is not dead-lettered, the one the
+#: rejection lane investigates.
 STATUS_REJECTED = "REJECTED"
 
 
@@ -88,7 +87,7 @@ def to_message_payload(payload: Any) -> Any:
             "isForeignResident": _flag(edata.get("isForeignResident")),
         },
         "packetExecutionSummary": {
-            "packetStatus": _packet_status(execution, validation),
+            "packetStatus": _packet_status(execution),
             "errorData": list(error_data) if isinstance(error_data, list) else None,
             "hasExecutionErrors": None if execution is None
             else execution.upper() == EXECUTION_ON_HOLD,
@@ -104,12 +103,16 @@ def to_message_payload(payload: Any) -> Any:
     }
 
 
-def _packet_status(execution: Optional[str], validation: Optional[bool]) -> Optional[str]:
+def _packet_status(execution: Optional[str]) -> str:
+    """ON_HOLD for a dead-lettered record, REJECTED for anything else.
+
+    `validationStatus` is deliberately not read: it used to decide REJECTED,
+    so a record with a passing (or missing) validation was skipped by the
+    rejection lane although it had been published as a rejection.
+    """
     if execution and execution.upper() == EXECUTION_ON_HOLD:
         return STATUS_ON_HOLD
-    if validation is False:
-        return STATUS_REJECTED
-    return execution
+    return STATUS_REJECTED
 
 
 def _text(value) -> Optional[str]:

@@ -140,6 +140,16 @@ why it fails. The logs and the tool evidence corroborate it.
 6. Placeholders and example values in the documentation, such as <refId>,
    are not values of this packet."""
 
+#: The docs section a role gets instead when every docs server it would read
+#: from failed to list. Without it the agents were simply built with no docs
+#: tools and no word of why: on 2026-09-29 the droa_docs server was down all
+#: day, every Investigator made no tool call, and every Reviewer approved
+#: findings that had never been checked against the documentation.
+DOCS_UNAVAILABLE = """The service documentation could not be reached for this run: its server
+did not answer, so there are no documentation tools. Work from the evidence
+you were given, and say plainly in your answer that the service documentation
+was not consulted, so any conclusion that depends on it is unconfirmed."""
+
 #: How a docs section names the service to read.
 DOCS_SERVICE = "This packet's documentation service is `{name}`."
 DOCS_SERVICE_UNRESOLVED = ("The service is not resolved: identify it from the "
@@ -636,7 +646,17 @@ def prompt_section(role: str, service: Optional[str] = None, *,
         parts.append(f"{DOCS_HEADING}\n"
                      f"Tools: {', '.join(tool.name for tool in docs)}.\n\n"
                      f"{_docs_service_line(service)}\n\n{guidance.strip()}")
+    elif not opencode and _docs_unreachable(role):
+        parts.append(f"{DOCS_HEADING}\n{DOCS_UNAVAILABLE}")
     return "\n\n".join(parts)
+
+
+def _docs_unreachable(role: str) -> bool:
+    """Whether `role` would read a docs server that the catalog could not list."""
+    catalog = current_catalog()
+    failed = [server for server in mcp_config.of_kind(catalog.servers, mcp_config.KIND_DOCS)
+              if server.name in catalog.failures]
+    return bool(failed) and role in mcp_config.docs_roles()
 
 
 def _docs_service_line(service: Optional[str]) -> str:

@@ -11,6 +11,7 @@ from sqlalchemy import create_engine, text
 # "mysql+pymysql://" driver lazily, so without this a missing PyMySQL surfaces
 # as a failed query on the first live lookup rather than at boot.
 import pymysql  # noqa: F401
+from src.core import run_control
 from src.utils.env import get_bool_env, get_required_env
 from src.utils.resilience import retry_transient, db_breaker
 from src.utils.logging_config import get_logger
@@ -500,6 +501,12 @@ def fetch_elastic_logs(event_id: str) -> Optional[str]:
 @tool
 def queue_for_replay(id: str, idType: str, priority: int, operatorName: str, category: str, fromSedaStart: bool) -> str:
     """Queue a packet for replay through the OIS pipeline."""
+    # The cancellation middleware refuses this call already; checked again
+    # here because a replay of a packet already recorded FAILED_TIMEOUT is
+    # the one side effect that reaches outside this system (run_control).
+    if run_control.cancelled():
+        logger.warning("Refused a replay from an abandoned investigation", packet_id=id)
+        return f"Replay of {id} NOT queued: this investigation was abandoned."
     logger.info("Replay queue requested", packet_id=id, id_type=idType)
 
     # notificationEmail / notificationMobile are deliberately NOT parameters.

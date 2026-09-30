@@ -5,9 +5,9 @@ every dead-lettered record. The DLT headers and key are unchanged.
 `src/models/audit_contract.py` translates the envelope into the packet event
 where a record enters, so these tests check the translation against the two
 real samples, and that each lane then treats the record as before: a
-rejection (validationStatus "false") is investigated, a dead-lettered record
-(executionStatus ON_HOLD) is left to the DLT lane, and a packet event in the
-older contract passes through untouched.
+dead-lettered record (executionStatus ON_HOLD) is left to the DLT lane, every
+other record is a rejection and is investigated -- validationStatus plays no
+part -- and a packet event in the older contract passes through untouched.
 """
 import json
 from pathlib import Path
@@ -110,16 +110,17 @@ def test_the_dlt_sample_becomes_an_on_hold_packet_event():
 
 
 @pytest.mark.parametrize("execution, validation, status", [
-    ("ON_HOLD", "false", "ON_HOLD"),     # dead-lettered wins over a failed validation
+    ("ON_HOLD", "false", "ON_HOLD"),
     ("on_hold", "true", "ON_HOLD"),
     ("COMPLETED", "false", "REJECTED"),
-    ("COMPLETED", "FALSE", "REJECTED"),
     ("COMPLETED", False, "REJECTED"),
-    ("COMPLETED", "true", "COMPLETED"),
-    ("COMPLETED", None, "COMPLETED"),
-    (None, None, None),
+    ("COMPLETED", "true", "REJECTED"),
+    ("COMPLETED", True, "REJECTED"),
+    ("COMPLETED", None, "REJECTED"),
+    (None, "true", "REJECTED"),
+    (None, None, "REJECTED"),
 ])
-def test_the_packet_status_is_decided_by_execution_then_validation(execution, validation, status):
+def test_the_packet_status_is_decided_by_the_execution_status_alone(execution, validation, status):
     payload = to_message_payload(audit(executionStatus=execution, validationStatus=validation))
     assert payload["packetExecutionSummary"]["packetStatus"] == status
 
@@ -193,11 +194,13 @@ def test_the_rejection_lane_leaves_a_dead_lettered_record_to_the_dlt_lane():
     assert adapter.should_skip(result.body) == "dead-lettered packet (ON_HOLD)"
 
 
-def test_the_rejection_lane_skips_a_stage_that_passed():
+@pytest.mark.parametrize("validation", ["true", "false", None])
+def test_the_rejection_lane_ignores_the_validation_status(validation):
     adapter = RejectionAdapter()
-    body = adapter.parse(kafka_message(audit(validationStatus="true", errorData=[]))).body
+    body = adapter.parse(kafka_message(audit(validationStatus=validation))).body
 
-    assert adapter.should_skip(body) == "non-rejected packet"
+    assert body["packetExecutionSummary"]["packetStatus"] == "REJECTED"
+    assert adapter.should_skip(body) is None
 
 
 def test_an_envelope_without_a_ref_id_is_poison():

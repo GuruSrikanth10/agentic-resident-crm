@@ -312,12 +312,14 @@ def test_process_rejection_and_analyze_rejection_share_investigate_packet(storag
     assert calls == ["shared-a", "shared-b"]
 
 
-def test_analyze_rejection_short_circuits_when_in_progress_and_not_stale(storage):
+def test_analyze_rejection_short_circuits_when_in_progress_and_not_stale(storage, monkeypatch):
     """Mirrors test_phase0_fixes.py's has_active_checkpoint=False case (0.6),
     run through /analyze-rejection instead of /process-rejection -- the split
-    must not disturb this guard."""
+    must not disturb this guard. The run in flight finishes while the
+    duplicate waits, so the duplicate is acknowledged."""
     import src.api.routes as routes
 
+    monkeypatch.setenv("DUPLICATE_POLL_SECONDS", "0.01")
     storage.save("ar-inprogress", {
         "packet_metadata": {"eid": "ar-inprogress", "started_at": time.time()},
         "packet_status": {"status": "IN_PROGRESS"},
@@ -328,18 +330,37 @@ def test_analyze_rejection_short_circuits_when_in_progress_and_not_stale(storage
     mock_state.next = None  # no active checkpoint
     mock_agent.get_state.return_value = mock_state
 
+    real_terminal_status = storage.terminal_status
+    polls = []
+
+    def holder_finishes_on_second_poll(event_id, *args, **kwargs):
+        polls.append(event_id)
+        if len(polls) == 2:
+            storage.save_terminal(event_id, {
+                "packet_metadata": {"eid": event_id},
+                "packet_status": {"status": "COMPLETED"},
+            })
+        return real_terminal_status(event_id, *args, **kwargs)
+
+    monkeypatch.setattr(storage, "terminal_status", holder_finishes_on_second_poll)
     with patch.object(routes, "get_agent", return_value=mock_agent):
         response = _run_analyze("ar-inprogress")
 
     assert response["status"] == "already_processing"
+    assert response["recorded_status"] == "COMPLETED"
+    assert len(polls) == 2
     mock_agent.invoke.assert_not_called()
 
 
-def test_analyze_rejection_declines_to_double_invoke_with_an_active_checkpoint(storage):
+def test_analyze_rejection_declines_to_double_invoke_with_an_active_checkpoint(storage, monkeypatch):
     """An active checkpoint means another invocation is already resuming this
     thread_id -- /analyze-rejection must bail out rather than invoke the
-    agent concurrently against the same checkpoint."""
+    agent concurrently against the same checkpoint. Its holder never
+    finishes here, so the duplicate is refused rather than acknowledged."""
+    from fastapi import HTTPException
     import src.api.routes as routes
+
+    monkeypatch.setenv("DUPLICATE_WAIT_SECONDS", "0")
 
     storage.save("ar-resume", {
         "packet_metadata": {"eid": "ar-resume", "started_at": time.time()},
@@ -352,9 +373,10 @@ def test_analyze_rejection_declines_to_double_invoke_with_an_active_checkpoint(s
     mock_agent.get_state.return_value = mock_state
 
     with patch.object(routes, "get_agent", return_value=mock_agent):
-        response = _run_analyze("ar-resume")
+        with pytest.raises(HTTPException) as raised:
+            _run_analyze("ar-resume")
 
-    assert response["status"] == "already_processing_resumed"
+    assert raised.value.status_code == 503
     mock_agent.invoke.assert_not_called()
 
 

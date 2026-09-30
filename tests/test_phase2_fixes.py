@@ -1,4 +1,3 @@
-import os
 import time
 import asyncio
 import inspect
@@ -159,10 +158,10 @@ def test_add_learning_rule_uses_per_packet_contextvars(monkeypatch, tmp_path):
 
     add_learning_rule = captured["tool"]
 
-    base_dir = os.path.dirname(os.path.dirname(orch.__file__))
-    target_file = os.path.join(base_dir, "prompts", "pending_rules.jsonl")
-    if os.path.exists(target_file):
-        os.remove(target_file)
+    # A scratch file: this used to remove the tracked
+    # src/prompts/pending_rules.jsonl, erasing the queued rules.
+    target_file = str(tmp_path / "pending_rules.jsonl")
+    monkeypatch.setattr(orch, "PENDING_RULES_FILE", target_file)
 
     try:
         orch._current_event_id.set("evt-context-test")
@@ -177,8 +176,8 @@ def test_add_learning_rule_uses_per_packet_contextvars(monkeypatch, tmp_path):
         assert lines[0]["eventId"] == "evt-context-test"
         assert lines[0]["investigator_original_output"] == "some investigation text"
     finally:
-        if os.path.exists(target_file):
-            os.remove(target_file)
+        orch._current_event_id.set("unknown")
+        orch._current_investigation.set("")
 
 
 # ======================================================================
@@ -263,13 +262,18 @@ def test_agent_invoke_timeout_returns_failed_timeout(monkeypatch):
     mock_agent.invoke.side_effect = slow_invoke
 
     try:
-        with patch("src.api.routes.get_agent", return_value=mock_agent):
+        with patch("src.api.routes.get_agent", return_value=mock_agent), \
+             patch("src.api.routes.publish_to_dlq") as dlq:
             res = asyncio.run(process_rejection(MessagePayload(**_payload_with_event_id(event_id))))
 
         assert res["status"] == "failed_timeout"
         storage = get_casebook_storage()
         status_doc = storage.load(event_id, filename="status.json")
         assert status_doc["packet_status"]["status"] == "FAILED_TIMEOUT"
+        # The 200 lets the consumer commit, and FAILED_TIMEOUT makes a
+        # redelivery skip: the DLQ entry is the packet's only way back.
+        dlq.assert_called_once()
+        assert dlq.call_args.args[0]["eventId"] == event_id
     finally:
         _cleanup_casebook(event_id)
 

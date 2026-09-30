@@ -5,6 +5,8 @@ import urllib3.exceptions
 from elasticsearch import ConnectionError as ESConnectionError
 from sqlalchemy.exc import OperationalError
 
+from src.core.run_control import RunCancelled
+
 # Circuit breaker trips after 3 consecutive failures, resets after 60 seconds
 db_breaker = pybreaker.CircuitBreaker(fail_max=3, reset_timeout=60)
 # The enu-biometric process DB (src/tools/agent_tools) is a different MySQL
@@ -15,6 +17,10 @@ db_breaker = pybreaker.CircuitBreaker(fail_max=3, reset_timeout=60)
 process_db_breaker = pybreaker.CircuitBreaker(fail_max=3, reset_timeout=60)
 es_breaker = pybreaker.CircuitBreaker(fail_max=3, reset_timeout=60)
 llm_breaker = pybreaker.CircuitBreaker(fail_max=3, reset_timeout=60)
+# An abandoned run stopping itself says nothing about the LLM's health. Counted
+# as a failure, three timeouts in a row would open the circuit for every other
+# packet (src/core/run_control.py).
+llm_breaker.add_excluded_exception(RunCancelled)
 # The Kubernetes source retries per-status rather than per-exception-type
 # (see log_pipeline/sources/k8s/retry.py); the breaker still guards against a
 # cluster that is down entirely.

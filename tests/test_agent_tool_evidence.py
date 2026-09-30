@@ -199,7 +199,7 @@ def test_the_harness_reviewer_template_names_the_evidence_file():
     assert f"casebook_e1/{orch.TOOL_EVIDENCE_FILE}" in text
 
 
-def test_casebook_provenance_lists_the_tool_calls(monkeypatch):
+def test_casebook_provenance_lists_the_tool_calls():
     from src.api.routes import process_rejection
     from src.models.schemas import MessagePayload
     from src.storage.factory import get_casebook_storage
@@ -213,9 +213,6 @@ def test_casebook_provenance_lists_the_tool_calls(monkeypatch):
                                  "action": "MANUAL_REVIEW", "resident_action": "PENDING"}),
         "tool_evidence": [RECORD],
     }
-    # cleanup_casebook_dir would delete the local backend's own copy before
-    # it could be read back; this test is about what was written.
-    monkeypatch.setattr("src.utils.case_cleanup.cleanup_casebook_dir", lambda _e: None)
     try:
         with patch("src.api.routes.get_agent", return_value=agent):
             asyncio.run(process_rejection(MessagePayload(**_payload_with_event_id(event_id))))

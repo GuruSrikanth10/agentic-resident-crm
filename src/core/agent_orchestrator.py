@@ -1,6 +1,7 @@
 import os
 import json
 import contextvars
+import functools
 import threading
 import time
 from typing import Optional, TypedDict
@@ -8,7 +9,8 @@ from langgraph.graph import StateGraph, START, END
 from langchain_core.messages import HumanMessage
 
 from src.utils import metrics, reason_code_docs, service_registry
-from src.core import prompt_composer, rejection_context
+from src.core import prompt_composer, rejection_context, run_control
+from src.core.run_control import RunCancelled
 from src.log_pipeline import scope as log_scope
 from src.core.agent_factory import build_agent
 from src.tools import mcp_client
@@ -91,6 +93,9 @@ def _counted(node: str, invoke, service: str = "unknown"):
     """
     try:
         return invoke()
+    except RunCancelled:
+        # The run was abandoned, not failed by the LLM (run_control).
+        raise
     except Exception:
         metrics.LLM_CALLS.labels(node=node, outcome="error", service=service).inc()
         raise
@@ -643,7 +648,13 @@ def _build_agent():
     logger.info("Building the agent graph")
     # Fetched before anything reads it, so the fingerprints and every agent
     # describe the same tools.
-    _agent_catalog = mcp_client.current_catalog()
+    #
+    # Published to `_agent_catalog` only beside the graph built from it. It
+    # used to be assigned here, before the build: the lock-free fast path in
+    # `get_agent` then saw a fresh catalog next to the OLD graph and returned
+    # that graph -- built without the tools the new catalog had just listed --
+    # to every packet that arrived during the rebuild (2026-09-29, 18:28:33).
+    catalog = mcp_client.current_catalog()
     base_dir = os.path.dirname(os.path.dirname(__file__))
     # The packs whose agents are built now rather than on first use: every
     # enabled service's, and the pre-registry pack in record mode.
@@ -916,6 +927,10 @@ def _build_agent():
         wrongly kept to its service merely fails to spread -- and the
         operator can still change it at promotion.
         """
+        # The harness Reviewer reaches here without a tool call, so the
+        # cancellation middleware never sees it.
+        if run_control.cancelled():
+            return "Rule NOT queued: this investigation was abandoned."
         scope = normalize_rule_scope(scope, event_id=_current_event_id.get())
         target_file = PENDING_RULES_FILE
         lock_file = target_file + ".lock"
@@ -1592,15 +1607,27 @@ def _build_agent():
             "shadow_comparison": shadow,
         }
 
+    def stoppable(node):
+        """`node`, refusing to start once its run has been abandoned.
+
+        The agents' own middleware stops them between model calls; this stops
+        the graph between nodes, which also covers the opencode harness path
+        that makes no model call through an agent (run_control)."""
+        @functools.wraps(node)
+        def run(state: GraphState):
+            run_control.check()
+            return node(state)
+        return run
+
     # Build Graph
     workflow = StateGraph(GraphState)
-    workflow.add_node("fetch_logs", fetch_logs_node)
-    workflow.add_node("runbook_lookup", runbook_lookup_node)
-    workflow.add_node("filter_logs", filter_logs_node)
-    workflow.add_node("investigate", investigator_node)
-    workflow.add_node("review", reviewer_node)
-    workflow.add_node("synthesize", synthesis_node)
-    workflow.add_node("escalate", escalate_node)
+    workflow.add_node("fetch_logs", stoppable(fetch_logs_node))
+    workflow.add_node("runbook_lookup", stoppable(runbook_lookup_node))
+    workflow.add_node("filter_logs", stoppable(filter_logs_node))
+    workflow.add_node("investigate", stoppable(investigator_node))
+    workflow.add_node("review", stoppable(reviewer_node))
+    workflow.add_node("synthesize", stoppable(synthesis_node))
+    workflow.add_node("escalate", stoppable(escalate_node))
     
     workflow.add_edge(START, "fetch_logs")
     workflow.add_edge("fetch_logs", "runbook_lookup")
@@ -1613,6 +1640,7 @@ def _build_agent():
     
     # Backend is selectable so two API replicas can share checkpoints (4.7).
     _agent = workflow.compile(checkpointer=get_checkpointer())
+    _agent_catalog = catalog
     
     logger.info("Agent graph constructed")
     return _agent

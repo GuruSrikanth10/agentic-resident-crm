@@ -113,12 +113,11 @@ def test_atomic_write_interruption():
     assert storage.exists(event_id)
     assert storage.load(event_id)["packet_status"]["status"] == "COMPLETED"
 
-def test_concurrent_add_learning_rule():
-    base_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-    target_file = os.path.join(base_dir, "src", "prompts", "pending_rules.jsonl")
-    if os.path.exists(target_file):
-        os.remove(target_file)
-        
+def test_concurrent_add_learning_rule(tmp_path):
+    # A scratch file: this used to remove and rewrite the tracked
+    # src/prompts/pending_rules.jsonl, erasing the queued rules.
+    target_file = str(tmp_path / "pending_rules.jsonl")
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
         futures = []
         for i in range(10):

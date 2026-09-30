@@ -19,6 +19,8 @@ One builder for both lanes, so every agent gets the same things:
 - the deep-agent built-ins: planning (write_todos), a scratch filesystem held
   in the run's own state -- nothing is written to disk -- and `task`
   subagents;
+- cancellation: a run the API has stopped waiting for makes no further
+  model or tool call (src/core/run_control.py);
 - hard limits on tool calls and on model calls per run. The deep-agent
   default is a recursion limit of 9,999, which does not bound cost at all,
   and a runaway loop would outlive the server-side timeout that stops
@@ -47,6 +49,7 @@ from langchain.agents.middleware import (
     ToolCallLimitMiddleware,
 )
 
+from src.core.run_control import CancellationMiddleware
 from src.tools import mcp_client
 from src.utils.logging_config import get_logger
 
@@ -93,8 +96,12 @@ def max_model_calls() -> int:
 
 
 def _limits() -> list:
-    """Fresh limit middleware; each agent and subagent counts its own run."""
+    """Fresh limit middleware; each agent and subagent counts its own run.
+
+    Cancellation comes first, so an abandoned run is stopped before a limit
+    counts a call it will never make (run_control)."""
     return [
+        CancellationMiddleware(),
         ToolCallLimitMiddleware(run_limit=max_tool_calls(), exit_behavior="continue"),
         ModelCallLimitMiddleware(run_limit=max_model_calls(), exit_behavior="error"),
     ]

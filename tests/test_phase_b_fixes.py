@@ -261,6 +261,20 @@ def _replace_failing_n_times(n, failures):
     return _fake
 
 
+def _refuse_writes_to(path, monkeypatch):
+    """Make writing `path` in place fail too -- a genuinely unwritable file."""
+    from pathlib import Path
+
+    real_write = Path.write_text
+
+    def refuse(self, *args, **kwargs):
+        if self == path:
+            raise PermissionError(5, "Access is denied")
+        return real_write(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", refuse)
+
+
 def test_heartbeat_write_retries_a_transient_lock(tmp_path, monkeypatch):
     """Windows denies os.replace while another process holds the destination
     open (OneDrive, the indexer, an AV scan). Those holders release in
@@ -279,6 +293,22 @@ def test_heartbeat_write_retries_a_transient_lock(tmp_path, monkeypatch):
     assert not (tmp_path / "consumer_heartbeat.tmp").exists()
 
 
+def test_heartbeat_is_written_in_place_when_every_swap_is_refused(tmp_path, monkeypatch):
+    """A holder that outlasts the retries (five ticks in a row on 2026-09-29,
+    close to the 30s staleness limit) still allows writing, so the stamp
+    lands in place rather than the tick being lost."""
+    import os
+
+    heartbeat = tmp_path / "consumer_heartbeat.txt"
+    monkeypatch.setattr(os, "replace", _replace_failing_n_times(99, []))
+    monkeypatch.setattr(kc, "HEARTBEAT_WRITE_BACKOFF_SECONDS", 0.001)
+
+    kc._write_heartbeat(heartbeat)
+
+    assert float(heartbeat.read_text()) > 0
+    assert not (tmp_path / "consumer_heartbeat.tmp").exists()
+
+
 def test_heartbeat_write_never_raises_when_every_attempt_fails(tmp_path, monkeypatch):
     """The ticker calls this in a bare loop: an exception escaping here kills
     the heartbeat thread for the life of the process."""
@@ -286,6 +316,7 @@ def test_heartbeat_write_never_raises_when_every_attempt_fails(tmp_path, monkeyp
 
     heartbeat = tmp_path / "consumer_heartbeat.txt"
     monkeypatch.setattr(os, "replace", _replace_failing_n_times(99, []))
+    _refuse_writes_to(heartbeat, monkeypatch)
     monkeypatch.setattr(kc, "HEARTBEAT_WRITE_BACKOFF_SECONDS", 0.001)
 
     kc._write_heartbeat(heartbeat)  # must return, not raise
@@ -301,6 +332,7 @@ def test_liveness_survives_a_heartbeat_file_that_cannot_be_written(tmp_path, mon
 
     heartbeat = tmp_path / "consumer_heartbeat.txt"
     monkeypatch.setattr(os, "replace", _replace_failing_n_times(99, []))
+    _refuse_writes_to(heartbeat, monkeypatch)
     monkeypatch.setattr(kc, "HEARTBEAT_WRITE_BACKOFF_SECONDS", 0.001)
     monkeypatch.setattr(kc, "HEARTBEAT_INTERVAL_SECONDS", 0.01)
     monkeypatch.setattr(kc, "_heartbeat_path", lambda: heartbeat)

@@ -4,7 +4,7 @@ import requests
 import signal
 import threading
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 from kafka import ConsumerRebalanceListener, KafkaConsumer
 from kafka.structs import OffsetAndMetadata
@@ -164,8 +164,21 @@ class OffsetTracker:
             self._dispatched[tp].add(offset)
 
     def completed(self, tp, offset: int):
+        """Record `offset` as done -- if it is still this consumer's to commit.
+
+        A completion for an offset that is not dispatched here is dropped.
+        Workers finish on their own schedule, so one can report a message on
+        a partition `forget` has already dropped on revoke. Recording it
+        re-created the partition's state: `on_partitions_assigned` then threw
+        it away as stale if the partition came back (2026-09-29, partitions 7
+        and 2), and if it went to another member `take_committable` would
+        commit an offset on a partition this consumer no longer owns -- the
+        G7 failure `forget` exists to prevent. The new owner redelivers the
+        message, and the terminal casebook makes that redelivery a skip.
+        """
         with self._lock:
-            self._completed[tp].add(offset)
+            if offset in self._dispatched.get(tp, ()):
+                self._completed[tp].add(offset)
 
     def committable_for(self, partitions) -> dict:
         """Take the safe floor for `partitions` only.
@@ -233,8 +246,14 @@ class OffsetTracker:
         unbounded, invisible commit stall.
         """
         with self._lock:
-            self._dispatched[tp].discard(offset)
-            self._completed[tp].discard(offset)
+            # `.get`, not the defaultdicts: retiring an offset on a partition
+            # already forgotten must not re-create its state (see completed).
+            dispatched = self._dispatched.get(tp)
+            if dispatched is not None:
+                dispatched.discard(offset)
+            completed = self._completed.get(tp)
+            if completed is not None:
+                completed.discard(offset)
 
     def in_flight(self) -> int:
         with self._lock:
@@ -528,6 +547,7 @@ class _RebalanceListener(ConsumerRebalanceListener):
             return
         logger.info("Partitions revoked; committing and dropping their offsets",
                     partitions=[str(tp) for tp in revoked])
+        _drop_backlog(revoked)
         commits = _offset_tracker.committable_for(revoked)
         if commits and consumer is not None:
             try:
@@ -580,15 +600,33 @@ def _write_heartbeat(heartbeat_file: Path):
     memory in the process that ticks.
     """
     tmp_path = heartbeat_file.with_suffix(".tmp")
+    stamp = str(time.time())
     try:
-        tmp_path.write_text(str(time.time()), encoding="utf-8")
+        tmp_path.write_text(stamp, encoding="utf-8")
         replace_with_retry(tmp_path, heartbeat_file,
                            attempts=HEARTBEAT_WRITE_ATTEMPTS,
                            backoff=HEARTBEAT_WRITE_BACKOFF_SECONDS,
                            abort=_shutdown)
+        return
+    except Exception as e:
+        replace_error = e
+
+    # The swap was refused for the whole retry window. On Windows that is a
+    # holder without FILE_SHARE_DELETE on the destination -- on 2026-09-29 the
+    # DLT analysis heartbeat was refused on five consecutive ticks (~25s,
+    # against a 30s staleness limit). Such a holder still allows writing, so
+    # overwrite in place: a reader may, rarely, see a partial stamp for one
+    # read, where a skipped tick leaves every cross-process reader with an
+    # older one until the holder lets go.
+    try:
+        heartbeat_file.write_text(stamp, encoding="utf-8")
+        tmp_path.unlink(missing_ok=True)
+        logger.debug("Heartbeat swap refused; wrote it in place",
+                     error=str(replace_error))
     except Exception as e:
         logger.warning("Failed to write heartbeat",
-                       error=str(e), attempts=HEARTBEAT_WRITE_ATTEMPTS)
+                       error=str(e), replace_error=str(replace_error),
+                       attempts=HEARTBEAT_WRITE_ATTEMPTS)
 
 
 def _start_heartbeat_thread(heartbeat_file: Path) -> threading.Thread:
@@ -745,32 +783,85 @@ def _drain_and_commit():
     logger.info("Consumer shutdown complete")
 
 
-#: How long a single `_queue_semaphore.acquire()` attempt waits before the
-#: loop re-checks `_shutdown`. Short enough that a SIGTERM is observed
-#: promptly, long enough that a busy pool is not a spin.
-SLOT_ACQUIRE_POLL_SECONDS = float(os.environ.get("SLOT_ACQUIRE_POLL_SECONDS", "1"))
+#: How long `poll()` waits while fetched messages are waiting for a worker
+#: slot. Short, so a freed slot is taken promptly and a SIGTERM is observed
+#: within it; long enough that a saturated pool is not a spin.
+SATURATED_POLL_SECONDS = float(os.environ.get("SATURATED_POLL_SECONDS", "1"))
+
+#: How long `poll()` waits when there is nothing waiting to be dispatched.
+IDLE_POLL_SECONDS = float(os.environ.get("IDLE_POLL_SECONDS", "5"))
+
+#: Messages fetched but not yet dispatched, oldest first. Only the poll-loop
+#: thread touches it -- the rebalance listener runs inside `consumer.poll()`,
+#: on that same thread -- so it needs no lock.
+_backlog = deque()
 
 
-def _acquire_slot() -> bool:
-    """Take a worker slot, or return False because a shutdown began.
+def _drop_backlog(partitions) -> None:
+    """Forget undispatched messages from partitions this consumer lost.
 
-    The bare `_queue_semaphore.acquire()` this replaces took no timeout. With
-    every worker busy -- exactly the sustained load the semaphore exists to
-    manage -- the poll loop parked here indefinitely, and a thread already
-    inside `acquire()` never observes `_shutdown`. It waited for a worker to
-    finish, which for the slow consumer is up to PACKET_TIMEOUT_SECONDS (300s).
-
-    SHUTDOWN_DRAIN_SECONDS is 25s and a typical terminationGracePeriodSeconds
-    is 30s, so the pod was SIGKILLed long before `_drain_and_commit` ran: the
-    F12 drain was inert under precisely the conditions it was written for.
-
-    Declining to dispatch is safe. The offset is never committed, so Kafka
-    redelivers the message to whoever takes the partition next.
+    They were never dispatched, so nothing here commits them: the partition's
+    new owner fetches them again from the committed offset.
     """
-    while not _shutdown.is_set():
-        if _queue_semaphore.acquire(timeout=SLOT_ACQUIRE_POLL_SECONDS):
-            return True
-    return False
+    lost = set(partitions)
+    kept = [(tp, msg) for tp, msg in _backlog if tp not in lost]
+    if len(kept) != len(_backlog):
+        logger.info("Dropping undispatched messages from revoked partitions",
+                    dropped=len(_backlog) - len(kept))
+        _backlog.clear()
+        _backlog.extend(kept)
+
+
+def _dispatch_backlog() -> None:
+    """Hand backlog messages to free worker slots, without waiting for one."""
+    while _backlog and not _shutdown.is_set():
+        if not _queue_semaphore.acquire(blocking=False):
+            return
+        tp, msg = _backlog.popleft()
+        _handle_one_message(tp, msg)
+
+
+def _set_fetching(active: bool) -> None:
+    """Pause every assigned partition while the backlog waits; resume after.
+
+    A paused partition returns no records, but `poll()` still runs the group
+    protocol -- which is the point (see `_poll_once`).
+    """
+    if active:
+        paused = consumer.paused()
+        if paused:
+            consumer.resume(*paused)
+        return
+    unpaused = consumer.assignment() - consumer.paused()
+    if unpaused:
+        consumer.pause(*unpaused)
+
+
+def _poll_once() -> None:
+    """One cycle of the poll loop.
+
+    The loop used to wait for a worker slot before polling again. With every
+    slot busy -- for the slow consumer, up to PACKET_TIMEOUT_SECONDS a packet
+    -- it called `poll()` not at all, and kafka-python completes a group
+    rebalance only inside `poll()`. A rebalance that began meanwhile stalled
+    the whole group until a slot freed: on 2026-09-29 it sat for 9.5 minutes
+    (235 "Heartbeat failed ... rebalancing" lines), and every rebalance
+    completed at exactly the moment a slot did.
+
+    Backpressure now comes from pausing the partitions instead. Fetched
+    messages wait in `_backlog`, fetching stops while they do, and `poll()`
+    keeps running every SATURATED_POLL_SECONDS, so this consumer answers a
+    rebalance, and observes a shutdown, within a second whatever its workers
+    are doing.
+    """
+    _commit_ready_offsets()
+    _dispatch_backlog()
+    _set_fetching(not _backlog)
+    timeout = SATURATED_POLL_SECONDS if _backlog else IDLE_POLL_SECONDS
+    records = consumer.poll(timeout_ms=int(timeout * 1000))
+    for tp, messages in records.items():
+        _backlog.extend((tp, msg) for msg in messages)
+    _dispatch_backlog()
 
 
 def consume_forever():
@@ -801,26 +892,9 @@ def consume_forever():
     _start_health_server()
 
     try:
+        # Anything still in the backlog at shutdown was never dispatched, so
+        # it is not committed and will be redelivered.
         while not _shutdown.is_set():
-            # Commit whatever became safe since the last cycle.
-            _commit_ready_offsets()
-
-            records = consumer.poll(timeout_ms=5000)
-
-            if not records:
-                continue
-
-            for tp, messages in records.items():
-                if _shutdown.is_set():
-                    break
-                for msg in messages:
-                    if _shutdown.is_set():
-                        # Stop taking new work; anything not dispatched simply
-                        # isn't committed and will be redelivered.
-                        break
-                    # Block if the pool is full BEFORE parsing (backpressure).
-                    if not _acquire_slot():
-                        break
-                    _handle_one_message(tp, msg)
+            _poll_once()
     finally:
         _drain_and_commit()

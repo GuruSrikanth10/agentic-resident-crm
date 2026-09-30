@@ -710,6 +710,35 @@ def test_a_role_with_only_docs_tools_gets_only_the_docs_section(both):
     assert mcp_client.COMMON_RULES not in section
 
 
+def test_an_unreachable_docs_server_is_named_in_the_prompt(monkeypatch):
+    """A docs server that could not be listed used to leave the agents with no
+    docs tools and no word of it (2026-09-29: droa_docs down all day, every
+    Investigator made no tool call, every Reviewer approved)."""
+    _servers(monkeypatch, docs="http://127.0.0.1:9/mcp")
+    mcp_client.reset()
+
+    section = mcp_client.prompt_section("investigator", BIO)
+    assert section == f"{mcp_client.DOCS_HEADING}\n{mcp_client.DOCS_UNAVAILABLE}"
+    assert mcp_client.DOCS_UNAVAILABLE in mcp_client.prompt_section("reviewer", BIO)
+    # The harness is given no docs server either way, so it is told nothing.
+    assert mcp_client.prompt_section("investigator", BIO, opencode=True) == ""
+
+
+def test_an_unreachable_docs_server_is_not_named_to_a_role_that_never_reads_it(monkeypatch):
+    _servers(monkeypatch, docs="http://127.0.0.1:9/mcp")
+    monkeypatch.setenv("AGENT_DOCS_ROLES", "investigator")
+    mcp_client.reset()
+
+    assert mcp_client.prompt_section("reviewer", BIO) == ""
+
+
+def test_an_unreachable_tools_server_says_nothing_about_documentation(monkeypatch):
+    _servers(monkeypatch, tools="http://127.0.0.1:9/mcp")
+    mcp_client.reset()
+
+    assert mcp_client.DOCS_UNAVAILABLE not in mcp_client.prompt_section("investigator", BIO)
+
+
 def _every_section(opencode=False):
     sections = {}
     for role in agent_tools.SERVICE_ROLES:

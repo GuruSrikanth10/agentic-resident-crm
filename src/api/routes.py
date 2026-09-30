@@ -22,6 +22,8 @@ from src.utils.outcomes import (
     record_outcome,
 )
 from src.core.agent_orchestrator import get_agent, prompt_fingerprint
+from src.core import run_control
+from src.core.run_control import RunCancelled
 from src.log_pipeline import scope as log_scope
 from src.utils import packet_claims, service_registry
 from src.storage.factory import get_casebook_storage
@@ -314,6 +316,79 @@ def _get_agent_invoke_timeout_seconds() -> float:
     packet_timeout = float(os.environ.get("PACKET_TIMEOUT_SECONDS", "300"))
     default_budget = max(packet_timeout - 30, 30)
     return float(os.environ.get("AGENT_INVOKE_TIMEOUT_SECONDS", default_budget))
+
+
+def _duplicate_wait_seconds() -> float:
+    """How long a duplicate delivery waits for the run holding its packet.
+
+    Defaults to the invoke budget: the holder's route writes a terminal
+    status within that, whatever the outcome. It must stay under
+    PACKET_TIMEOUT_SECONDS, or the consumer gives up on the duplicate first.
+    """
+    raw = os.environ.get("DUPLICATE_WAIT_SECONDS")
+    if raw:
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            pass
+    return _get_agent_invoke_timeout_seconds()
+
+
+async def _await_run_in_flight(storage, event_id: str, status: str, log) -> dict:
+    """Wait for the run holding `event_id` to reach a terminal status.
+
+    A duplicate used to return 200 at once, and the consumer committed its
+    offset while the holder was still running. That offset is the holder's
+    too -- a rebalance redelivers the message it is working on -- so if the
+    holder's process died before finishing, the packet was stranded at
+    IN_PROGRESS with nothing left to redeliver it (2026-09-29: 92a6ad44 was
+    committed 0.1s after its run began). The duplicate now answers only once
+    the packet is terminal, which is when committing it is safe.
+
+    If the holder does not finish within `_duplicate_wait_seconds()`, it is
+    presumed dead and this raises 503: the consumer then routes the message
+    to the DLQ, where it is visible and replayable, instead of committing it.
+    """
+    deadline = time.monotonic() + _duplicate_wait_seconds()
+    poll = float(os.environ.get("DUPLICATE_POLL_SECONDS", "5"))
+    log.info("Waiting for the run in flight to finish before acknowledging",
+             duplicate_status=status)
+    while True:
+        recorded = await _off_loop(storage.terminal_status, event_id)
+        if recorded:
+            return {"status": status, "event_id": event_id,
+                    "recorded_status": recorded}
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        await asyncio.sleep(min(poll, remaining))
+    log.warning("The run holding this packet did not finish while a duplicate "
+                "waited; refusing so the consumer dead-letters it",
+                duplicate_status=status)
+    raise HTTPException(status_code=503,
+                        detail="Another run holds this packet and has not finished")
+
+
+def _log_abandoned_run(event_id: str, run: concurrent.futures.Future) -> None:
+    """Say how a run ended after the route stopped waiting for it.
+
+    Its outcome used to be read by nobody, so a run that raised after its
+    timeout vanished from the log (2026-09-29: e57156f6 entered its Reviewer
+    and was never heard from again).
+    """
+    log = logger.bind(event_id=event_id)
+    if run.cancelled():
+        log.warning("Abandoned run never started; its budget ran out while it "
+                    "waited for a worker")
+        return
+    error = run.exception()
+    if error is None:
+        log.info("Abandoned run finished; its result was discarded")
+    elif isinstance(error, RunCancelled):
+        log.info("Abandoned run stopped at its next step")
+    else:
+        log.warning("Abandoned run ended with an error",
+                    error=f"{type(error).__name__}: {error}")
 
 router = APIRouter()
 
@@ -835,13 +910,15 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
                 pre_invoke_log.info(
                     "Another run holds this thread_id and has checkpointed; "
                     "skipping duplicate invocation")
-                return {"status": "already_processing_resumed", "event_id": event_id}
+                return await _await_run_in_flight(
+                    storage, event_id, "already_processing_resumed", pre_invoke_log)
             else:
                 # Not stale, and no active checkpoint: a run is in flight but
                 # between checkpoint writes. Treat as already processing
                 # instead of falling through to a full duplicate reprocess.
                 pre_invoke_log.info("IN_PROGRESS and not stale; skipping duplicate invocation")
-                return {"status": "already_processing", "event_id": event_id}
+                return await _await_run_in_flight(
+                    storage, event_id, "already_processing", pre_invoke_log)
 
     # Note how the branch above interacts with the claim below, because the
     # two disagree on purpose. `MAX_IN_PROGRESS_AGE_SECONDS` (default 1800) is
@@ -860,10 +937,14 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
     # exactly one caller can win it. See src/utils/packet_claims.py.
     claim = await _off_loop(packet_claims.claim_packet, event_id)
     if not claim.won:
-        logger.bind(event_id=event_id).info(
+        duplicate_log = logger.bind(event_id=event_id)
+        duplicate_log.info(
             "Skipping duplicate invocation; another run holds this packet",
             claim_outcome=claim.outcome, claim_age_seconds=claim.age_seconds)
-        return {"status": "already_processing", "event_id": event_id}
+        if claim.outcome == "finished":
+            return {"status": "already_processed", "event_id": event_id}
+        return await _await_run_in_flight(
+            storage, event_id, "already_processing", duplicate_log)
 
     # Write IN_PROGRESS stub before invoking graph to status.json
     await _off_loop(storage.save, event_id, {
@@ -881,7 +962,9 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
     # duration (2.6).
     log.info("Dispatching payload to LangGraph")
     agent_invoke_timeout_seconds = _get_agent_invoke_timeout_seconds()
-    loop = asyncio.get_running_loop()
+    # Set when the budget runs out, so the run stops at its next step instead
+    # of running on to the end in a worker nobody is waiting on (run_control).
+    cancel = threading.Event()
     try:
         if has_active_checkpoint:
             invoke_call = functools.partial(agent.invoke, None, config=config)
@@ -902,12 +985,15 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
                                "pilot": pilot},
                 config=config
             )
+        run = _agent_invoke_executor.submit(run_control.run_in_scope, cancel, invoke_call)
         try:
-            result = await asyncio.wait_for(
-                loop.run_in_executor(_agent_invoke_executor, invoke_call),
-                timeout=agent_invoke_timeout_seconds,
-            )
+            result = await asyncio.wait_for(asyncio.wrap_future(run),
+                                            timeout=agent_invoke_timeout_seconds)
         except asyncio.TimeoutError:
+            # A run still waiting for a worker was cancelled with the wait; a
+            # running one stops at its next model call, tool call or node.
+            cancel.set()
+            run.add_done_callback(functools.partial(_log_abandoned_run, event_id))
             log.error(
                 "Agent invocation exceeded server-side budget",
                 exc_info=False,
@@ -922,6 +1008,14 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
                 "packet_status": {"status": "FAILED_TIMEOUT"},
                 "resolution": {"synthesis": f"Investigation exceeded the server-side budget of {agent_invoke_timeout_seconds}s."}
             })
+            # This response is a 200, so the consumer commits the offset, and
+            # FAILED_TIMEOUT is terminal, so a redelivery is skipped. Without
+            # the DLQ entry the packet existed nowhere replayable -- unlike
+            # the consumer's own timeout and the exception path below, which
+            # both dead-letter (2026-09-29: 21 timeouts, none dead-lettered).
+            await _off_loop(
+                publish_to_dlq, signal_dict,
+                f"Investigation exceeded the server-side budget of {agent_invoke_timeout_seconds}s")
             from src.utils.case_cleanup import cleanup_casebook_dir
             cleanup_casebook_dir(event_id)
             return {"status": "failed_timeout", "event_id": event_id}
