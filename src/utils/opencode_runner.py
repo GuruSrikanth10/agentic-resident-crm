@@ -63,6 +63,17 @@ DEFAULT_MODEL = "uidai/glm-5.2-fp8"
 #: reads the documentation corpus from cold.
 DEFAULT_TIMEOUT_SECONDS = 300
 
+#: Where `opencode serve` listens. Constants rather than a Session argument:
+#: they go onto the server's command line, and a value read off the Session
+#: carried whatever Fortify had tainted the Session with -- its tool config --
+#: into that command line (Fortify: Command Injection).
+SERVER_HOST = "127.0.0.1"
+SERVER_PORT = 4096
+
+#: The names the opencode executable may have: npm installs `opencode`, and
+#: on Windows `opencode.cmd` or `opencode.exe`.
+BINARY_NAMES = ("opencode", "opencode.cmd", "opencode.exe")
+
 
 class OpencodeUnavailable(Exception):
     """Raised when the harness cannot run."""
@@ -111,11 +122,29 @@ def is_enabled() -> bool:
 
 
 def _binary() -> Optional[str]:
-    raw = os.environ.get(ENV_BINARY, "").strip()
-    if raw:
-        return raw
+    """The opencode executable as an absolute path, or None when there is none.
+
+    OPENCODE_BINARY names it, as a path or a name on PATH; unset, it is
+    `opencode` on PATH. Either way it must resolve to an executable file
+    named `opencode` (BINARY_NAMES). It is the first element of every command
+    line the runner starts, so anything else -- a shell, an interpreter,
+    another tool, a value with arguments in it -- is refused rather than run.
+    """
     import shutil
-    return shutil.which("opencode")
+    raw = os.environ.get(ENV_BINARY, "").strip()
+    found = shutil.which(raw or "opencode")
+    if not found:
+        if raw:
+            logger.warning("OPENCODE_BINARY is not an executable file; "
+                           "the harness is unavailable", binary=raw)
+        return None
+    path = os.path.abspath(found)
+    if os.path.basename(path).lower() not in BINARY_NAMES:
+        logger.warning("Refusing an opencode binary not named opencode; "
+                       "the harness is unavailable", binary=path,
+                       allowed=list(BINARY_NAMES))
+        return None
+    return path
 
 
 def _model() -> str:
@@ -219,8 +248,7 @@ class Session:
     between cases.
     """
 
-    def __init__(self, port: int = 0):
-        self.port = port or 4096
+    def __init__(self):
         self.password = secrets.token_urlsafe(24)
         self._process: Optional[subprocess.Popen] = None
         #: The config this server was started with. An attached task uses it
@@ -243,8 +271,10 @@ class Session:
         if config:
             env["OPENCODE_CONFIG_CONTENT"] = json.dumps(config)
 
+        # Every argument is the checked executable (`_binary`) or a constant,
+        # and there is no shell: nothing read off `self` reaches this line.
         self._process = subprocess.Popen(
-            [binary, "serve", "--port", str(self.port), "--hostname", "127.0.0.1"],
+            [binary, "serve", "--port", str(SERVER_PORT), "--hostname", SERVER_HOST],
             env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, encoding="utf-8", errors="replace")
 
@@ -254,7 +284,7 @@ class Session:
                 raise OpencodeUnavailable("`opencode serve` exited during startup.")
             try:
                 import urllib.request
-                urllib.request.urlopen(f"http://127.0.0.1:{self.port}/", timeout=1)
+                urllib.request.urlopen(f"{self.url}/", timeout=1)
                 break
             except Exception:
                 continue
@@ -270,14 +300,14 @@ class Session:
 
     @property
     def url(self) -> str:
-        return f"http://127.0.0.1:{self.port}"
+        return f"http://{SERVER_HOST}:{SERVER_PORT}"
 
 
 _ACTIVE: Optional[Session] = None
 
 
 @contextlib.contextmanager
-def session_scope(port: int = 0):
+def session_scope():
     """Start one `opencode serve` for the whole API process lifetime.
 
     Yields the Session (or None if opencode is unavailable). Each task
@@ -288,7 +318,7 @@ def session_scope(port: int = 0):
         yield _ACTIVE
         return
     try:
-        with Session(port=port) as session:
+        with Session() as session:
             _ACTIVE = session
             logger.info("opencode server started",
                         url=session.url, model=_model())

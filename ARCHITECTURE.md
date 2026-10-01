@@ -1066,6 +1066,12 @@ LLM.
   not yet accepting connections. It listens on `127.0.0.1:4096` and is
   guarded by a per-process `secrets.token_urlsafe(24)` password passed as
   `OPENCODE_SERVER_PASSWORD`. Cold boot is ~15s; attached calls take ~3s.
+  Its command line is the opencode executable and constants alone
+  (`SERVER_HOST`, `SERVER_PORT`): the port used to be read off the `Session`,
+  which also holds the tool config, and Fortify traced that config into the
+  command line (Command Injection). The executable, `OPENCODE_BINARY` or
+  `opencode` on PATH, must resolve to an executable file named `opencode`
+  (`.cmd`/`.exe` on Windows) or the harness is unavailable.
   `NO_PROXY` is force-extended with `127.0.0.1,localhost` on both the server
   and every task, because a corporate proxy that intercepts loopback returns
   an HTML error page that surfaces as "Request is not supported by this

@@ -684,6 +684,56 @@ def test_every_harness_call_site_labels_its_node():
 
 
 # ---------------------------------------------------------------------------
+# What reaches a command line (Fortify: Command Injection).
+# ---------------------------------------------------------------------------
+
+def test_the_binary_resolves_to_an_absolute_opencode(monkeypatch, tmp_path):
+    fake = _streaming_binary(tmp_path, monkeypatch)
+    assert opencode_runner._binary() == str(fake)
+
+
+@pytest.mark.parametrize("name", ["bash", "opencode-wrapper", "opencode.sh"])
+def test_a_binary_not_named_opencode_is_refused(monkeypatch, tmp_path, name):
+    other = tmp_path / name
+    other.write_text("#!/bin/sh\n", encoding="utf-8")
+    other.chmod(0o755)
+    monkeypatch.setenv(opencode_runner.ENV_BINARY, str(other))
+    assert opencode_runner._binary() is None
+
+
+def test_a_binary_that_is_not_an_executable_file_is_refused(monkeypatch, tmp_path):
+    for value in (str(tmp_path / "opencode"), "opencode serve --port 1; id",
+                  str(tmp_path)):
+        monkeypatch.setenv(opencode_runner.ENV_BINARY, value)
+        assert opencode_runner._binary() is None
+
+
+def test_the_server_command_line_is_the_binary_and_constants(monkeypatch, tmp_path):
+    """Nothing read off the Session reaches `opencode serve`'s argv: its
+    config is what Fortify traced into the port the argv used to carry."""
+    import subprocess
+
+    fake = _streaming_binary(tmp_path, monkeypatch)
+    started = []
+
+    class _Started(Exception):
+        pass
+
+    def popen(argv, **_kwargs):
+        started.append(argv)
+        raise _Started
+
+    monkeypatch.setattr(opencode_runner, "_harness_config", lambda _model: {"mcp": {}})
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    with pytest.raises(_Started):
+        opencode_runner.Session().__enter__()
+
+    assert started == [[str(fake), "serve",
+                        "--port", str(opencode_runner.SERVER_PORT),
+                        "--hostname", opencode_runner.SERVER_HOST]]
+
+
+# ---------------------------------------------------------------------------
 # One switch per lane, and the shell must reach the same answer.
 # ---------------------------------------------------------------------------
 #
