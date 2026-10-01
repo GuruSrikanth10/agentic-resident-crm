@@ -224,6 +224,7 @@ def test_each_case_gets_its_own_prompt_file(monkeypatch, tmp_path):
     fake.chmod(0o755)
     monkeypatch.setenv(opencode_runner.ENV_DISABLE, "true")
     monkeypatch.setenv(opencode_runner.ENV_BINARY, str(fake))
+    monkeypatch.setattr(opencode_runner, "BINARY_PATHS", (str(fake),))
 
     results = {}
     for case in ("casebook_a", "casebook_b"):
@@ -582,6 +583,7 @@ def _streaming_binary(tmp_path, monkeypatch):
     fake.chmod(0o755)
     monkeypatch.setenv(opencode_runner.ENV_DISABLE, "true")
     monkeypatch.setenv(opencode_runner.ENV_BINARY, str(fake))
+    monkeypatch.setattr(opencode_runner, "BINARY_PATHS", (str(fake),))
     return fake
 
 
@@ -687,30 +689,49 @@ def test_every_harness_call_site_labels_its_node():
 # What reaches a command line (Fortify: Command Injection).
 # ---------------------------------------------------------------------------
 
-def test_the_binary_resolves_to_an_absolute_opencode(monkeypatch, tmp_path):
+def test_the_binary_is_the_allowed_lists_own_string(monkeypatch, tmp_path):
+    """Equal is not enough: the string on the command line must be the
+    list's, not the one read from OPENCODE_BINARY."""
+    _streaming_binary(tmp_path, monkeypatch)
+    assert opencode_runner._binary() is opencode_runner.BINARY_PATHS[0]
+
+
+def test_unset_the_first_executable_on_the_list_is_used(monkeypatch, tmp_path):
     fake = _streaming_binary(tmp_path, monkeypatch)
+    monkeypatch.delenv(opencode_runner.ENV_BINARY)
+    monkeypatch.setattr(opencode_runner, "BINARY_PATHS",
+                        (str(tmp_path / "missing" / "opencode"), str(fake)))
     assert opencode_runner._binary() == str(fake)
 
 
-@pytest.mark.parametrize("name", ["bash", "opencode-wrapper", "opencode.sh"])
-def test_a_binary_not_named_opencode_is_refused(monkeypatch, tmp_path, name):
+@pytest.mark.parametrize("name", ["bash", "elsewhere/opencode"])
+def test_a_binary_outside_the_list_is_refused(monkeypatch, tmp_path, name):
+    _streaming_binary(tmp_path, monkeypatch)
     other = tmp_path / name
+    other.parent.mkdir(exist_ok=True)
     other.write_text("#!/bin/sh\n", encoding="utf-8")
     other.chmod(0o755)
-    monkeypatch.setenv(opencode_runner.ENV_BINARY, str(other))
-    assert opencode_runner._binary() is None
-
-
-def test_a_binary_that_is_not_an_executable_file_is_refused(monkeypatch, tmp_path):
-    for value in (str(tmp_path / "opencode"), "opencode serve --port 1; id",
-                  str(tmp_path)):
+    for value in (str(other), "opencode serve --port 1; id"):
         monkeypatch.setenv(opencode_runner.ENV_BINARY, value)
         assert opencode_runner._binary() is None
 
 
-def test_the_server_command_line_is_the_binary_and_constants(monkeypatch, tmp_path):
-    """Nothing read off the Session reaches `opencode serve`'s argv: its
-    config is what Fortify traced into the port the argv used to carry."""
+def test_a_listed_path_that_is_not_an_executable_file_is_skipped(monkeypatch, tmp_path):
+    monkeypatch.delenv(opencode_runner.ENV_BINARY, raising=False)
+    plain = tmp_path / "plain" / "opencode"
+    plain.parent.mkdir()
+    plain.write_text("#!/bin/sh\n", encoding="utf-8")
+    plain.chmod(0o644)
+    folder = tmp_path / "folder" / "opencode"
+    folder.mkdir(parents=True)
+    monkeypatch.setattr(opencode_runner, "BINARY_PATHS",
+                        (str(tmp_path / "missing"), str(plain), str(folder)))
+    assert opencode_runner._binary() is None
+
+
+def test_the_server_command_line_is_constants_alone(monkeypatch, tmp_path):
+    """No value read from the environment or the Session reaches
+    `opencode serve`'s argv."""
     import subprocess
 
     fake = _streaming_binary(tmp_path, monkeypatch)

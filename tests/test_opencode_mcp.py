@@ -134,6 +134,7 @@ def _fake_binary(tmp_path, monkeypatch):
     fake.chmod(0o755)
     monkeypatch.setenv(opencode_runner.ENV_DISABLE, "true")
     monkeypatch.setenv(opencode_runner.ENV_BINARY, str(fake))
+    monkeypatch.setattr(opencode_runner, "BINARY_PATHS", (str(fake),))
 
 
 def _run(tmp_path, node=None, session=None, service=None):

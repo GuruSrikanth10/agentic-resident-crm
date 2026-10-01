@@ -63,16 +63,25 @@ DEFAULT_MODEL = "uidai/glm-5.2-fp8"
 #: reads the documentation corpus from cold.
 DEFAULT_TIMEOUT_SECONDS = 300
 
-#: Where `opencode serve` listens. Constants rather than a Session argument:
-#: they go onto the server's command line, and a value read off the Session
-#: carried whatever Fortify had tainted the Session with -- its tool config --
-#: into that command line (Fortify: Command Injection).
+#: Where `opencode serve` listens. Constants, like every other argument on
+#: its command line (BINARY_PATHS).
 SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 4096
 
-#: The names the opencode executable may have: npm installs `opencode`, and
-#: on Windows `opencode.cmd` or `opencode.exe`.
-BINARY_NAMES = ("opencode", "opencode.cmd", "opencode.exe")
+#: The only executables the runner starts: the container's (npm's global bin,
+#: with node in /usr/local -- see the Dockerfile) and the usual Linux and
+#: macOS installs. An install anywhere else is added here, or linked to one.
+#:
+#: A fixed list rather than a path from OPENCODE_BINARY or a PATH search:
+#: Fortify traces data from the agent build into the environment, and from
+#: there to every command line that carried a value read from it (Command
+#: Injection). Checking such a value does not clear it; taking the string
+#: from this list does.
+BINARY_PATHS = (
+    "/usr/local/bin/opencode",
+    "/usr/bin/opencode",
+    "/opt/homebrew/bin/opencode",
+)
 
 
 class OpencodeUnavailable(Exception):
@@ -122,29 +131,24 @@ def is_enabled() -> bool:
 
 
 def _binary() -> Optional[str]:
-    """The opencode executable as an absolute path, or None when there is none.
+    """The opencode executable, one of BINARY_PATHS, or None when there is none.
 
-    OPENCODE_BINARY names it, as a path or a name on PATH; unset, it is
-    `opencode` on PATH. Either way it must resolve to an executable file
-    named `opencode` (BINARY_NAMES). It is the first element of every command
-    line the runner starts, so anything else -- a shell, an interpreter,
-    another tool, a value with arguments in it -- is refused rather than run.
+    OPENCODE_BINARY chooses among them; unset, the first that is an
+    executable file is used. The value returned is always the list's own
+    string, never OPENCODE_BINARY's: it is the first element of every command
+    line the runner starts.
     """
-    import shutil
-    raw = os.environ.get(ENV_BINARY, "").strip()
-    found = shutil.which(raw or "opencode")
-    if not found:
-        if raw:
-            logger.warning("OPENCODE_BINARY is not an executable file; "
-                           "the harness is unavailable", binary=raw)
-        return None
-    path = os.path.abspath(found)
-    if os.path.basename(path).lower() not in BINARY_NAMES:
-        logger.warning("Refusing an opencode binary not named opencode; "
-                       "the harness is unavailable", binary=path,
-                       allowed=list(BINARY_NAMES))
-        return None
-    return path
+    chosen = os.environ.get(ENV_BINARY, "").strip()
+    for path in BINARY_PATHS:
+        if chosen and chosen != path:
+            continue
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    if chosen:
+        logger.warning("OPENCODE_BINARY is not an executable opencode at one of "
+                       "the allowed paths; the harness is unavailable",
+                       binary=chosen, allowed=list(BINARY_PATHS))
+    return None
 
 
 def _model() -> str:
@@ -271,8 +275,8 @@ class Session:
         if config:
             env["OPENCODE_CONFIG_CONTENT"] = json.dumps(config)
 
-        # Every argument is the checked executable (`_binary`) or a constant,
-        # and there is no shell: nothing read off `self` reaches this line.
+        # Every argument is a constant -- the executable is one of
+        # BINARY_PATHS -- and there is no shell.
         self._process = subprocess.Popen(
             [binary, "serve", "--port", str(SERVER_PORT), "--hostname", SERVER_HOST],
             env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
