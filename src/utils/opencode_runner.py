@@ -19,7 +19,9 @@ import json
 import os
 import re
 import secrets
+import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from typing import Any, Dict, Optional
@@ -161,7 +163,8 @@ def _provider_of(model_name: str) -> str:
 
 
 def _harness_config(model_name: str) -> Dict[str, Any]:
-    """What the harness adds to opencode's config, as `OPENCODE_CONFIG_CONTENT`.
+    """What the harness adds to opencode's config, in the file `_config_file`
+    writes.
 
     The agent tool servers (an `mcp` block) and the opencode agents: one per
     harness rejection role and service pack, and one per DLT harness role,
@@ -228,6 +231,30 @@ def _task_agent(node: Optional[str], service: Optional[str],
     return None
 
 
+def _config_file(config: Dict[str, Any]) -> str:
+    """Write `config` to a file of its own and return the file's path.
+
+    opencode reads it from the path in `OPENCODE_CONFIG` and merges it just as
+    it did the same JSON in `OPENCODE_CONFIG_CONTENT`: verified on 1.18.20
+    with `opencode debug config`, the provider block and its baseURL from
+    ~/.config/opencode surviving beside it. The path is passed rather than
+    the content for the reason a task's prompt is a file: Fortify traced data
+    from the agent build into this config, and from the environment it was
+    put in to `opencode serve` (Command Injection). The directory is private
+    to this user, since the config may carry a tool server's headers.
+    """
+    path = os.path.join(tempfile.mkdtemp(prefix="opencode-harness-"), "opencode.json")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(config, handle)
+    return path
+
+
+def _remove_config_file(path: Optional[str]) -> None:
+    """Remove a file `_config_file` wrote, and its directory."""
+    if path:
+        shutil.rmtree(os.path.dirname(path), ignore_errors=True)
+
+
 def _permissions() -> Dict[str, Any]:
     return {
         "bash": "deny",
@@ -253,17 +280,24 @@ class Session:
     """
 
     def __init__(self):
-        self.password = secrets.token_urlsafe(24)
+        self.password = ""
         self._process: Optional[subprocess.Popen] = None
         #: The config this server was started with. An attached task uses it
         #: too, so a task never asks for an agent its server does not have.
         self.config: Dict[str, Any] = {}
+        #: Where `config` is on disk, for the server and its attached tasks;
+        #: None when there is no config.
+        self.config_path: Optional[str] = None
 
     def __enter__(self) -> "Session":
         binary = _binary()
         if not binary:
             raise OpencodeUnavailable("`opencode` was not found.")
-        env = {**os.environ, "OPENCODE_SERVER_PASSWORD": self.password}
+        # The server's environment is built from locals alone: nothing in it
+        # is read back off `self`, which also holds the tool config.
+        password = secrets.token_urlsafe(24)
+        self.password = password
+        env = {**os.environ, "OPENCODE_SERVER_PASSWORD": password}
         # Ensure localhost is never proxied — the opencode server runs on
         # 127.0.0.1 and a corporate proxy will return an HTML error page
         # instead of the opencode API response, producing "Request is not
@@ -273,25 +307,32 @@ class Session:
         config = _harness_config(_model())
         self.config = config
         if config:
-            env["OPENCODE_CONFIG_CONTENT"] = json.dumps(config)
+            config_path = _config_file(config)
+            self.config_path = config_path
+            env["OPENCODE_CONFIG"] = config_path
 
-        # Every argument is a constant -- the executable is one of
-        # BINARY_PATHS -- and there is no shell.
-        self._process = subprocess.Popen(
-            [binary, "serve", "--port", str(SERVER_PORT), "--hostname", SERVER_HOST],
-            env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, encoding="utf-8", errors="replace")
+        try:
+            # Every argument is a constant -- the executable is one of
+            # BINARY_PATHS -- and there is no shell.
+            self._process = subprocess.Popen(
+                [binary, "serve", "--port", str(SERVER_PORT), "--hostname", SERVER_HOST],
+                env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, encoding="utf-8", errors="replace")
 
-        for _ in range(40):
-            time.sleep(0.5)
-            if self._process.poll() is not None:
-                raise OpencodeUnavailable("`opencode serve` exited during startup.")
-            try:
-                import urllib.request
-                urllib.request.urlopen(f"{self.url}/", timeout=1)
-                break
-            except Exception:
-                continue
+            for _ in range(40):
+                time.sleep(0.5)
+                if self._process.poll() is not None:
+                    raise OpencodeUnavailable("`opencode serve` exited during startup.")
+                try:
+                    import urllib.request
+                    urllib.request.urlopen(f"{self.url}/", timeout=1)
+                    break
+                except Exception:
+                    continue
+        except BaseException:
+            # `__exit__` never runs for an `__enter__` that raised.
+            self._remove_config()
+            raise
         return self
 
     def __exit__(self, *_exc) -> None:
@@ -301,6 +342,11 @@ class Session:
                 self._process.wait(timeout=15)
             except subprocess.TimeoutExpired:
                 self._process.kill()
+        self._remove_config()
+
+    def _remove_config(self) -> None:
+        _remove_config_file(self.config_path)
+        self.config_path = None
 
     @property
     def url(self) -> str:
@@ -550,11 +596,12 @@ def run_task(prompt: str, output_path: str,
     env["no_proxy"] = env["NO_PROXY"]
 
     session = session or current_session()
-    # An attached task runs on its server, so it takes the server's config:
-    # an agent the server was not started with does not exist there.
+    # An attached task runs on its server, so it takes the server's config,
+    # and the server's file of it: an agent the server was not started with
+    # does not exist there. An unattached task writes its own, below.
     config = session.config if session else _harness_config(_model())
-    if config:
-        env["OPENCODE_CONFIG_CONTENT"] = json.dumps(config)
+    if session and session.config_path:
+        env["OPENCODE_CONFIG"] = session.config_path
     # The role's own opencode agent for this pack, which may use only the MCP
     # tools that role gets for it. With no tool servers configured there is
     # none, and the task runs as opencode's default agent exactly as before.
@@ -569,12 +616,18 @@ def run_task(prompt: str, output_path: str,
     started = time.time()
     task_name = os.path.basename(output_path)
 
+    # Removed once the task has ended, however it ends.
+    own_config = _config_file(config) if config and not session else None
+    if own_config:
+        env["OPENCODE_CONFIG"] = own_config
+
     try:
         process = subprocess.Popen(
             argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             env=env, stdin=subprocess.DEVNULL,
             encoding="utf-8", errors="replace")
     except FileNotFoundError as error:
+        _remove_config_file(own_config)
         raise OpencodeUnavailable(f"opencode binary not found: {error}") from error
 
     output_lines = []
@@ -641,6 +694,8 @@ def run_task(prompt: str, output_path: str,
         raise OpencodeUnavailable(
             f"task exceeded {task_timeout}s wall-clock deadline "
             f"after {trace.llm_calls} LLM calls.")
+    finally:
+        _remove_config_file(own_config)
 
     reader.join(timeout=5)
     _meter()

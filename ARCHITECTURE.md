@@ -1070,10 +1070,13 @@ LLM.
   the executable of it and of every task is one of the fixed
   `opencode_runner.BINARY_PATHS`: `OPENCODE_BINARY` only chooses among them,
   and an install elsewhere is added to the list or linked to one of its
-  paths. Fortify traced data from the agent build through the environment
-  into a command line that carried a path read from it (Command Injection),
-  and checking such a path does not clear the finding; taking the string
-  from a fixed list does.
+  paths. The harness config (below) reaches the server as a file, by its
+  path in `OPENCODE_CONFIG`, in a temporary directory private to the user
+  and removed when the server stops; attached tasks are given the same path,
+  and an unattached task writes and removes its own. Its content in the
+  server's environment is what Fortify traced from the agent build into
+  `opencode serve` (Command Injection), as the prompt on a task's command
+  line had been before it became a file.
   `NO_PROXY` is force-extended with `127.0.0.1,localhost` on both the server
   and every task, because a corporate proxy that intercepts loopback returns
   an HTML error page that surfaces as "Request is not supported by this
@@ -1207,7 +1210,9 @@ and `crm_<role>__default` for the rejection roles, `crm_<role>` for the DLT
 roles -- each allowed exactly the MCP tools that role gets for that pack;
 sections 3.2.3 and 3.5.1). Blocks without a `provider` are deep-merged:
 verified on opencode 1.18.20 with `opencode debug config`, the provider
-surviving from both the global and the project file.
+surviving from both the global and the project file. They are sent as a file
+named by `OPENCODE_CONFIG` (`opencode_runner._config_file`), which opencode
+1.18.20 merges just as it did the same JSON in `OPENCODE_CONFIG_CONTENT`.
 In a container `entrypoint.sh` writes that file from the runtime environment
 -- reading `LLM_BASE_URL_COMPLEX` and `LLM_API_KEY_COMPLEX`, the same
 variables `llm_utils.py` reads -- before exec'ing `start.py`, because the LLM

@@ -754,6 +754,106 @@ def test_the_server_command_line_is_constants_alone(monkeypatch, tmp_path):
                         "--hostname", opencode_runner.SERVER_HOST]]
 
 
+_CONFIG = {"mcp": {"agent_tools": {"type": "remote", "url": "http://127.0.0.1:9/mcp"}},
+           "agent": {"crm_reviewer__enu_biometric": {"mode": "primary"}}}
+
+
+def _capture_popen(monkeypatch, error):
+    """Popen that records its env and what OPENCODE_CONFIG held, then raises."""
+    import subprocess
+
+    seen = []
+
+    def popen(_argv, **kwargs):
+        env = kwargs["env"]
+        path = env.get("OPENCODE_CONFIG")
+        with open(path, encoding="utf-8") as handle:
+            seen.append({"env": env, "path": path, "config": json.load(handle)})
+        raise error
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    return seen
+
+
+def test_the_server_gets_its_config_as_a_file_not_in_its_environment(monkeypatch, tmp_path):
+    """The config's content in the environment is what Fortify traced into
+    `opencode serve` (Command Injection); the file's path is all it gets."""
+    _streaming_binary(tmp_path, monkeypatch)
+    monkeypatch.setattr(opencode_runner, "_harness_config", lambda _model: _CONFIG)
+    seen = _capture_popen(monkeypatch, opencode_runner.OpencodeUnavailable("stop"))
+
+    session = opencode_runner.Session()
+    with pytest.raises(opencode_runner.OpencodeUnavailable):
+        session.__enter__()
+
+    [call] = seen
+    assert call["config"] == _CONFIG
+    assert "OPENCODE_CONFIG_CONTENT" not in call["env"]
+    assert call["env"]["OPENCODE_SERVER_PASSWORD"] == session.password
+    # A start that failed leaves nothing behind: `__exit__` never runs for it.
+    assert not Path(call["path"]).exists()
+    assert session.config_path is None
+
+
+def test_the_config_file_is_private_and_removed_with_the_server(tmp_path):
+    import stat
+
+    session = opencode_runner.Session()
+    session.config_path = opencode_runner._config_file(_CONFIG)
+    folder = Path(session.config_path).parent
+    assert stat.S_IMODE(folder.stat().st_mode) == 0o700
+    assert json.loads(Path(session.config_path).read_text(encoding="utf-8")) == _CONFIG
+
+    session.__exit__(None, None, None)
+    assert not folder.exists()
+    assert session.config_path is None
+
+
+def test_an_attached_task_reads_its_servers_config_file(monkeypatch, tmp_path):
+    from unittest.mock import MagicMock
+
+    _streaming_binary(tmp_path, monkeypatch)
+    server_file = opencode_runner._config_file(_CONFIG)
+    session = MagicMock(url="http://127.0.0.1:4096", password="pw",
+                        config=_CONFIG, config_path=server_file)
+    seen = _capture_popen(monkeypatch, FileNotFoundError("stop"))
+    output = tmp_path / "casebook_x" / "investigation.json"
+    output.parent.mkdir()
+
+    with pytest.raises(opencode_runner.OpencodeUnavailable):
+        opencode_runner.run_task("instructions", str(output), session=session)
+
+    [call] = seen
+    assert call["path"] == server_file
+    assert "OPENCODE_CONFIG_CONTENT" not in call["env"]
+    # The server's file outlives the task: the server still reads it.
+    assert Path(server_file).exists()
+    opencode_runner._remove_config_file(server_file)
+
+
+def test_an_unattached_task_removes_its_own_config_file(monkeypatch, tmp_path):
+    _streaming_binary(tmp_path, monkeypatch)
+    monkeypatch.setattr(opencode_runner, "current_session", lambda: None)
+    monkeypatch.setattr(opencode_runner, "_harness_config", lambda _model: _CONFIG)
+    written = []
+    config_file = opencode_runner._config_file
+    monkeypatch.setattr(opencode_runner, "_config_file",
+                        lambda config: written.append(config_file(config)) or written[-1])
+    output = tmp_path / "casebook_x" / "investigation.json"
+    output.parent.mkdir()
+
+    assert opencode_runner.run_task_json("instructions", str(output))["result"]
+
+    [path] = written
+    assert not Path(path).exists()
+
+    seen = _capture_popen(monkeypatch, FileNotFoundError("stop"))
+    with pytest.raises(opencode_runner.OpencodeUnavailable):
+        opencode_runner.run_task_json("instructions", str(output))
+    assert seen[0]["config"] == _CONFIG
+    assert not Path(seen[0]["path"]).exists()
+
+
 # ---------------------------------------------------------------------------
 # One switch per lane, and the shell must reach the same answer.
 # ---------------------------------------------------------------------------

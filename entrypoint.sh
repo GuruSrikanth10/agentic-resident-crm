@@ -1,8 +1,9 @@
 #!/bin/bash
 # Entrypoint: generate opencode provider config from runtime env vars, then start.
 #
-# opencode_runner.py's _harness_config() returns {} — it does not set
-# OPENCODE_CONFIG_CONTENT. So the provider config (baseURL, API key) must
+# opencode_runner.py's _harness_config() never carries a provider block (the
+# config it passes, by file in OPENCODE_CONFIG, holds only tool servers and
+# agents). So the provider config (baseURL, API key) must
 # live in ~/.config/opencode/config.json. But the LLM endpoint is a runtime
 # env var (from the ConfigMap), not a build-time value. This script bridges
 # that gap: it reads the env vars and writes the config file before start.py
