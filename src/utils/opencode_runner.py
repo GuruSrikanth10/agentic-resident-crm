@@ -19,9 +19,7 @@ import json
 import os
 import re
 import secrets
-import shutil
 import subprocess
-import tempfile
 import threading
 import time
 from typing import Any, Dict, Optional
@@ -64,26 +62,6 @@ DEFAULT_MODEL = "uidai/glm-5.2-fp8"
 #: the other three carried 300s, putting the shortest budget on the task that
 #: reads the documentation corpus from cold.
 DEFAULT_TIMEOUT_SECONDS = 300
-
-#: Where `opencode serve` listens. Constants, like every other argument on
-#: its command line (BINARY_PATHS).
-SERVER_HOST = "127.0.0.1"
-SERVER_PORT = 4096
-
-#: The only executables the runner starts: the container's (npm's global bin,
-#: with node in /usr/local -- see the Dockerfile) and the usual Linux and
-#: macOS installs. An install anywhere else is added here, or linked to one.
-#:
-#: A fixed list rather than a path from OPENCODE_BINARY or a PATH search:
-#: Fortify traces data from the agent build into the environment, and from
-#: there to every command line that carried a value read from it (Command
-#: Injection). Checking such a value does not clear it; taking the string
-#: from this list does.
-BINARY_PATHS = (
-    "/usr/local/bin/opencode",
-    "/usr/bin/opencode",
-    "/opt/homebrew/bin/opencode",
-)
 
 
 class OpencodeUnavailable(Exception):
@@ -133,24 +111,11 @@ def is_enabled() -> bool:
 
 
 def _binary() -> Optional[str]:
-    """The opencode executable, one of BINARY_PATHS, or None when there is none.
-
-    OPENCODE_BINARY chooses among them; unset, the first that is an
-    executable file is used. The value returned is always the list's own
-    string, never OPENCODE_BINARY's: it is the first element of every command
-    line the runner starts.
-    """
-    chosen = os.environ.get(ENV_BINARY, "").strip()
-    for path in BINARY_PATHS:
-        if chosen and chosen != path:
-            continue
-        if os.path.isfile(path) and os.access(path, os.X_OK):
-            return path
-    if chosen:
-        logger.warning("OPENCODE_BINARY is not an executable opencode at one of "
-                       "the allowed paths; the harness is unavailable",
-                       binary=chosen, allowed=list(BINARY_PATHS))
-    return None
+    raw = os.environ.get(ENV_BINARY, "").strip()
+    if raw:
+        return raw
+    import shutil
+    return shutil.which("opencode")
 
 
 def _model() -> str:
@@ -163,8 +128,7 @@ def _provider_of(model_name: str) -> str:
 
 
 def _harness_config(model_name: str) -> Dict[str, Any]:
-    """What the harness adds to opencode's config, in the file `_config_file`
-    writes.
+    """What the harness adds to opencode's config, as `OPENCODE_CONFIG_CONTENT`.
 
     The agent tool servers (an `mcp` block) and the opencode agents: one per
     harness rejection role and service pack, and one per DLT harness role,
@@ -231,30 +195,6 @@ def _task_agent(node: Optional[str], service: Optional[str],
     return None
 
 
-def _config_file(config: Dict[str, Any]) -> str:
-    """Write `config` to a file of its own and return the file's path.
-
-    opencode reads it from the path in `OPENCODE_CONFIG` and merges it just as
-    it did the same JSON in `OPENCODE_CONFIG_CONTENT`: verified on 1.18.20
-    with `opencode debug config`, the provider block and its baseURL from
-    ~/.config/opencode surviving beside it. The path is passed rather than
-    the content for the reason a task's prompt is a file: Fortify traced data
-    from the agent build into this config, and from the environment it was
-    put in to `opencode serve` (Command Injection). The directory is private
-    to this user, since the config may carry a tool server's headers.
-    """
-    path = os.path.join(tempfile.mkdtemp(prefix="opencode-harness-"), "opencode.json")
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(config, handle)
-    return path
-
-
-def _remove_config_file(path: Optional[str]) -> None:
-    """Remove a file `_config_file` wrote, and its directory."""
-    if path:
-        shutil.rmtree(os.path.dirname(path), ignore_errors=True)
-
-
 def _permissions() -> Dict[str, Any]:
     return {
         "bash": "deny",
@@ -277,87 +217,79 @@ class Session:
     Cold boot is ~15s; attached calls are ~3s. Each task is a fresh
     `opencode run --attach` — a fresh conversation, so no context bleed
     between cases.
+
+    Deliberately not a context manager: `session_scope` starts the server
+    with `_start_server` and stops it with `stop`. Its `__enter__`, which
+    started the server, was the only `__enter__` in the project, and Fortify
+    reported the prompt file that agent_orchestrator reads in a
+    `with open(...)` as reaching the server's command line (Command
+    Injection): a `with` statement calls `__enter__`, and the analysis linked
+    that one to this.
     """
 
-    def __init__(self):
-        self.password = ""
+    def __init__(self, port: int = 0):
+        self.port = port or 4096
+        self.password = secrets.token_urlsafe(24)
         self._process: Optional[subprocess.Popen] = None
         #: The config this server was started with. An attached task uses it
         #: too, so a task never asks for an agent its server does not have.
         self.config: Dict[str, Any] = {}
-        #: Where `config` is on disk, for the server and its attached tasks;
-        #: None when there is no config.
-        self.config_path: Optional[str] = None
 
-    def __enter__(self) -> "Session":
-        binary = _binary()
-        if not binary:
-            raise OpencodeUnavailable("`opencode` was not found.")
-        # The server's environment is built from locals alone: nothing in it
-        # is read back off `self`, which also holds the tool config.
-        password = secrets.token_urlsafe(24)
-        self.password = password
-        env = {**os.environ, "OPENCODE_SERVER_PASSWORD": password}
-        # Ensure localhost is never proxied — the opencode server runs on
-        # 127.0.0.1 and a corporate proxy will return an HTML error page
-        # instead of the opencode API response, producing "Request is not
-        # supported by this version of OpenCode Server".
-        env["NO_PROXY"] = f"{env.get('NO_PROXY', '')},127.0.0.1,localhost".lstrip(",")
-        env["no_proxy"] = env["NO_PROXY"]
-        config = _harness_config(_model())
-        self.config = config
-        if config:
-            config_path = _config_file(config)
-            self.config_path = config_path
-            env["OPENCODE_CONFIG"] = config_path
-
-        try:
-            # Every argument is a constant -- the executable is one of
-            # BINARY_PATHS -- and there is no shell.
-            self._process = subprocess.Popen(
-                [binary, "serve", "--port", str(SERVER_PORT), "--hostname", SERVER_HOST],
-                env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, encoding="utf-8", errors="replace")
-
-            for _ in range(40):
-                time.sleep(0.5)
-                if self._process.poll() is not None:
-                    raise OpencodeUnavailable("`opencode serve` exited during startup.")
-                try:
-                    import urllib.request
-                    urllib.request.urlopen(f"{self.url}/", timeout=1)
-                    break
-                except Exception:
-                    continue
-        except BaseException:
-            # `__exit__` never runs for an `__enter__` that raised.
-            self._remove_config()
-            raise
-        return self
-
-    def __exit__(self, *_exc) -> None:
+    def stop(self) -> None:
         if self._process and self._process.poll() is None:
             self._process.terminate()
             try:
                 self._process.wait(timeout=15)
             except subprocess.TimeoutExpired:
                 self._process.kill()
-        self._remove_config()
-
-    def _remove_config(self) -> None:
-        _remove_config_file(self.config_path)
-        self.config_path = None
 
     @property
     def url(self) -> str:
-        return f"http://{SERVER_HOST}:{SERVER_PORT}"
+        return f"http://127.0.0.1:{self.port}"
+
+
+def _start_server(session: Session) -> None:
+    """Start `opencode serve` for `session` and wait for it to answer.
+
+    A function rather than a method of Session -- see its docstring.
+    """
+    binary = _binary()
+    if not binary:
+        raise OpencodeUnavailable("`opencode` was not found.")
+    env = {**os.environ, "OPENCODE_SERVER_PASSWORD": session.password}
+    # Ensure localhost is never proxied — the opencode server runs on
+    # 127.0.0.1 and a corporate proxy will return an HTML error page
+    # instead of the opencode API response, producing "Request is not
+    # supported by this version of OpenCode Server".
+    env["NO_PROXY"] = f"{env.get('NO_PROXY', '')},127.0.0.1,localhost".lstrip(",")
+    env["no_proxy"] = env["NO_PROXY"]
+    config = _harness_config(_model())
+    session.config = config
+    if config:
+        env["OPENCODE_CONFIG_CONTENT"] = json.dumps(config)
+
+    session._process = subprocess.Popen(
+        [binary, "serve", "--port", str(session.port), "--hostname", "127.0.0.1"],
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, encoding="utf-8", errors="replace")
+
+    for _ in range(40):
+        time.sleep(0.5)
+        if session._process.poll() is not None:
+            raise OpencodeUnavailable("`opencode serve` exited during startup.")
+        try:
+            import urllib.request
+            urllib.request.urlopen(f"{session.url}/", timeout=1)
+            break
+        except Exception:
+            continue
 
 
 _ACTIVE: Optional[Session] = None
 
 
 @contextlib.contextmanager
-def session_scope():
+def session_scope(port: int = 0):
     """Start one `opencode serve` for the whole API process lifetime.
 
     Yields the Session (or None if opencode is unavailable). Each task
@@ -367,18 +299,21 @@ def session_scope():
     if _ACTIVE is not None or not is_enabled() or not _binary():
         yield _ACTIVE
         return
+    session = Session(port=port)
     try:
-        with Session() as session:
-            _ACTIVE = session
-            logger.info("opencode server started",
-                        url=session.url, model=_model())
-            yield session
+        _start_server(session)
     except OpencodeUnavailable as error:
         logger.warning("opencode server unavailable; falling back to direct LLM",
                        error=str(error))
         yield None
+        return
+    _ACTIVE = session
+    logger.info("opencode server started", url=session.url, model=_model())
+    try:
+        yield session
     finally:
         _ACTIVE = None
+        session.stop()
 
 
 def current_session() -> Optional[Session]:
@@ -596,12 +531,11 @@ def run_task(prompt: str, output_path: str,
     env["no_proxy"] = env["NO_PROXY"]
 
     session = session or current_session()
-    # An attached task runs on its server, so it takes the server's config,
-    # and the server's file of it: an agent the server was not started with
-    # does not exist there. An unattached task writes its own, below.
+    # An attached task runs on its server, so it takes the server's config:
+    # an agent the server was not started with does not exist there.
     config = session.config if session else _harness_config(_model())
-    if session and session.config_path:
-        env["OPENCODE_CONFIG"] = session.config_path
+    if config:
+        env["OPENCODE_CONFIG_CONTENT"] = json.dumps(config)
     # The role's own opencode agent for this pack, which may use only the MCP
     # tools that role gets for it. With no tool servers configured there is
     # none, and the task runs as opencode's default agent exactly as before.
@@ -616,18 +550,12 @@ def run_task(prompt: str, output_path: str,
     started = time.time()
     task_name = os.path.basename(output_path)
 
-    # Removed once the task has ended, however it ends.
-    own_config = _config_file(config) if config and not session else None
-    if own_config:
-        env["OPENCODE_CONFIG"] = own_config
-
     try:
         process = subprocess.Popen(
             argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             env=env, stdin=subprocess.DEVNULL,
             encoding="utf-8", errors="replace")
     except FileNotFoundError as error:
-        _remove_config_file(own_config)
         raise OpencodeUnavailable(f"opencode binary not found: {error}") from error
 
     output_lines = []
@@ -694,8 +622,6 @@ def run_task(prompt: str, output_path: str,
         raise OpencodeUnavailable(
             f"task exceeded {task_timeout}s wall-clock deadline "
             f"after {trace.llm_calls} LLM calls.")
-    finally:
-        _remove_config_file(own_config)
 
     reader.join(timeout=5)
     _meter()

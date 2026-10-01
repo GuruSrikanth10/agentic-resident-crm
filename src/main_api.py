@@ -242,7 +242,7 @@ async def lifespan(app: FastAPI):
         from src.utils import opencode_runner
         session = opencode_runner.current_session()
         if session:
-            session.__exit__(None, None, None)
+            session.stop()
 
     # Last: the drain above may still have been calling tools.
     mcp_server.stop_local_server()

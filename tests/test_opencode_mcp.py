@@ -134,7 +134,6 @@ def _fake_binary(tmp_path, monkeypatch):
     fake.chmod(0o755)
     monkeypatch.setenv(opencode_runner.ENV_DISABLE, "true")
     monkeypatch.setenv(opencode_runner.ENV_BINARY, str(fake))
-    monkeypatch.setattr(opencode_runner, "BINARY_PATHS", (str(fake),))
 
 
 def _run(tmp_path, node=None, session=None, service=None):
@@ -166,8 +165,7 @@ def test_an_attached_task_uses_its_servers_config(tmp_path, monkeypatch):
     monkeypatch.delenv("AGENT_MCP_SERVERS", raising=False)
     _fake_binary(tmp_path, monkeypatch)
     session = MagicMock(url="http://127.0.0.1:4096", password="pw",
-                        config={"agent": {"crm_reviewer__enu_biometric": {}}},
-                        config_path=None)
+                        config={"agent": {"crm_reviewer__enu_biometric": {}}})
     _, argv = _run(tmp_path, node="reviewer", session=session, service=BIO)
     assert argv[argv.index("--attach") + 1] == "http://127.0.0.1:4096"
     assert argv[argv.index("--agent") + 1] == "crm_reviewer__enu_biometric"

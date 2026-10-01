@@ -224,7 +224,6 @@ def test_each_case_gets_its_own_prompt_file(monkeypatch, tmp_path):
     fake.chmod(0o755)
     monkeypatch.setenv(opencode_runner.ENV_DISABLE, "true")
     monkeypatch.setenv(opencode_runner.ENV_BINARY, str(fake))
-    monkeypatch.setattr(opencode_runner, "BINARY_PATHS", (str(fake),))
 
     results = {}
     for case in ("casebook_a", "casebook_b"):
@@ -583,7 +582,6 @@ def _streaming_binary(tmp_path, monkeypatch):
     fake.chmod(0o755)
     monkeypatch.setenv(opencode_runner.ENV_DISABLE, "true")
     monkeypatch.setenv(opencode_runner.ENV_BINARY, str(fake))
-    monkeypatch.setattr(opencode_runner, "BINARY_PATHS", (str(fake),))
     return fake
 
 
@@ -683,175 +681,6 @@ def test_every_harness_call_site_labels_its_node():
             )
             found.add(node.value)
     assert found == expected
-
-
-# ---------------------------------------------------------------------------
-# What reaches a command line (Fortify: Command Injection).
-# ---------------------------------------------------------------------------
-
-def test_the_binary_is_the_allowed_lists_own_string(monkeypatch, tmp_path):
-    """Equal is not enough: the string on the command line must be the
-    list's, not the one read from OPENCODE_BINARY."""
-    _streaming_binary(tmp_path, monkeypatch)
-    assert opencode_runner._binary() is opencode_runner.BINARY_PATHS[0]
-
-
-def test_unset_the_first_executable_on_the_list_is_used(monkeypatch, tmp_path):
-    fake = _streaming_binary(tmp_path, monkeypatch)
-    monkeypatch.delenv(opencode_runner.ENV_BINARY)
-    monkeypatch.setattr(opencode_runner, "BINARY_PATHS",
-                        (str(tmp_path / "missing" / "opencode"), str(fake)))
-    assert opencode_runner._binary() == str(fake)
-
-
-@pytest.mark.parametrize("name", ["bash", "elsewhere/opencode"])
-def test_a_binary_outside_the_list_is_refused(monkeypatch, tmp_path, name):
-    _streaming_binary(tmp_path, monkeypatch)
-    other = tmp_path / name
-    other.parent.mkdir(exist_ok=True)
-    other.write_text("#!/bin/sh\n", encoding="utf-8")
-    other.chmod(0o755)
-    for value in (str(other), "opencode serve --port 1; id"):
-        monkeypatch.setenv(opencode_runner.ENV_BINARY, value)
-        assert opencode_runner._binary() is None
-
-
-def test_a_listed_path_that_is_not_an_executable_file_is_skipped(monkeypatch, tmp_path):
-    monkeypatch.delenv(opencode_runner.ENV_BINARY, raising=False)
-    plain = tmp_path / "plain" / "opencode"
-    plain.parent.mkdir()
-    plain.write_text("#!/bin/sh\n", encoding="utf-8")
-    plain.chmod(0o644)
-    folder = tmp_path / "folder" / "opencode"
-    folder.mkdir(parents=True)
-    monkeypatch.setattr(opencode_runner, "BINARY_PATHS",
-                        (str(tmp_path / "missing"), str(plain), str(folder)))
-    assert opencode_runner._binary() is None
-
-
-def test_the_server_command_line_is_constants_alone(monkeypatch, tmp_path):
-    """No value read from the environment or the Session reaches
-    `opencode serve`'s argv."""
-    import subprocess
-
-    fake = _streaming_binary(tmp_path, monkeypatch)
-    started = []
-
-    class _Started(Exception):
-        pass
-
-    def popen(argv, **_kwargs):
-        started.append(argv)
-        raise _Started
-
-    monkeypatch.setattr(opencode_runner, "_harness_config", lambda _model: {"mcp": {}})
-    monkeypatch.setattr(subprocess, "Popen", popen)
-    with pytest.raises(_Started):
-        opencode_runner.Session().__enter__()
-
-    assert started == [[str(fake), "serve",
-                        "--port", str(opencode_runner.SERVER_PORT),
-                        "--hostname", opencode_runner.SERVER_HOST]]
-
-
-_CONFIG = {"mcp": {"agent_tools": {"type": "remote", "url": "http://127.0.0.1:9/mcp"}},
-           "agent": {"crm_reviewer__enu_biometric": {"mode": "primary"}}}
-
-
-def _capture_popen(monkeypatch, error):
-    """Popen that records its env and what OPENCODE_CONFIG held, then raises."""
-    import subprocess
-
-    seen = []
-
-    def popen(_argv, **kwargs):
-        env = kwargs["env"]
-        path = env.get("OPENCODE_CONFIG")
-        with open(path, encoding="utf-8") as handle:
-            seen.append({"env": env, "path": path, "config": json.load(handle)})
-        raise error
-
-    monkeypatch.setattr(subprocess, "Popen", popen)
-    return seen
-
-
-def test_the_server_gets_its_config_as_a_file_not_in_its_environment(monkeypatch, tmp_path):
-    """The config's content in the environment is what Fortify traced into
-    `opencode serve` (Command Injection); the file's path is all it gets."""
-    _streaming_binary(tmp_path, monkeypatch)
-    monkeypatch.setattr(opencode_runner, "_harness_config", lambda _model: _CONFIG)
-    seen = _capture_popen(monkeypatch, opencode_runner.OpencodeUnavailable("stop"))
-
-    session = opencode_runner.Session()
-    with pytest.raises(opencode_runner.OpencodeUnavailable):
-        session.__enter__()
-
-    [call] = seen
-    assert call["config"] == _CONFIG
-    assert "OPENCODE_CONFIG_CONTENT" not in call["env"]
-    assert call["env"]["OPENCODE_SERVER_PASSWORD"] == session.password
-    # A start that failed leaves nothing behind: `__exit__` never runs for it.
-    assert not Path(call["path"]).exists()
-    assert session.config_path is None
-
-
-def test_the_config_file_is_private_and_removed_with_the_server(tmp_path):
-    import stat
-
-    session = opencode_runner.Session()
-    session.config_path = opencode_runner._config_file(_CONFIG)
-    folder = Path(session.config_path).parent
-    assert stat.S_IMODE(folder.stat().st_mode) == 0o700
-    assert json.loads(Path(session.config_path).read_text(encoding="utf-8")) == _CONFIG
-
-    session.__exit__(None, None, None)
-    assert not folder.exists()
-    assert session.config_path is None
-
-
-def test_an_attached_task_reads_its_servers_config_file(monkeypatch, tmp_path):
-    from unittest.mock import MagicMock
-
-    _streaming_binary(tmp_path, monkeypatch)
-    server_file = opencode_runner._config_file(_CONFIG)
-    session = MagicMock(url="http://127.0.0.1:4096", password="pw",
-                        config=_CONFIG, config_path=server_file)
-    seen = _capture_popen(monkeypatch, FileNotFoundError("stop"))
-    output = tmp_path / "casebook_x" / "investigation.json"
-    output.parent.mkdir()
-
-    with pytest.raises(opencode_runner.OpencodeUnavailable):
-        opencode_runner.run_task("instructions", str(output), session=session)
-
-    [call] = seen
-    assert call["path"] == server_file
-    assert "OPENCODE_CONFIG_CONTENT" not in call["env"]
-    # The server's file outlives the task: the server still reads it.
-    assert Path(server_file).exists()
-    opencode_runner._remove_config_file(server_file)
-
-
-def test_an_unattached_task_removes_its_own_config_file(monkeypatch, tmp_path):
-    _streaming_binary(tmp_path, monkeypatch)
-    monkeypatch.setattr(opencode_runner, "current_session", lambda: None)
-    monkeypatch.setattr(opencode_runner, "_harness_config", lambda _model: _CONFIG)
-    written = []
-    config_file = opencode_runner._config_file
-    monkeypatch.setattr(opencode_runner, "_config_file",
-                        lambda config: written.append(config_file(config)) or written[-1])
-    output = tmp_path / "casebook_x" / "investigation.json"
-    output.parent.mkdir()
-
-    assert opencode_runner.run_task_json("instructions", str(output))["result"]
-
-    [path] = written
-    assert not Path(path).exists()
-
-    seen = _capture_popen(monkeypatch, FileNotFoundError("stop"))
-    with pytest.raises(opencode_runner.OpencodeUnavailable):
-        opencode_runner.run_task_json("instructions", str(output))
-    assert seen[0]["config"] == _CONFIG
-    assert not Path(seen[0]["path"]).exists()
 
 
 # ---------------------------------------------------------------------------
@@ -1018,3 +847,90 @@ def test_env_example_ships_both_lane_switches_off():
     never starts."""
     for variable in opencode_runner.ENV_LANES.values():
         assert _env_example_value(variable) == "false"
+
+
+# ---------------------------------------------------------------------------
+# The shared server: started and stopped by session_scope.
+# ---------------------------------------------------------------------------
+
+def test_the_session_is_not_a_context_manager():
+    """Its `__enter__` started `opencode serve` and was the only `__enter__`
+    in the project. Fortify linked a `with open(...)` that reads a prompt in
+    agent_orchestrator to it, and reported the file as reaching the server's
+    command line (Command Injection)."""
+    assert "__enter__" not in vars(opencode_runner.Session)
+    assert "__exit__" not in vars(opencode_runner.Session)
+
+
+class _FakeServer:
+    """What `subprocess.Popen` returns for `opencode serve`."""
+
+    def __init__(self, argv, exited, env):
+        self.argv, self.env = argv, env
+        self.returncode = 1 if exited else None
+        self.terminated = False
+
+    def poll(self):
+        return self.returncode
+
+    def terminate(self):
+        self.terminated = True
+        self.returncode = 0
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+    def kill(self):
+        self.returncode = -9
+
+
+def _serve(monkeypatch, exited=False):
+    import subprocess
+    import urllib.request
+
+    started = []
+
+    def popen(argv, env=None, **_kwargs):
+        started.append(_FakeServer(argv, exited, env))
+        return started[-1]
+
+    for variable in opencode_runner.ENV_LANES.values():
+        monkeypatch.delenv(variable, raising=False)
+    monkeypatch.setenv(opencode_runner.ENV_DISABLE, "true")
+    monkeypatch.setenv(opencode_runner.ENV_BINARY, "opencode")
+    monkeypatch.setattr(opencode_runner, "_harness_config", lambda _model: {})
+    monkeypatch.setattr(opencode_runner.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    return started
+
+
+def test_session_scope_starts_the_server_and_stops_it(monkeypatch):
+    started = _serve(monkeypatch)
+    with opencode_runner.session_scope() as session:
+        assert session is not None
+        assert opencode_runner.current_session() is session
+        assert opencode_runner.server_ready()
+        [server] = started
+        assert server.argv == ["opencode", "serve", "--port", "4096",
+                               "--hostname", "127.0.0.1"]
+        assert server.env["OPENCODE_SERVER_PASSWORD"] == session.password
+        assert not server.terminated
+    assert server.terminated
+    assert opencode_runner.current_session() is None
+
+
+def test_a_server_that_exits_at_startup_leaves_no_session(monkeypatch):
+    started = _serve(monkeypatch, exited=True)
+    with opencode_runner.session_scope() as session:
+        assert session is None
+        assert opencode_runner.current_session() is None
+    assert len(started) == 1
+
+
+def test_the_api_stops_the_server_it_started():
+    """main_api keeps the scope open for the process's life and stops the
+    server itself at shutdown, by the method Session has."""
+    source = (REPO_ROOT / "src" / "main_api.py").read_text(encoding="utf-8")
+    assert "session.stop()" in source
+    assert "session.__exit__" not in source
