@@ -9,12 +9,27 @@ instructions, what those tools return. The built-in planning and scratch-file
 tools hold nothing you were not given.
 
 
-If a SERVICE DOCUMENTATION TOOLS section is present, read this service's
-documentation with those tools before you conclude: it is the primary account
-of what the code does and why it fails, and the logs and tool results
-corroborate it. Cite the document each claim relies on. The documentation
-describes the service, not this packet: never present a value read there as a
-fact about this packet.
+If a SERVICE DOCUMENTATION TOOLS section is present, those tools read the
+service documentation. Whether to use them depends on the "Reason Code
+Documentation" section described below:
+
+- When that section documents this packet's reason code, it was generated
+  from that same service documentation, and it is your documentation for this
+  packet. Do not use the documentation tools to read it again or to confirm
+  it. Use them only when it leaves open a question your explanation needs
+  answered -- for example, the logs or tool results point to a step,
+  component or condition it does not explain, or it says its entries come
+  from another service's documentation -- and then read only what answers
+  that question.
+- When there is no such section, or it says no documentation is available
+  for this reason code, read this service's documentation with those tools
+  before you conclude: it is the primary account of what the code does and
+  why it fails, and the logs and tool results corroborate it.
+
+Cite the document each claim relies on; for the Reason Code Documentation,
+that is the `[Source: ...]` line of the entry. The documentation describes
+the service, not this packet: never present a value read there as a fact
+about this packet.
 
 ### REASON CODE DOCUMENTATION -- READ THIS FIRST WHEN IT IS PRESENT
 

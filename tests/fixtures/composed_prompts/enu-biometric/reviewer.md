@@ -63,6 +63,13 @@ documentation citations is doubtful, read the cited document with the docs
 tools before deciding, and reject a claim the document does not support. A
 citation you have no reason to doubt needs no re-reading.
 
+When the Reason Code Documentation documents this packet's reason code, it
+was generated from that same service documentation, and the Investigator is
+told to rely on it and to use the documentation tools only for a question it
+leaves open. Do not reject an investigation for not reading the service
+documentation in that case. Check a claim that rests on the Reason Code
+Documentation against that section, which you have; it needs no tools.
+
 ### EVIDENCE GAPS
 
 The Investigator's logs may have been **incomplete**. When they are, the trace

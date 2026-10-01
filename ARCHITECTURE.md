@@ -1230,6 +1230,17 @@ handed curated documentation for the packet's own reason code instead, chosen
 by a **lookup in Python rather than by an agent** -- one LLM call, a bounded
 prompt, and a recorded hash of exactly what the model was shown.
 
+Where the direct Investigator also has a docs server's tools (section 3.5.1),
+a documented code is not looked up twice: the store is generated from the same
+DROA corpus, so on a `hit` the task tells the Investigator not to re-read or
+re-confirm it there, and to use the docs tools only for a question it leaves
+open (`rejection_context._docs_tools_note`; `InvestigatorAgent.md` and the
+docs tools' guidance say the same, and `ReviewerAgent.md` does not reject an
+investigation for not reading them). The exception is an `other_service` hit:
+nothing shown came from the packet's own service, so the task sends it to that
+service's documentation. A miss, an error, or the switch off leaves the docs
+tools' guidance as it was.
+
 **The store** (`src/reason_code_docs/`, overridable with
 `REASON_CODE_DOCS_DIR`) is one JSON file per service under `services/`, in the
 shape the service teams generate from their own source. `enu-biometric.json`
@@ -1291,7 +1302,9 @@ markers, since this text goes into a prompt. Errors exit the process at boot,
 following `validate_config`'s convention; warnings are logged. A reason code
 that cannot match a payload value, such as the generated
 `(CRE_REJECT_APPLICANT)`, is a warning and is skipped: it is real data, not a
-typo, and failing a deploy over it would mean the file could never ship.
+typo, and failing a deploy over it would mean the file could never ship. No
+payload carries one, so the committed files have them stripped, and a test
+fails on a committed file that still has one.
 
 **Where the files come from.** They ship inside the image, and
 `REASON_CODE_DOCS_DIR` points the store at a mounted volume instead. With

@@ -20,6 +20,7 @@ import pytest
 
 from src.core import rejection_context as ctx
 from src.models.synthesis import classify_logs
+from src.utils.reason_code_docs import SCOPE_OTHER_SERVICE
 
 PAYLOAD = {"eventId": "evt-1", "packetMetaData": {"enrolmentType": "E"}}
 
@@ -147,6 +148,51 @@ def test_the_task_names_the_documentation_only_when_it_is_present():
 
 
 # ---------------------------------------------------------------------------
+# The service documentation tools. The store is generated from the corpus
+# they read, so a documented code is not looked up there again.
+# ---------------------------------------------------------------------------
+
+_NO_REREAD = "do not use them to read it again or to confirm it"
+_CHECK_OWN = "use them to check how this packet's service raises"
+
+
+def _task(prompt):
+    return prompt.split(f"### {ctx.TASK}\n", 1)[1]
+
+
+@pytest.mark.parametrize("build", [_investigation, _retry])
+def test_a_hit_keeps_the_investigator_off_the_service_documentation(build):
+    prompt, _ = build()
+    assert _NO_REREAD in _task(prompt)
+    assert _CHECK_OWN not in prompt
+
+
+@pytest.mark.parametrize("build", [_investigation, _retry])
+def test_a_hit_from_other_services_sends_it_to_its_own_documentation(build):
+    """Nothing shown was generated from this service's documentation, so
+    checking it is exactly the question the section leaves open."""
+    prompt, _ = build(doc_state={**_hit(), "scope": SCOPE_OTHER_SERVICE})
+    assert _CHECK_OWN in _task(prompt)
+    assert _NO_REREAD not in prompt
+
+
+@pytest.mark.parametrize("doc_state", [
+    {"outcome": "miss", "text": None}, {"outcome": "error"},
+    {"outcome": "hit", "text": None}, {"outcome": "disabled"}, None])
+@pytest.mark.parametrize("build", [_investigation, _retry])
+def test_without_documentation_the_task_leaves_the_tools_alone(build, doc_state):
+    prompt, _ = build(doc_state=doc_state)
+    assert _NO_REREAD not in prompt
+    assert _CHECK_OWN not in prompt
+
+
+def test_the_review_task_is_the_same_with_documentation_or_without():
+    with_docs, _ = _review()
+    without, _ = _review(doc_state=None)
+    assert _task(with_docs) == _task(without)
+
+
+# ---------------------------------------------------------------------------
 # The logs section: every sentinel the fetch stage can store.
 # ---------------------------------------------------------------------------
 
@@ -226,7 +272,8 @@ def test_nothing_but_the_logs_is_ever_trimmed(monkeypatch):
     assert document in prompt
     assert "THE RULE" in prompt
     assert json.dumps(PAYLOAD) in prompt
-    assert prompt.rstrip().endswith("do not invent packet-specific details.")
+    assert "do not invent packet-specific details." in _task(prompt)
+    assert prompt.rstrip().endswith("read only what answers it.")
 
 
 def test_a_prompt_with_no_room_left_drops_the_logs_and_says_so(monkeypatch):

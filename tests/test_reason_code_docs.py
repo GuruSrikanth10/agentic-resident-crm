@@ -495,9 +495,13 @@ def test_an_unaddressable_reason_code_warns_once_and_is_skipped(tmp_path):
     assert rcd.lookup("(UNRESOLVED)", "E", root=tmp_path)["outcome"] == "miss"
 
 
-def test_the_committed_store_warns_about_its_unresolved_rule_key():
+def test_the_committed_store_carries_no_unresolved_rule_key():
+    """The generator's `(CRE_REJECT_APPLICANT)` rules are stripped before a
+    file is committed: no payload ever carries that key, so they only cost a
+    warning at every boot. The validator still tolerates one in a fetched or
+    mounted file; this catches a regenerated file committed as-is."""
     _, warnings = rcd.validate(root=COMMITTED_ROOT)
-    assert any("(CRE_REJECT_APPLICANT)" in w for w in warnings)
+    assert not [w for w in warnings if "cannot match a payload" in w]
 
 
 def test_a_file_publishing_nothing_warns(tmp_path):

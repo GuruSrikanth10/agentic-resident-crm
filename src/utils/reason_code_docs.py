@@ -1053,8 +1053,9 @@ def _addressable(reason_code: str, label: str, warnings: list,
     """
     if REASON_CODE_PATTERN.match(reason_code):
         return True
-    # Warned about once, not once per entry: 17 of the shipped rules carry the
-    # same unresolved key, and repeating it drowns out every other warning.
+    # Warned about once, not once per entry: a freshly generated file carries
+    # the same unresolved key on many rules (17 in enu-biometric's, stripped
+    # before it was committed), and repeating it drowns out every other warning.
     if reason_code not in skipped:
         skipped.add(reason_code)
         warnings.append(f"{label}: reason code {reason_code!r} cannot match a "

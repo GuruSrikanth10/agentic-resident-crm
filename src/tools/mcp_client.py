@@ -127,17 +127,23 @@ DOCS_TOOLSET = "Service documentation"
 DOCS_GUIDANCE = """The service documentation is the primary account of what the code does and
 why it fails. The logs and the tool evidence corroborate it.
 
-1. Start with the documentation service named above. Read, in roughly this
-   order, its components, its dataflow, its packet flows and its error
-   paths, then the module doc for the class the stack trace or rule names.
-2. Search the corpus for the error codes, reason codes, method names and
+1. When the task carries a "Reason Code Documentation" section for this
+   packet's reason code, that section was generated from this documentation.
+   Do not read the documentation again to restate or confirm it. Use these
+   tools only for a question the section leaves open, and read only what
+   answers it.
+2. Otherwise, start with the documentation service named above. Read, in
+   roughly this order, its components, its dataflow, its packet flows and its
+   error paths, then the module doc for the class the stack trace or rule
+   names.
+3. Search the corpus for the error codes, reason codes, method names and
    Kafka topics in the evidence.
-3. Read another service's documentation only where the evidence points to it.
-4. Cite the document path or identifier the tool returned for every claim
+4. Read another service's documentation only where the evidence points to it.
+5. Cite the document path or identifier the tool returned for every claim
    that relies on it.
-5. A documentation tool that failed means the documentation was not read:
+6. A documentation tool that failed means the documentation was not read:
    say so, and never guess what it says.
-6. Placeholders and example values in the documentation, such as <refId>,
+7. Placeholders and example values in the documentation, such as <refId>,
    are not values of this packet."""
 
 #: The docs section a role gets instead when every docs server it would read

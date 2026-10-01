@@ -27,6 +27,7 @@ import os
 from typing import Optional
 
 from src.models.synthesis import classify_logs
+from src.utils.reason_code_docs import SCOPE_OTHER_SERVICE
 
 #: Cap on the user message of one direct Investigator or Reviewer call.
 #:
@@ -239,6 +240,26 @@ _TASK_INVESTIGATION = (
     "packet-specific details.")
 _TASK_RETRY = ("Revise your previous analysis to address the Reviewer "
                "Feedback, using the evidence above.")
+
+#: Added to the Investigator's task when the documentation section holds this
+#: reason code's own documentation. The store is generated from the DROA
+#: corpus the service documentation tools read, so walking the corpus for a
+#: documented code repeats what the section says at the cost of a round of
+#: tool calls per packet. The tools stay for what the section leaves open.
+_TASK_DOCS_HIT = (
+    " The Reason Code Documentation above was generated from the service "
+    "documentation, so if you have service documentation tools, do not use "
+    "them to read it again or to confirm it. Use them only for a question it "
+    "leaves open that your explanation needs answered, and read only what "
+    "answers it.")
+#: The same, when the entries are other services' because the packet's own
+#: service documents nothing for its code. Nothing generated from this
+#: service's documentation was shown, so checking it is the open question.
+_TASK_DOCS_OTHER_SERVICE = (
+    " The Reason Code Documentation above comes from other services' "
+    "documentation, not this packet's service's. If you have service "
+    "documentation tools, use them to check how this packet's service raises "
+    "this reason code, and read only what answers that.")
 _TASK_REVIEW = ("Validate the investigation above against this evidence. Reply "
                 "with exactly 'APPROVED' or 'REJECTED' on the first line, and "
                 "nothing before it. If you reject, explain what is wrong on "
@@ -281,6 +302,19 @@ def _documentation_body(doc_state, rule_source: str = RULES_DB) -> Optional[str]
     if outcome == "hit":
         return doc_state.get("text") or missing
     return missing
+
+
+def _docs_tools_note(doc_state) -> str:
+    """What the Investigator's task says about the service documentation
+    tools, or "" when there is no documentation to weigh them against -- a
+    miss, an error or the switch off -- and the system prompt's own guidance
+    to read the documentation applies unchanged."""
+    if not doc_state or doc_state.get("outcome") != "hit" \
+            or not doc_state.get("text"):
+        return ""
+    if doc_state.get("scope") == SCOPE_OTHER_SERVICE:
+        return _TASK_DOCS_OTHER_SERVICE
+    return _TASK_DOCS_HIT
 
 
 def _logs_body(logs) -> str:
@@ -366,7 +400,8 @@ def build_investigation_prompt(*, doc_state, db_rule, enrolment_display,
         (ENROLMENT_TYPE, enrolment_display or ""),
         (KAFKA_PAYLOAD, json.dumps(payload_projection)),
         (LOGS, ""),
-        (TASK, _TASK_INVESTIGATION.format(sources=sources)),
+        (TASK, _TASK_INVESTIGATION.format(sources=sources)
+         + _docs_tools_note(doc_state)),
     ], doc_body), service_note)
     return _fit(sections, _index_of(sections, LOGS), _logs_body(logs))
 
@@ -395,7 +430,7 @@ def build_retry_prompt(*, previous_investigation, feedback, doc_state, db_rule,
         _rule_section(doc_state, db_rule, rule_source),
         (ENROLMENT_TYPE, enrolment_display or ""),
         (LOGS, ""),
-        (TASK, _TASK_RETRY),
+        (TASK, _TASK_RETRY + _docs_tools_note(doc_state)),
     ], _documentation_body(doc_state, rule_source)), tool_evidence)
     sections = _with_service([(PREVIOUS_ANALYSIS, previous_investigation or ""),
                               (REVIEWER_FEEDBACK, feedback or "")] + sections,

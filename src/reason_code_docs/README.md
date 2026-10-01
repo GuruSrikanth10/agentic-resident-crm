@@ -151,7 +151,10 @@ a store it cannot read.
 - A reason code that cannot match a payload `errorReasonCode`, such as
   `(CRE_REJECT_APPLICANT)`. The generator emits these where it could not
   resolve a rule's reject reason code; every entry under such a key is
-  skipped. This is data, not a typo, so it must not stop a deploy.
+  skipped. This is data, not a typo, so it must not stop a deploy. No packet
+  ever carries such a key, so strip those rules from a regenerated file before
+  committing it (and lower `total_rules` to match); a test fails on a
+  committed file that still has them.
 - A service file that publishes no addressable reason code at all.
 - With `--coverage`: a reason code that has a draft or final runbook but no
   documentation. Those are the documents worth having next.
