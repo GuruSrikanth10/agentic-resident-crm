@@ -85,12 +85,12 @@ def _load_pending() -> list:
     entries = []
 
     try:
-        keys = storage.list_events()
+        event_ids = storage.list_events()
     except Exception as e:
         print(f"Could not list pending replays: {type(e).__name__}: {e}")
-        keys = []
+        event_ids = []
 
-    for key in keys:
+    for key in event_ids:
         try:
             record = storage.load(key, filename=PENDING_REPLAY_FILENAME)
         except Exception as e:

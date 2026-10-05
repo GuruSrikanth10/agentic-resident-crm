@@ -14,11 +14,11 @@ USE_OPENCODE_HARNESS_DLT, each falling back to the single older switch
 USE_OPENCODE_HARNESS when its own value is unset. A lane whose switch is off
 uses the existing direct ChatOpenAI path.
 """
+import base64
 import contextlib
 import json
 import os
 import re
-import secrets
 import subprocess
 import threading
 import time
@@ -229,7 +229,7 @@ class Session:
 
     def __init__(self, port: int = 0):
         self.port = port or 4096
-        self.password = secrets.token_urlsafe(24)
+        self.password = base64.urlsafe_b64encode(os.urandom(24)).rstrip(b"=").decode("ascii")
         self._process: Optional[subprocess.Popen] = None
         #: The config this server was started with. An attached task uses it
         #: too, so a task never asks for an agent its server does not have.

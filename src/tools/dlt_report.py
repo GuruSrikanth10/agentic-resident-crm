@@ -157,21 +157,21 @@ def case_keys(identifier: str) -> list:
     storage = get_dlt_storage()
     if storage.load(identifier):
         return [identifier]
-    keys = keys_for_ref_id(identifier)
-    if keys:
-        return keys
+    matches = keys_for_ref_id(identifier)
+    if matches:
+        return matches
     return [key for key in storage.list_events()
             if (storage.load(key) or {}).get("case_id") == identifier]
 
 
 def cmd_case(identifier: str) -> None:
     storage = get_dlt_storage()
-    keys = case_keys(identifier)
-    if not keys:
+    cases = case_keys(identifier)
+    if not cases:
         raise SystemExit(f"No casebook for '{identifier}'.")
 
-    for key in keys:
-        if len(keys) > 1:
+    for key in cases:
+        if len(cases) > 1:
             print(f"=== {key} ===")
         print(json.dumps(storage.load(key), indent=2, ensure_ascii=False))
 

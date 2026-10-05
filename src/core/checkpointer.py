@@ -35,7 +35,7 @@ logger = get_logger(__name__)
 #
 # Keyed on the resolved configuration so a config change still rebuilds.
 _checkpointer = None
-_checkpointer_key = None
+_checkpointer_identity = None
 _checkpointer_lock = threading.Lock()
 #: Held so health_check() can probe the live connection instead of opening one.
 _sqlite_conn = None
@@ -153,12 +153,12 @@ def get_checkpointer():
     checkpoints would look healthy while losing every cross-replica resume.
     That check runs before the cache, so it is not skipped on later calls.
     """
-    global _checkpointer, _checkpointer_key
+    global _checkpointer, _checkpointer_identity
 
-    backend, key = _resolve_config()
+    backend, identity = _resolve_config()
 
     with _checkpointer_lock:
-        if _checkpointer is not None and _checkpointer_key == key:
+        if _checkpointer is not None and _checkpointer_identity == identity:
             return _checkpointer
 
         if backend == "postgres":
@@ -167,7 +167,7 @@ def get_checkpointer():
             _checkpointer = _build_mysql()
         else:
             _checkpointer = _build_sqlite()
-        _checkpointer_key = key
+        _checkpointer_identity = identity
         return _checkpointer
 
 
@@ -208,8 +208,8 @@ def health_check() -> bool:
 
 def reset_checkpointer():
     """Drop the cached checkpointer. For tests and config reloads."""
-    global _checkpointer, _checkpointer_key, _sqlite_conn
+    global _checkpointer, _checkpointer_identity, _sqlite_conn
     with _checkpointer_lock:
         _checkpointer = None
-        _checkpointer_key = None
+        _checkpointer_identity = None
         _sqlite_conn = None

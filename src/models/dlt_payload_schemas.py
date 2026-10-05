@@ -445,13 +445,13 @@ def summarise_payload(payload: Any, type_id: Optional[str] = None) -> Optional[s
         return summariser(model)
 
     if isinstance(payload, dict):
-        keys = list(payload.keys())[:MAX_SUMMARY_KEYS]
-        elided = "" if len(payload) <= len(keys) else f" (+{len(payload) - len(keys)} more)"
+        names = list(payload.keys())[:MAX_SUMMARY_KEYS]
+        elided = "" if len(payload) <= len(names) else f" (+{len(payload) - len(names)} more)"
         unlabelled = identifier_block(unlabelled_reason=(
             f"no model is registered for {type_id or 'this type'}, so no field "
             f"here has been confirmed to be the log-correlation id"))
         return (f"Payload type: {type_id or 'unregistered'} (no model registered; "
-                f"top-level keys only)\nKeys: {', '.join(map(str, keys))}{elided}\n"
+                f"top-level keys only)\nKeys: {', '.join(map(str, names))}{elided}\n"
                 f"{unlabelled}")
 
     if payload is None:

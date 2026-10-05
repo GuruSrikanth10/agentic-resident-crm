@@ -586,8 +586,8 @@ def _merge_round_robin(per_service: list, total_cap: int) -> tuple:
             if index >= len(groups):
                 continue
             pod_targets = groups[index]
-            key = pod_targets[0].pod_key
-            if key in seen_pods:
+            pod_id = pod_targets[0].pod_key
+            if pod_id in seen_pods:
                 # Two services' match specs cover the same pod. Substring
                 # matching makes this the normal case, not an edge one.
                 duplicates += 1
@@ -595,7 +595,7 @@ def _merge_round_robin(per_service: list, total_cap: int) -> tuple:
             if total_cap and len(seen_pods) >= total_cap:
                 capped = True
                 break
-            seen_pods.add(key)
+            seen_pods.add(pod_id)
             merged.extend(pod_targets)
         if capped:
             break

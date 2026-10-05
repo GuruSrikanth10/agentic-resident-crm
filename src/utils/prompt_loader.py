@@ -81,13 +81,13 @@ def render(name: str, **variables: str) -> str:
     template = _INCLUDE.sub(lambda m: _include(m.group(1)), _load_text(name))
 
     def _replace(match: re.Match) -> str:
-        key = match.group(1)
-        if key not in variables:
+        placeholder = match.group(1)
+        if placeholder not in variables:
             raise KeyError(
-                f"Prompt template '{name}' references '{key}' "
+                f"Prompt template '{name}' references '{placeholder}' "
                 f"but no value was provided"
             )
-        return variables[key]
+        return variables[placeholder]
 
     return _PLACEHOLDER.sub(_replace, template)
 

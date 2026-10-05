@@ -393,7 +393,7 @@ def _log_abandoned_run(event_id: str, run: concurrent.futures.Future) -> None:
 router = APIRouter()
 
 API_KEY_HEADER = APIKeyHeader(name="X-API-Key", auto_error=False)
-API_KEYS = [os.environ.get("AGENTIC_RESIDENT_CRM_API_KEY", "dev-secret-key")]
+API_KEYS = [os.environ.get("AGENTIC_RESIDENT_CRM_API_KEY", "dev-api-key")]
 
 # The rate limiter exists to blunt external abuse, not to throttle this
 # system's own Kafka consumer. It was doing the latter: every packet arrives
@@ -633,7 +633,7 @@ def readiness_check():
 def metrics_endpoint():
     """Prometheus exposition (4.5).
 
-    Unauthenticated by design -- a scrape target that needs a secret is one
+    Unauthenticated by design -- a scrape target that needs a credential is one
     operators route around. It exposes counters and latencies only, never
     packet content or resident data.
     """

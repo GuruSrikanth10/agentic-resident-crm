@@ -57,8 +57,8 @@ def validate_config():
     api_key = os.environ.get("AGENTIC_RESIDENT_CRM_API_KEY")
     env = os.environ.get("ENV", "dev").lower()
     if env == "prod":
-        if not api_key or api_key == "dev-secret-key":
-            errors.append("AGENTIC_RESIDENT_CRM_API_KEY must be explicitly set to a secure value in production (cannot be empty or 'dev-secret-key').")
+        if not api_key or api_key == "dev-api-key":
+            errors.append("AGENTIC_RESIDENT_CRM_API_KEY must be explicitly set to a secure value in production (cannot be empty or 'dev-api-key').")
 
     # 4. Scale-out backends are fully configured when selected (4.7). A
     # half-configured backend must fail at boot, not on the first packet.

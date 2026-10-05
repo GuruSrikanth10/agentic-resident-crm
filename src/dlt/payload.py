@@ -88,10 +88,10 @@ def refid_keys() -> tuple:
         return DEFAULT_REFID_KEYS
 
     parsed, denied = [], []
-    for key in (k.strip() for k in raw.split(",")):
-        if not key:
+    for name in (k.strip() for k in raw.split(",")):
+        if not name:
             continue
-        (denied if key in _DENY_KEYS else parsed).append(key)
+        (denied if name in _DENY_KEYS else parsed).append(name)
 
     if denied:
         logger.warning(
@@ -374,7 +374,7 @@ def resolve_ref_id(payload: Any,
             mismatch=bool(text) and text not in contract_identifiers(contract),
         )
 
-    from_key = key_as_ref_id(key)
+    from_record = key_as_ref_id(key)
 
     from_payload = extract_by_path(payload, refid_path())
     source = "configured_path" if from_payload else None
@@ -385,12 +385,12 @@ def resolve_ref_id(payload: Any,
         from_payload = extract_by_search(payload)
         source = "search" if from_payload else None
 
-    if from_key:
+    if from_record:
         return RefIdExtraction(
-            ref_id=from_key,
+            ref_id=from_record,
             source="record_key",
             payload_ref_id=from_payload,
-            mismatch=bool(from_payload) and from_payload != from_key,
+            mismatch=bool(from_payload) and from_payload != from_record,
         )
 
     return RefIdExtraction(

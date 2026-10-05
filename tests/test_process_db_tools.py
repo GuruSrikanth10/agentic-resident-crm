@@ -8,7 +8,7 @@ MySQL-only parts -- the READ ONLY session hook and URL escaping -- are tested
 on their own.
 """
 import json
-import secrets
+import os
 from unittest.mock import MagicMock
 
 import pybreaker
@@ -545,7 +545,7 @@ def test_engine_escapes_the_password(monkeypatch):
     # Generated at run time rather than written out: a credential literal in
     # source is a Fortify finding (Password Management: Hardcoded Password),
     # test value or not. The URL-reserved characters are what is under test.
-    credential = f"{secrets.token_hex(4)}@{secrets.token_hex(2)}:/{secrets.token_hex(2)}"
+    credential = f"{os.urandom(4).hex()}@{os.urandom(2).hex()}:/{os.urandom(2).hex()}"
     _process_db.PROCESS.reset_engine()
     monkeypatch.setenv("PROCESS_DB_HOST", "db.internal")
     monkeypatch.setenv("PROCESS_DB_USERNAME", "reader")

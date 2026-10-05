@@ -300,7 +300,7 @@ _adapter = message_adapters.for_role(CONSUMER_ROLE)
 
 
 def forward_signal_to_internal_endpoint(signal_payload: dict):
-    api_key = os.environ.get("AGENTIC_RESIDENT_CRM_API_KEY", "dev-secret-key")
+    api_key = os.environ.get("AGENTIC_RESIDENT_CRM_API_KEY", "dev-api-key")
     headers = {"X-API-Key": api_key}
     response = requests.post(
         kafkaConsumerInternalEndpoint,

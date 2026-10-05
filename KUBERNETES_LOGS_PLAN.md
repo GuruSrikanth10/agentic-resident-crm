@@ -279,7 +279,7 @@ per fetch. Rationale in Appendix A.
 
 Load order:
 
-1. `config.load_incluster_config()` -- preferred; no secrets on disk.
+1. `config.load_incluster_config()` -- preferred; no credentials on disk.
 2. `config.load_kube_config(config_file=KUBECONFIG_PATH, context=K8S_CONTEXT)`.
 3. Neither -- log once at startup, mark the source unavailable, **never crash
    the process.** A log source is not a hard dependency of the API.

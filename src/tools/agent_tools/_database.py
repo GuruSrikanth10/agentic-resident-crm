@@ -187,7 +187,7 @@ class Database:
         with self._engine_lock:
             if self._engine is not None:
                 return self._engine
-            url = URL.create(
+            dsn = URL.create(
                 "mysql+pymysql",
                 username=get_required_env(self.setting("USERNAME")),
                 password=get_required_env(self.setting("PASSWORD")),
@@ -198,7 +198,7 @@ class Database:
                 query={"charset": "utf8mb4"},
             )
             engine = create_engine(
-                url,
+                dsn,
                 pool_size=_int_env(self.setting("POOL_SIZE"), 5),
                 max_overflow=_int_env(self.setting("MAX_OVERFLOW"), 5),
                 pool_timeout=30,

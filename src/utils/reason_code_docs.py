@@ -448,14 +448,14 @@ def _parsed(path) -> dict:
     except OSError as error:
         raise ReasonCodeDocError(f"{path.name} could not be read: {error}") from error
     signature = (stat.st_mtime_ns, stat.st_size)
-    key = str(path)
+    location = str(path)
     with _parsed_lock:
-        cached = _parsed_cache.get(key)
+        cached = _parsed_cache.get(location)
     if cached is not None and cached[0] == signature:
         return cached[1]
     document = _load_service_file(path)
     with _parsed_lock:
-        _parsed_cache[key] = (signature, document)
+        _parsed_cache[location] = (signature, document)
     return document
 
 
@@ -596,9 +596,9 @@ def _code_index(root) -> dict:
     files = _service_files(root)
     signature = tuple((path.name, path.stat().st_mtime_ns, path.stat().st_size)
                       for path in files)
-    key = str(root)
+    location = str(root)
     with _code_index_lock:
-        cached = _code_index_cache.get(key)
+        cached = _code_index_cache.get(location)
     if cached is not None and cached[0] == signature:
         return cached[1]
 
@@ -608,7 +608,7 @@ def _code_index(root) -> dict:
             index.setdefault(code, set()).add(path.stem)
     frozen = {code: tuple(sorted(stems)) for code, stems in index.items()}
     with _code_index_lock:
-        _code_index_cache[key] = (signature, frozen)
+        _code_index_cache[location] = (signature, frozen)
     return frozen
 
 

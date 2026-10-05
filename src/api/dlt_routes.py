@@ -361,8 +361,10 @@ def fetch_dlt_logs(message: DltMessage):
     # wrong packet, so the finding must not be read as if it were clean.
     if message.ref_id_mismatch:
         gaps.append("REFID_KEY_PAYLOAD_MISMATCH")
-        log.warning("Record key and payload disagreed on the refId",
-                    record_key=message.record_key)
+        log.warning(
+            "Record key and payload disagreed on the refId",
+            record_key=message.record_key,
+        )
 
     if storage.artifact_exists(key, FETCHED_LOGS_ARTIFACT):
         log.info("Logs already fetched; reusing the persisted artifact")

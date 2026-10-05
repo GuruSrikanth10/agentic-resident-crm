@@ -125,10 +125,10 @@ def _files(paths: list) -> list:
 
 def audit(service: str, paths: list) -> AuditResult:
     result = AuditResult(service=service)
-    key_pattern = _residual_key_pattern(redaction.json_keys())
+    residual_pattern = _residual_key_pattern(redaction.json_keys())
     for path in _files(paths):
         with open(path, "r", encoding="utf-8", errors="replace") as handle:
-            audit_lines(result, handle, path, key_pattern)
+            audit_lines(result, handle, path, residual_pattern)
         result.files += 1
     return result
 

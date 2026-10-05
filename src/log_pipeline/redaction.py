@@ -292,10 +292,10 @@ def redact_text(text: str, allowlist: Optional[list] = None) -> RedactionResult:
     stashed = {}
 
     for index, value in enumerate(v for v in (allowlist or []) if v):
-        token = _ALLOWLIST_TOKEN.format(index)
+        placeholder = _ALLOWLIST_TOKEN.format(index)
         if value in text:
-            stashed[token] = value
-            text = text.replace(value, token)
+            stashed[placeholder] = value
+            text = text.replace(value, placeholder)
 
     text, hits = redact_json_fields(text)
     if hits:
@@ -306,8 +306,8 @@ def redact_text(text: str, allowlist: Optional[list] = None) -> RedactionResult:
         if hits:
             counts[label] = counts.get(label, 0) + hits
 
-    for token, value in stashed.items():
-        text = text.replace(token, value)
+    for placeholder, value in stashed.items():
+        text = text.replace(placeholder, value)
 
     return RedactionResult(text=text, counts=counts)
 

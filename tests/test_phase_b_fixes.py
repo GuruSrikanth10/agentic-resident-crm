@@ -493,13 +493,13 @@ def test_extra_patterns_are_cached(monkeypatch):
     from src.log_pipeline import redaction
 
     redaction._extra_patterns_cache.clear()
-    monkeypatch.setenv("K8S_REDACT_EXTRA_PATTERNS", r"SECRET-\d+")
+    monkeypatch.setenv("K8S_REDACT_EXTRA_PATTERNS", r"CONFIDENTIAL-\d+")
 
     first = redaction._extra_patterns()
     second = redaction._extra_patterns()
     assert first is second   # same tuple object -> no recompilation
 
-    result = redaction.redact_text("token SECRET-42 here")
+    result = redaction.redact_text("token CONFIDENTIAL-42 here")
     assert "[REDACTED:CUSTOM]" in result.text
 
 

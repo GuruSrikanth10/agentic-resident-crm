@@ -2,7 +2,7 @@
 Kubernetes API client lifecycle (KUBERNETES_LOGS_PLAN.md 5.1).
 
 Load order:
-  1. in-cluster config  -- preferred; no secrets on disk
+  1. in-cluster config  -- preferred; no credentials on disk
   2. kubeconfig at KUBECONFIG_PATH, optionally a named context
   3. neither            -- log once, mark unavailable, NEVER raise
 

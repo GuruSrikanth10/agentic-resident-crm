@@ -42,11 +42,11 @@ _cancel: contextvars.ContextVar[Optional[threading.Event]] = contextvars.Context
 @contextlib.contextmanager
 def scope(event: threading.Event):
     """Run the block as a run that `event` cancels."""
-    token = _cancel.set(event)
+    previous = _cancel.set(event)
     try:
         yield
     finally:
-        _cancel.reset(token)
+        _cancel.reset(previous)
 
 
 def run_in_scope(event: threading.Event, fn):

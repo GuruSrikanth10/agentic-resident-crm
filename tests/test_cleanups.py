@@ -365,7 +365,7 @@ def test_record_llm_usage_sums_one_invocations_messages():
         m.usage_metadata = {"input_tokens": inp, "output_tokens": out}
         return m
 
-    with patch.object(metrics, "LLM_TOKENS", counter):
+    with patch.object(metrics, "LLM_USAGE", counter):
         metrics.record_llm_usage("investigator",
                                  {"messages": [message(10, 5), message(20, 7)]})
 

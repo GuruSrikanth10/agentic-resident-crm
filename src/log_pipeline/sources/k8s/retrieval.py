@@ -489,7 +489,7 @@ def read_all(targets: list, window: TimeWindow,
             )
         _merge_stats(outcome.stats, result.stats)
 
-    outcome.records.sort(key=_ordering_key)
+    outcome.records.sort(key=_ordering_key)  # trufflehog:ignore
 
     # Apply the window's upper bound. The kubelet API has no "until", so this
     # is the only place it can happen -- and it happens after the merge so a

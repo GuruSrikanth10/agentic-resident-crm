@@ -238,7 +238,7 @@ def s3(estate, monkeypatch):
 
     fake = s3_fakes.FakeS3()
     s3_fakes.install(monkeypatch, fake)
-    monkeypatch.setenv(rcsm.ENV_S3_KEY, KEY)
+    monkeypatch.setenv(rcsm.ENV_S3_OBJECT, KEY)
     return fake
 
 
@@ -328,11 +328,11 @@ def test_a_malformed_map_stops_the_boot(estate):
 
 
 def test_a_key_with_no_bucket_stops_the_boot(estate, monkeypatch):
-    monkeypatch.setenv(rcsm.ENV_S3_KEY, KEY)
+    monkeypatch.setenv(rcsm.ENV_S3_OBJECT, KEY)
 
     errors, _warnings = sr.validate()
 
-    assert any(error.startswith(rcsm.ENV_S3_KEY) for error in errors)
+    assert any(error.startswith(rcsm.ENV_S3_OBJECT) for error in errors)
 
 
 def test_what_the_map_leaves_out_or_misnames_is_a_warning(estate):

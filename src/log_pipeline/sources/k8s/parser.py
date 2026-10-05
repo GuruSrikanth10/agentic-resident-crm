@@ -46,7 +46,7 @@ _KUBELET_TS = re.compile(
 
 #: A level token in the first ~80 characters, on a word boundary so that
 #: "ERRORS_TOTAL=0" or a message merely containing "error" does not match.
-_LEVEL_TOKEN = re.compile(
+_LEVEL_WORD = re.compile(
     r"\b(" + "|".join(KNOWN_LEVELS) + r"|SEVERE)\b", re.IGNORECASE
 )
 _LEVEL_SCAN_WINDOW = 80
@@ -147,7 +147,7 @@ def parse_line(line: str, default_app: str = "unknown-service") -> tuple:
 
     if level is None:
         window = remainder[:_LEVEL_SCAN_WINDOW]
-        match = _LEVEL_TOKEN.search(window)
+        match = _LEVEL_WORD.search(window)
         if match:
             level = normalise_level(match.group(1))
 

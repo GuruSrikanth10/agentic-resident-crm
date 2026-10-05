@@ -865,11 +865,11 @@ def recording():
     {"tool": name, "args": {...}, "result": text}, in completion order.
     """
     calls: list = []
-    token = _recorder.set(calls)
+    previous = _recorder.set(calls)
     try:
         yield calls
     finally:
-        _recorder.reset(token)
+        _recorder.reset(previous)
 
 
 #: Who is calling -- the role, and the packet's event_id or the record's
@@ -889,11 +889,11 @@ def call_context(role: Optional[str] = None, **ids):
     """
     fields = {key: value for key, value in {"role": role, **ids}.items()
               if value is not None}
-    token = _call_context.set(fields)
+    previous = _call_context.set(fields)
     try:
         yield fields
     finally:
-        _call_context.reset(token)
+        _call_context.reset(previous)
 
 
 def _record(tool_name: str, arguments: dict, result: str) -> None:
@@ -928,8 +928,8 @@ def merge_evidence(existing, new) -> list:
     for record in new or []:
         if not isinstance(record, dict):
             continue
-        key = _evidence_key(record)
-        merged = [kept for kept in merged if _evidence_key(kept) != key]
+        identity = _evidence_key(record)
+        merged = [kept for kept in merged if _evidence_key(kept) != identity]
         merged.append(dict(record))
     return merged[-MAX_EVIDENCE_RECORDS:]
 

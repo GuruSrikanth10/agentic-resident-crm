@@ -56,7 +56,7 @@ SCHEMA_VERSION = 1
 FILE_STEM = "reason_code_services"
 FILENAME = f"{FILE_STEM}.json"
 
-ENV_S3_KEY = "REASON_CODE_SERVICE_MAP_S3_KEY"
+ENV_S3_OBJECT = "REASON_CODE_SERVICE_MAP_S3_KEY"
 ENV_S3_BUCKET = "REASON_CODE_SERVICE_MAP_S3_BUCKET"
 ENV_REFRESH = "REASON_CODE_SERVICE_MAP_REFRESH_SECONDS"
 
@@ -95,7 +95,7 @@ def map_path() -> Path:
 
 def s3_key() -> Optional[str]:
     """The object to fetch the map from, or None when it is not fetched."""
-    return os.environ.get(ENV_S3_KEY, "").strip().lstrip("/") or None
+    return os.environ.get(ENV_S3_OBJECT, "").strip().lstrip("/") or None
 
 
 def s3_bucket() -> Optional[str]:
@@ -221,16 +221,16 @@ def current(path=None) -> ServiceMap:
     validated before it is written, and boot validation refuses one.
     """
     path = Path(path) if path is not None else map_path()
-    key = str(path)
+    location = str(path)
     with _cache_lock:
-        cached = _cache.get(key)
+        cached = _cache.get(location)
     try:
         stat = path.stat()
     except FileNotFoundError:
         return EMPTY
     except OSError as error:
         logger.warning("Could not read the reason-code service map",
-                       path=key, error=f"{type(error).__name__}: {error}")
+                       path=location, error=f"{type(error).__name__}: {error}")
         return cached[1] if cached else EMPTY
     signature = (stat.st_mtime_ns, stat.st_size)
     if cached is not None and cached[0] == signature:
@@ -242,11 +242,11 @@ def current(path=None) -> ServiceMap:
         errors, service_map = [f"{path.name} could not be read: {error}"], None
     if errors or service_map is None:
         logger.error("The reason-code service map on disk is invalid; keeping "
-                     "the last good copy", path=key, errors=errors,
+                     "the last good copy", path=location, errors=errors,
                      kept=bool(cached and cached[1].sha256))
         service_map = cached[1] if cached else EMPTY
     with _cache_lock:
-        _cache[key] = (signature, service_map)
+        _cache[location] = (signature, service_map)
     return service_map
 
 
@@ -270,20 +270,20 @@ def download() -> bool:
     copy keeps serving. Never raises: a map problem must not take the API
     down.
     """
-    key = s3_key()
-    if not key:
+    object_name = s3_key()
+    if not object_name:
         return False
     bucket = s3_bucket()
     if not bucket:
-        logger.warning(f"{ENV_S3_KEY} is set but no S3 bucket is configured "
+        logger.warning(f"{ENV_S3_OBJECT} is set but no S3 bucket is configured "
                        f"({ENV_S3_BUCKET}, CASEBOOK_S3_BUCKET or S3_LOGS_BUCKET)")
         return False
     with _download_lock:
         try:
-            return _download(bucket, key)
+            return _download(bucket, object_name)
         except Exception as error:  # noqa: BLE001 - the contract is "never raises"
             logger.warning("Reason-code service map download failed; keeping the "
-                           "copy on disk", bucket=bucket, key=key,
+                           "copy on disk", bucket=bucket, key=object_name,
                            error=f"{type(error).__name__}: {error}")
             return False
 
@@ -379,7 +379,7 @@ def validate(registry=None) -> tuple:
     """(errors, warnings) for the map this process will use."""
     errors, warnings = [], []
     if s3_key() and not s3_bucket():
-        errors.append(f"{ENV_S3_KEY} is set but no S3 bucket is configured; set "
+        errors.append(f"{ENV_S3_OBJECT} is set but no S3 bucket is configured; set "
                       f"{ENV_S3_BUCKET}, CASEBOOK_S3_BUCKET or S3_LOGS_BUCKET.")
     path = map_path()
     if not path.is_file():

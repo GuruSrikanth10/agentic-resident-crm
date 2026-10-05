@@ -298,15 +298,15 @@ def packs_dir(root=None) -> Path:
 def load(root=None) -> Registry:
     """The registry for `root`, built on first use and kept. Never raises."""
     directory = packs_dir(root)
-    key = str(directory)
+    location = str(directory)
     with _cache_lock:
-        registry = _cache.get(key)
+        registry = _cache.get(location)
         if registry is None:
             registry = _build(directory)
-            _cache[key] = registry
+            _cache[location] = registry
             if registry.errors:
                 logger.error("The service registry has errors; the packs they "
-                             "belong to are left out", directory=key,
+                             "belong to are left out", directory=location,
                              errors=list(registry.errors))
     return registry
 

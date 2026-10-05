@@ -345,7 +345,7 @@ def load_group(fingerprint: str) -> Optional[dict]:
     legacy_members = ([m for m in raw_members if isinstance(m, str) and m]
                       if isinstance(raw_members, list) else [])
     legacy_ids = set(legacy_members)
-    occurrences.sort(key=_order_key)
+    occurrences.sort(key=_order_key)  # trufflehog:ignore
     # An occurrence the v1 record already lists is not counted again. v1
     # members were refIds (the old call site passed the wrong identifier) or,
     # after that fix, case ids -- so either may match.

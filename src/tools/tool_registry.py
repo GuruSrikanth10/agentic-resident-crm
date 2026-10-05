@@ -582,8 +582,8 @@ def _queue_pending_replay(packet_id: str, payload: dict) -> str:
     # The id is interpolated into a storage path. It reaches here from the
     # Synthesis agent's tool call or from auto_replay's refId, so it carries
     # the same guard eventId does (0.11).
-    key = str(packet_id).strip()
-    if not re.fullmatch(EVENT_ID_PATTERN, key):
+    entry_id = str(packet_id).strip()
+    if not re.fullmatch(EVENT_ID_PATTERN, entry_id):
         logger.error("Refusing to queue a replay under an unusable id",
                      packet_id=packet_id)
         return (f"Failed to queue packet {packet_id}: the id is not a valid "
@@ -597,7 +597,7 @@ def _queue_pending_replay(packet_id: str, payload: dict) -> str:
 
     try:
         get_scoped_storage(PENDING_REPLAY_ROOT).save(
-            key, entry, filename=PENDING_REPLAY_FILENAME)
+            entry_id, entry, filename=PENDING_REPLAY_FILENAME)
         return f"Successfully queued packet {packet_id} for human review before replay."
     except Exception as e:
         logger.error("Failed to queue replay", packet_id=packet_id,

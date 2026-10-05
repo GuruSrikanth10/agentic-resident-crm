@@ -190,7 +190,7 @@ REDACTIONS = _counter(
 )
 
 # LLM ------------------------------------------------------------------
-LLM_TOKENS = _counter(
+LLM_USAGE = _counter(
     "agentic_resident_crm_llm_tokens_total",
     "LLM tokens consumed, by agent node and direction.",
     ("node", "direction"),
@@ -518,9 +518,9 @@ def record_llm_usage(node: str, response) -> None:
             input_tokens = usage.get("input_tokens") or 0
             output_tokens = usage.get("output_tokens") or 0
             if input_tokens:
-                LLM_TOKENS.labels(node=node, direction="input").inc(input_tokens)
+                LLM_USAGE.labels(node=node, direction="input").inc(input_tokens)
             if output_tokens:
-                LLM_TOKENS.labels(node=node, direction="output").inc(output_tokens)
+                LLM_USAGE.labels(node=node, direction="output").inc(output_tokens)
     except Exception as e:
         logger.debug("Could not record LLM usage", node=node, error=str(e))
 
@@ -549,7 +549,7 @@ def record_harness_usage(node: str, trace: dict) -> None:
         for direction in ("input", "output"):
             count = int(tokens.get(direction) or 0)
             if count:
-                LLM_TOKENS.labels(node=node, direction=direction).inc(count)
+                LLM_USAGE.labels(node=node, direction=direction).inc(count)
     except Exception as e:
         logger.debug("Could not record harness usage", node=node, error=str(e))
 

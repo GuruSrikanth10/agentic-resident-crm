@@ -142,9 +142,9 @@ def test_redaction_can_be_disabled(monkeypatch):
 
 
 def test_extra_patterns_are_applied(monkeypatch):
-    monkeypatch.setenv("K8S_REDACT_EXTRA_PATTERNS", r"SECRET-\w+")
-    result = redaction.redact_text("token SECRET-abc123 leaked")
-    assert "SECRET-abc123" not in result.text
+    monkeypatch.setenv("K8S_REDACT_EXTRA_PATTERNS", r"CONFIDENTIAL-\w+")
+    result = redaction.redact_text("token CONFIDENTIAL-abc123 leaked")
+    assert "CONFIDENTIAL-abc123" not in result.text
     assert "[REDACTED:CUSTOM]" in result.text
 
 
