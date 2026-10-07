@@ -191,7 +191,7 @@ def test_maybe_replay_skips_without_calling_the_tool_when_the_gate_declines():
 def test_maybe_replay_attempts_when_the_gate_passes(monkeypatch):
     monkeypatch.setenv("DLT_AUTO_REPLAY_ENABLED", "true")
     fake_tool = MagicMock()
-    fake_tool.invoke.return_value = "queued"
+    fake_tool.invoke.return_value = "Successfully queued packet REF-1 for human review."
 
     with patch("src.tools.tool_registry.get_tool_by_name", return_value=fake_tool):
         result = auto_replay.maybe_replay("dlt-case-1", "REF-1",

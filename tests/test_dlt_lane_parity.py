@@ -22,6 +22,7 @@ import pytest
 from src.api import dlt_routes
 from src.api.dlt_routes import analyze_dlt as _analyze_dlt_async
 from src.dlt import case_storage
+from src.dlt.identity import storage_key
 from src.models.dlt_schemas import DltMessage
 from src.models.dlt_synthesis import DltFinding
 
@@ -41,6 +42,12 @@ def _isolated_store(tmp_path, monkeypatch):
     case_storage.reset_cache()
     yield
     case_storage.reset_cache()
+
+
+def _key(case_id="dlt-T-63-9001", ref_id="REF-9001"):
+    """Where the case is stored: `<refId>__<digest of case_id>` since
+    MULTI_SERVICE_PLAN.md Phase 8."""
+    return storage_key(ref_id, case_id)
 
 
 def _message(case_id="dlt-T-63-9001", ref_id="REF-9001"):
@@ -98,8 +105,8 @@ def test_an_overrunning_analysis_is_recorded_as_failed_timeout(monkeypatch):
     assert result["status"] == "failed_timeout"
 
     storage = case_storage.get_dlt_storage()
-    assert storage.terminal_status("dlt-T-63-9001") == "FAILED_TIMEOUT"
-    casebook = storage.load("dlt-T-63-9001")
+    assert storage.terminal_status(_key()) == "FAILED_TIMEOUT"
+    casebook = storage.load(_key())
     assert casebook["finding"]["action"] == "NEEDS_MANUAL_REVIEW"
     assert "0.2" in casebook["finding"]["narrative"]
 
@@ -133,7 +140,7 @@ def test_a_late_result_never_overwrites_another_actors_verdict(monkeypatch, reco
 
     def slow_investigate(*args, **kwargs):
         # Another actor records a terminal verdict mid-investigation.
-        storage.save_terminal(case_id, {
+        storage.save_terminal(_key(case_id), {
             "case_id": case_id,
             "packet_status": {"status": recorded},
             "resolution": {"synthesis": "consumer timed out"},
@@ -148,7 +155,7 @@ def test_a_late_result_never_overwrites_another_actors_verdict(monkeypatch, reco
 
     assert result["status"] == "already_processed"
     # The other actor's verdict stands.
-    assert storage.terminal_status(case_id) == recorded
+    assert storage.terminal_status(_key(case_id)) == recorded
 
 
 def test_a_normal_result_is_still_written(monkeypatch):
@@ -163,7 +170,7 @@ def test_a_normal_result_is_still_written(monkeypatch):
         result = analyze_dlt(_message(case_id=case_id))
 
     assert result["status"] == "processed"
-    assert case_storage.get_dlt_storage().terminal_status(case_id) == "NEEDS_MANUAL_REVIEW"
+    assert case_storage.get_dlt_storage().terminal_status(_key(case_id)) == "NEEDS_MANUAL_REVIEW"
 
 
 # ======================================================================
@@ -245,7 +252,7 @@ def test_the_guard_sees_a_verdict_left_only_in_the_casebook():
 
     def crash_midway_then_finish(*args, **kwargs):
         # Only casebook.json, exactly as a crash between the two writes leaves it.
-        storage.save(case_id, {
+        storage.save(_key(case_id), {
             "case_id": case_id,
             "packet_status": {"status": "FAILED_TIMEOUT"},
         }, filename="casebook.json")
@@ -258,4 +265,4 @@ def test_the_guard_sees_a_verdict_left_only_in_the_casebook():
         result = analyze_dlt(_message(case_id=case_id))
 
     assert result["status"] == "already_processed"
-    assert storage.terminal_status(case_id) == "FAILED_TIMEOUT"
+    assert storage.terminal_status(_key(case_id)) == "FAILED_TIMEOUT"

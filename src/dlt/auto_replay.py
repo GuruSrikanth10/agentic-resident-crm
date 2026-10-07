@@ -63,7 +63,7 @@ from typing import Optional
 
 from src.dlt import code_check as code_check_module
 from src.dlt.classify import FailureClass  # noqa: F401  (kept for the module's readers -- see decide())
-from src.models.dlt_synthesis import DLT_ACTIONS, UNVERIFIABLE_LABEL
+from src.models.dlt_synthesis import DLT_ACTIONS, UNREVIEWED_LABEL, UNVERIFIABLE_LABEL
 from src.utils.env import get_bool_env
 from src.utils.logging_config import get_logger
 
@@ -220,6 +220,14 @@ def decide(finding, ref_id: Optional[str], code_check=None) -> ReplayDecision:
                    "that this occurrence was transient "
                    "(DLT_REPLAY_ALLOW_UNVERIFIED is off)")
 
+    # The same rule for a finding the Reviewer never approved: the analysis
+    # synthesises one anyway rather than lose the case, and caps it, but a
+    # cap below the threshold is a coincidence of two numbers, not a rule.
+    if UNREVIEWED_LABEL in (getattr(finding, "ceilings_applied", None) or []):
+        return ReplayDecision(
+            False, "the Reviewer never approved this finding, so nothing "
+                   "checked its claim that this occurrence was transient")
+
     if not ref_id:
         return ReplayDecision(
             False, "no refId on this case; nothing to identify the packet "
@@ -260,16 +268,31 @@ def _code_check_veto(code_check) -> Optional[str]:
     return None
 
 
-def attempt(ref_id: str, message_ref_id: Optional[str] = None) -> dict:
+def attempt(case_key: str, ref_id: Optional[str]) -> dict:
     """Call queue_for_replay via the same tool the rejection flow's synthesis
     agent uses. Never raises -- a replay-queue failure must not cost the
     casebook that is about to be saved; it must only be visible inside it.
-    """
-    from src.tools.tool_registry import get_tool_by_name
 
-    replay_id = message_ref_id or ref_id
+    `ref_id` is the only identifier ever sent to OIS. `case_key` -- the
+    case's storage key or case id -- names the case in the log and nothing
+    else. It used to stand in for a missing refId, which would have sent OIS
+    a storage key (`<refId>__<digest>`) or a `dlt-...` case id: values that
+    identify a casebook here and no packet there.
+
+    `queued` is what the tool reported, not merely that it returned: it
+    reports a failed POST or a failed queue write as text rather than raising
+    (`tool_registry.replay_succeeded`).
+    """
+    from src.tools.tool_registry import get_tool_by_name, replay_succeeded
+
+    if not ref_id:
+        return {"queued": False,
+                "result": "no refId on this case; nothing to identify the "
+                          "packet to OIS with",
+                "args": None}
+
     args = {
-        "id": replay_id,
+        "id": ref_id,
         "idType": id_type(),
         "priority": replay_priority(),
         "operatorName": operator_name(),
@@ -280,26 +303,36 @@ def attempt(ref_id: str, message_ref_id: Optional[str] = None) -> dict:
     try:
         tool = get_tool_by_name("queue_for_replay")
         result = tool.invoke(args)
-        logger.info("DLT auto-replay queued", ref_id=ref_id,
-                    result=result)
-        return {"queued": True, "result": str(result), "args": args}
     except Exception as e:
-        logger.error("DLT auto-replay failed", ref_id=ref_id,
+        logger.error("DLT auto-replay failed", case_key=case_key, ref_id=ref_id,
                      error=f"{type(e).__name__}: {e}")
         return {"queued": False, "result": f"{type(e).__name__}: {e}",
                 "args": args}
 
+    queued = replay_succeeded(result)
+    if queued:
+        logger.info("DLT auto-replay queued", case_key=case_key, ref_id=ref_id,
+                    result=result)
+    else:
+        logger.error("DLT auto-replay was not queued", case_key=case_key,
+                     ref_id=ref_id, result=result)
+    return {"queued": queued, "result": str(result), "args": args}
 
-def maybe_replay(ref_id: str, message_ref_id: Optional[str], finding,
+
+def maybe_replay(case_key: str, ref_id: Optional[str], finding,
                  code_check=None) -> dict:
     """The one entry point `/analyze-dlt` calls. Always returns a dict --
     attempted or not, and why either way -- meant to be embedded verbatim in
     the casebook's `replay` block.
+
+    `decide` sees the refId alone. It used to be handed `ref_id or
+    case_key`, which is never empty, so its "no refId" guard could not fire
+    from here.
     """
-    decision = decide(finding, message_ref_id or ref_id, code_check)
+    decision = decide(finding, ref_id, code_check)
     if not decision.should_replay:
         return {"attempted": False, "reason": decision.reason,
                 "queued": False, "result": None}
 
-    outcome = attempt(ref_id, message_ref_id)
+    outcome = attempt(case_key, ref_id)
     return {"attempted": True, "reason": decision.reason, **outcome}

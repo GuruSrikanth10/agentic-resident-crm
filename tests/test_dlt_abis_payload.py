@@ -52,6 +52,7 @@ from src.api.dlt_routes import (
 )
 from src.dlt import case_storage, registry
 from src.dlt.headers import parse_headers
+from src.dlt.identity import storage_key
 from src.models.dlt_schemas import DltMessage
 from src.utils.message_adapters import DltAdapter
 
@@ -474,7 +475,8 @@ def test_the_payload_summary_is_persisted():
     result = fetch_dlt_logs(dlt_message())
     storage = case_storage.get_dlt_storage()
 
-    summary = storage.load_artifact(result["case_id"], PAYLOAD_SUMMARY_ARTIFACT)
+    summary = storage.load_artifact(storage_key(REF_ID, result["case_id"]),
+                                    PAYLOAD_SUMMARY_ARTIFACT)
     assert "responseStatus=FAILURE" in summary
     assert "ABIS2: 2 candidate(s)" in summary
 

@@ -49,10 +49,11 @@ def _print_entries(entries: list) -> None:
         print("Nothing is parked.")
         return
 
-    print(f"{'REF':<40} {'WAITING FOR':<22} {'PARKED':<17} STATUS")
-    print("-" * 100)
+    print(f"{'CASE':<40} {'REF':<38} {'WAITING FOR':<22} {'PARKED':<17} STATUS")
+    print("-" * 140)
     for entry in entries:
-        print(f"{(entry.get('ref_id') or '-')[:39]:<40} "
+        print(f"{(entry.get('case_id') or '-')[:39]:<40} "
+              f"{(entry.get('ref_id') or '-')[:37]:<38} "
               f"{(entry.get('required_version') or '-')[:21]:<22} "
               f"{_when(entry.get('parked_at')):<17} "
               f"{entry.get('status') or '-'}")
@@ -106,6 +107,8 @@ def main() -> int:
         print("DRY RUN -- nothing was released.")
     print(f"  examined  {summary['examined']}")
     print(f"  released  {summary['released']}")
+    if summary["failed"]:
+        print(f"  failed    {summary['failed']}  (not queued; left parked to retry)")
     print(f"  waiting   {summary['waiting']}")
     print(f"  expired   {summary['expired']}")
     if summary["unknown"]:

@@ -34,6 +34,28 @@ def _collect_llm_key_errors() -> list:
     return errors
 
 
+def _dlt_topic_errors() -> list:
+    """Validation errors for DLT_CONSUMER_TOPIC_NAME. Pure, so it is testable
+    without the process exit `validate_config` ends in."""
+    from src.utils.env import split_names
+
+    topics = split_names(os.environ.get("DLT_CONSUMER_TOPIC_NAME", "packet-dlt"))
+    if not topics:
+        return ["DLT_CONSUMER_TOPIC_NAME must name at least one dead-letter topic."]
+
+    own = {
+        "DLT_ANALYSIS_TOPIC_NAME": os.environ.get("DLT_ANALYSIS_TOPIC_NAME",
+                                                  "dlt-analysis-queue"),
+        "PACKET_ANALYSIS_TOPIC_NAME": os.environ.get("PACKET_ANALYSIS_TOPIC_NAME",
+                                                     "packet-analysis-queue"),
+        "KAFKA_DLQ_TOPIC": os.environ.get("KAFKA_DLQ_TOPIC", "rejected-packets-dlq"),
+    }
+    return [f"DLT_CONSUMER_TOPIC_NAME lists {topic}, which is this system's own "
+            f"{name}; the DLT consumer must read only dead-letter topics."
+            for name, value in own.items()
+            for topic in topics if topic == value.strip()]
+
+
 def validate_config():
     """Fail-fast startup check to ensure required configurations and permissions are valid."""
     errors = []
@@ -52,6 +74,14 @@ def validate_config():
     # slow_consumer.py reads from by default, must not be blanked out.
     if not os.environ.get("PACKET_ANALYSIS_TOPIC_NAME", "packet-analysis-queue").strip():
         errors.append("PACKET_ANALYSIS_TOPIC_NAME must not be empty.")
+
+    # 2c. The DLT consumer's topics, now that it takes a list: at least one,
+    # and none of this system's own queues. The DLT analysis queue carries
+    # messages the DLT consumer would accept -- they look like dead-letter
+    # cases -- so listing it would feed every case back into the fetch stage,
+    # which republishes it onto that queue: a loop, not an error.
+    if os.environ.get("CONSUMER_ROLE", "").strip().lower() == "dlt":
+        errors.extend(_dlt_topic_errors())
 
     # 3. AGENTIC_RESIDENT_CRM_API_KEY is explicitly set in prod
     api_key = os.environ.get("AGENTIC_RESIDENT_CRM_API_KEY")

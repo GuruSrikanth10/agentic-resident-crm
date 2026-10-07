@@ -507,7 +507,7 @@ def test_record_mode_analyses_another_service_as_before_but_records_it(lane):
     (key, pack, failure), = lane["investigate"]
     assert pack is None, "no pack: exactly how every record was analysed before"
     assert lane["reduce"] == [None] and lane["running"] == [((), {}), ((), {})]
-    assert casebook["schema_version"] == "1.3"
+    assert casebook["schema_version"] == dlt_routes.DLT_CASEBOOK_SCHEMA_VERSION
     assert casebook["packet"]["service"] == DEMO
     assert casebook["packet"]["event_id"] == "EV-1"
     assert casebook["packet"]["service_resolution"]["source"] == sr.SOURCE_CONSUMER_GROUP

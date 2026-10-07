@@ -39,6 +39,7 @@ from typing import Optional
 
 from src.dlt import group_store
 from src.dlt.case_storage import get_group_storage
+from src.models.dlt_synthesis import DISCREPANCY_VERDICTS
 from src.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -56,11 +57,16 @@ STATE_FINAL = "final"
 #: happened to *this* finding, so a reader of the casebook is never told a
 #: recommendation was filed when it was not. The casebook used to assert
 #: "draft" unconditionally, including on every case whose write had failed.
-#:   unpersisted  the finding should have been cached and the write failed
-#:   withheld     the finding carried packet-specific identifiers and was
-#:                deliberately kept out of the cache (src/dlt/per_code.py)
+#:   unpersisted     the finding should have been cached and the write failed
+#:   withheld        the finding carried packet-specific identifiers and was
+#:                   deliberately kept out of the cache (src/dlt/per_code.py)
+#:   per_occurrence  the finding explains this occurrence's discrepancy -- its
+#:                   logs CONTRADICTED the trace, or only PARTIALLY matched
+#:                   it -- so it describes this occurrence, not the failure
+#:                   mode, and is deliberately kept out of the cache
 STATE_UNPERSISTED = "unpersisted"
 STATE_WITHHELD = "withheld"
+STATE_PER_OCCURRENCE = "per_occurrence"
 
 
 
@@ -188,16 +194,20 @@ def record_occurrence(fingerprint: str,
 
 def attach_recommendation(fingerprint: str, recommendation: dict,
                           state: str = STATE_DRAFT,
-                          by_case_id: Optional[str] = None) -> dict:
-    """Record the recommendation an investigation produced for this group."""
+                          by_case_id: Optional[str] = None,
+                          corroboration: Optional[str] = None) -> dict:
+    """Record the recommendation an investigation produced for this group,
+    and the corroboration verdict it was reasoned under."""
     if _v2():
         return group_store.attach_recommendation(
-            fingerprint, recommendation, state, by_case_id=by_case_id)
+            fingerprint, recommendation, state, by_case_id=by_case_id,
+            corroboration=corroboration)
 
     def mutate(current: Optional[dict]) -> dict:
         group = dict(current or _blank(fingerprint))
         group["recommendation"] = recommendation
         group["recommendation_state"] = state
+        group["recommendation_corroboration"] = corroboration
         return group
 
     return get_group_storage().update_json(fingerprint, "group.json", mutate)
@@ -232,7 +242,30 @@ def attach_code_check(fingerprint: str, record: dict,
 def has_usable_recommendation(group: Optional[dict]) -> bool:
     return bool(group
                 and group.get("recommendation")
-                and group.get("recommendation_state") in (STATE_DRAFT, STATE_FINAL))
+                and group.get("recommendation_state") in (STATE_DRAFT, STATE_FINAL)
+                and not describes_one_occurrence(group))
+
+
+def describes_one_occurrence(group: dict) -> bool:
+    """Whether the cached finding explains one occurrence's discrepancy.
+
+    Such a finding is the answer to "what did *these* logs show instead?",
+    and served to a later occurrence whose logs agree with its trace, it told
+    that reader the trace was contradicted, gave the mis-cast's action -- a
+    REDRIVE_AFTER_RECOVERY among them, which is what auto-replay acts on --
+    and replaced the failure mode's recommendation for every occurrence after
+    it. The analysis lane no longer caches one. This refuses one cached
+    before it stopped, so the next occurrence re-investigates and overwrites
+    it: by the verdict stored with the finding, or, for a finding stored
+    before the verdict was, by the marks a discrepancy leaves on it.
+    """
+    if group.get("recommendation_corroboration") in DISCREPANCY_VERDICTS:
+        return True
+    recommendation = group.get("recommendation") or {}
+    if not isinstance(recommendation, dict):
+        return False
+    return bool(recommendation.get("discrepancy")
+                or "contradicted" in (recommendation.get("ceilings_applied") or []))
 
 
 def list_groups() -> list:

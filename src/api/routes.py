@@ -369,6 +369,25 @@ async def _await_run_in_flight(storage, event_id: str, status: str, log) -> dict
                         detail="Another run holds this packet and has not finished")
 
 
+def _publish_to_dlq_best_effort(payload, error_message: str) -> None:
+    """`publish_to_dlq`, for a route that must answer either way.
+
+    The publisher raises when the DLQ cannot be reached -- the consumer needs
+    that, to hold an offset rather than advance past a message that would
+    then exist nowhere. Here the casebook already records the verdict, and
+    turning the response into a 500 would only send the consumer to the same
+    broker again, so the failure is logged and the route answers as it
+    always has.
+    """
+    try:
+        publish_to_dlq(payload, error_message)
+    except Exception as e:
+        event_id = payload.get("eventId") if isinstance(payload, dict) else None
+        logger.error("Could not publish to the DLQ; the casebook still records "
+                     "the outcome", event_id=event_id,
+                     error=f"{type(e).__name__}: {e}")
+
+
 def _log_abandoned_run(event_id: str, run: concurrent.futures.Future) -> None:
     """Say how a run ended after the route stopped waiting for it.
 
@@ -1020,7 +1039,7 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
             # the consumer's own timeout and the exception path below, which
             # both dead-letter (2026-09-29: 21 timeouts, none dead-lettered).
             await _off_loop(
-                publish_to_dlq, signal_dict,
+                _publish_to_dlq_best_effort, signal_dict,
                 f"Investigation exceeded the server-side budget of {agent_invoke_timeout_seconds}s")
             from src.utils.case_cleanup import cleanup_casebook_dir
             cleanup_casebook_dir(event_id)
@@ -1030,7 +1049,7 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
         error_msg = traceback.format_exc()
         log.error("Unhandled exception during agent processing", exc_info=True, state="DLQ")
         # A Kafka produce with acks="all" and a flush() -- a network round trip.
-        await _off_loop(publish_to_dlq, signal_dict, error_msg)
+        await _off_loop(_publish_to_dlq_best_effort, signal_dict, error_msg)
 
         # Mark as DLQ in storage so it doesn't get re-run on redelivery. Both
         # files must move to a terminal status together -- leaving

@@ -56,6 +56,17 @@ DEFAULT_CONTRADICTED_CEILING = 0.6
 DEFAULT_REGISTRY_MISS_CEILING = 0.5
 DEFAULT_REUSE_DECAY = 0.95
 
+#: A finding the Reviewer never approved. The analysis lane synthesises one
+#: anyway after its last retry rather than lose the case, so it is capped and
+#: labelled: below DLT_REPLAY_CONFIDENCE_THRESHOLD by default, and
+#: `auto_replay.decide` refuses the label outright, as it does "unverifiable".
+UNREVIEWED_LABEL = "unreviewed"
+DEFAULT_UNREVIEWED_CEILING = 0.5
+
+#: The corroboration verdicts under which the logs disagreed with the trace.
+#: Only these may carry a `discrepancy`.
+DISCREPANCY_VERDICTS = ("CONTRADICTED", "PARTIAL")
+
 
 def _float_env(name: str, default: float) -> float:
     try:
@@ -111,6 +122,10 @@ def registry_miss_ceiling() -> float:
     return _float_env("DLT_REGISTRY_MISS_CEILING", DEFAULT_REGISTRY_MISS_CEILING)
 
 
+def unreviewed_ceiling() -> float:
+    return _float_env("DLT_UNREVIEWED_CEILING", DEFAULT_UNREVIEWED_CEILING)
+
+
 def reuse_decay() -> float:
     return _float_env("DLT_REUSE_DECAY", DEFAULT_REUSE_DECAY)
 
@@ -121,7 +136,8 @@ class DltFinding(BaseModel):
     #: What the evidence shows. One or two paragraphs, plain language.
     narrative: str = ""
 
-    #: Populated only when corroboration came back CONTRADICTED or PARTIAL.
+    #: Populated only when corroboration came back CONTRADICTED or PARTIAL --
+    #: enforced by `apply_dlt_confidence_policy`, not only asked of the model.
     #: This is the highest-value field in the whole system -- it is the thing
     #: a developer reading the trace in Kafka UI cannot see.
     discrepancy: Optional[str] = None
@@ -140,6 +156,14 @@ class DltFinding(BaseModel):
     ceilings_applied: list = Field(default_factory=list)
 
     abstained: bool = False
+
+    #: Whether the Reviewer approved the investigation this finding was
+    #: synthesised from. Set by the analysis lane, never by the model -- the
+    #: orchestrator overwrites whatever the synthesis reply says. None when no
+    #: Reviewer ran: a canned finding, or one built before this was recorded.
+    #: Travels with the finding into the group cache, so a reused finding is
+    #: still capped and labelled `unreviewed` when it was never approved.
+    reviewer_approved: Optional[bool] = None
 
 
 def apply_dlt_confidence_policy(finding: DltFinding,
@@ -203,6 +227,11 @@ def apply_dlt_confidence_policy(finding: DltFinding,
     if failure_class == "A" and not registry_hit:
         cap(registry_miss_ceiling(), "registry_miss")
 
+    if finding.reviewer_approved is False:
+        # Synthesised after the Reviewer's last rejection: nothing checked
+        # its claims (orchestrator.check_approval).
+        cap(unreviewed_ceiling(), UNREVIEWED_LABEL)
+
     if logs and BANNER_HEADER in logs:
         cap(gap_confidence_ceiling(), "evidence_gap")
 
@@ -213,10 +242,19 @@ def apply_dlt_confidence_policy(finding: DltFinding,
             applied.append("reuse_decay")
         confidence = min(confidence, ceiling)
 
-    updated = finding.model_copy(update={
-        "confidence": confidence,
-        "ceilings_applied": applied,
-    })
+    update = {"confidence": confidence, "ceilings_applied": applied}
+
+    # `discrepancy` says this occurrence's logs disagreed with its trace, so
+    # it is enforced here as the ceilings are, not left to the prompt. Two
+    # routes put one on a finding whose logs did no such thing: a reused
+    # finding carries the discrepancy of the occurrence that produced it, and
+    # the synthesis step can fill one in on a verdict that found nothing to
+    # disagree with. Either way the reader of this casebook would be told
+    # its trace was contradicted when it was not.
+    if finding.discrepancy and corroboration not in DISCREPANCY_VERDICTS:
+        update["discrepancy"] = None
+
+    updated = finding.model_copy(update=update)
 
     # Class B and U are routed, never diagnosed -- the action is forced
     # regardless of what the model proposed.

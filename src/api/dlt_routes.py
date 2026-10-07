@@ -22,12 +22,20 @@ import contextlib
 import functools
 import json
 import os
+import threading
 import time
 from typing import Optional
 
 from fastapi import APIRouter, Depends
 
-from src.api.routes import _off_loop, get_api_key, rate_limiter, register_executor
+from src.api.routes import (
+    _log_abandoned_run,
+    _off_loop,
+    get_api_key,
+    rate_limiter,
+    register_executor,
+)
+from src.core import run_control
 from src.dlt import (
     auto_replay,
     canned,
@@ -42,7 +50,11 @@ from src.dlt import (
     reuse,
     single_flight,
 )
-from src.dlt.case_storage import get_dlt_storage
+from src.dlt.case_storage import (  # noqa: F401  (the schema version is re-exported)
+    DLT_CASEBOOK_SCHEMA_VERSION,
+    get_dlt_storage,
+    timeout_casebook,
+)
 from src.dlt.corroborate import corroborate
 from src.dlt.classify import classify
 from src.dlt.headers import parse_headers
@@ -96,13 +108,19 @@ register_executor(lambda: _dlt_invoke_executor)
 
 
 def _dlt_analyze_timeout_seconds() -> float:
-    """Server-side budget for one DLT analysis.
+    """Server-side budget for one DLT analysis, end to end.
 
     The DLT analysis consumer gives up after DLT_ANALYSIS_TIMEOUT_SECONDS
     (default 300s) and writes FAILED_TIMEOUT itself. Without a budget on this
     side, the API thread kept running an investigation nobody was waiting for
     and could later overwrite that verdict with a "successful" casebook -- bug
     0.8, which the rejection lane fixed and this one inherited unfixed.
+
+    It runs from the moment the request arrives, not from the LLM call: the
+    consumer's clock does, and the group writes, the Kubernetes read, the
+    code check and a single-flight wait all come first. Counted from the LLM
+    call, they left the server finishing after the consumer had given up --
+    30s of headroom covering all of them.
 
     Read at call time, like the rejection lane's equivalent, so it tracks a
     reconfigured consumer timeout.
@@ -112,23 +130,35 @@ def _dlt_analyze_timeout_seconds() -> float:
     return float(os.environ.get("DLT_ANALYZE_TIMEOUT_SECONDS", default_budget))
 
 
-def _timeout_casebook(ref_id: str, message_ref_id: Optional[str], budget: float) -> dict:
+def _timeout_casebook(message: DltMessage, budget: float) -> dict:
     """Terminal record for an analysis that outran its server-side budget."""
+    return timeout_casebook(
+        message.case_id, message.ref_id,
+        f"The DLT analysis exceeded the server-side budget of {budget}s and "
+        f"was abandoned. The stack trace, headers and any fetched logs are "
+        f"attached; no finding was produced.")
+
+
+def _redacted_failure(failure: dict, allowlist: list) -> dict:
+    """`failure` with its exception messages redacted, for the LLM.
+
+    The fetch stage persists the parsed failure redacted, but the analysis
+    stage re-derives it from the raw headers, so the messages -- free text,
+    and able to carry a UID -- reached the prompt, and in harness mode
+    `dlt_failure.json` on local disk, exactly as they arrived. Only the
+    messages are free text: the class names, frames and codes are the
+    structure the fingerprint is built from, and are left alone.
+    """
+    def scrub(text):
+        if not isinstance(text, str) or not text:
+            return text
+        return redaction.redact_text(text, allowlist=allowlist).text
+
     return {
-        "schema_version": DLT_CASEBOOK_SCHEMA_VERSION,
-        "case_id": ref_id,
-        "detected_at": time.time(),
-        "packet": {"ref_id": message_ref_id},
-        "finding": {
-            "narrative": (
-                f"The DLT analysis exceeded the server-side budget of "
-                f"{budget}s and was abandoned. The stack trace, headers and "
-                f"any fetched logs are attached; no finding was produced."
-            ),
-            "recommendation": "A human should read the attached evidence.",
-            "action": "NEEDS_MANUAL_REVIEW",
-        },
-        "packet_status": {"status": "FAILED_TIMEOUT"},
+        **failure,
+        "root_message": scrub(failure.get("root_message")),
+        "chain": [{**link, "message": scrub(link.get("message"))}
+                  for link in failure.get("chain") or []],
     }
 
 #: Artifact names written per case. Kept here so Phase 8 and the operator CLI
@@ -140,17 +170,8 @@ PAYLOAD_SUMMARY_ARTIFACT = "payload_summary.txt"
 FETCHED_LOGS_ARTIFACT = "fetched_logs.txt"
 DEPLOYED_ARTIFACT = "deployed.json"
 
-#: Bumped when the DLT casebook shape changes. Independent of the rejection
-#: casebook's CASEBOOK_SCHEMA_VERSION -- different schema, different lifecycle.
-# 1.1 adds the `code_check` block (DLT_PLAN.md 14, phase C5).
-# 1.2 adds provenance.group_state and provenance.single_flight, and
-#     finding.per_code_violations; recommendation_state now reports what
-#     happened ("unpersisted", "withheld", "none") instead of always "draft".
-#     Additive: every 1.1 field is unchanged.
-# 1.3 adds packet.event_id, packet.service, packet.service_resolution,
-#     failure.fingerprint_service and provenance.service_pack
-#     (MULTI_SERVICE_PLAN.md Phase 8). Additive.
-DLT_CASEBOOK_SCHEMA_VERSION = "1.3"
+# DLT_CASEBOOK_SCHEMA_VERSION, and its history, live in src/dlt/case_storage.py
+# beside the timeout casebook the consumer writes too; it is re-exported here.
 
 
 def build_failure(headers, exception_message: Optional[str]) -> dict:
@@ -560,6 +581,9 @@ def _casebook(message: DltMessage, headers, failure: dict, corroboration,
             "discrepancy": finding.discrepancy,
             "recommendation": finding.recommendation,
             "action": finding.action,
+            # False when the Reviewer never approved the investigation this
+            # was synthesised from; null when no Reviewer ran (canned).
+            "reviewer_approved": finding.reviewer_approved,
             # Packet-specific text found in a finding that is cached against
             # the fingerprint. Empty when clean; absent when not checked.
             **({"per_code_violations": per_code_check.as_dict()}
@@ -638,6 +662,14 @@ async def analyze_dlt(message: DltMessage):
     rather than occupying a slot in Starlette's shared sync-dispatch pool for
     its whole duration.
     """
+    # The budget is end to end, as the consumer's own timeout is
+    # (`_dlt_analyze_timeout_seconds`).
+    started = time.monotonic()
+    budget = _dlt_analyze_timeout_seconds()
+
+    def remaining() -> float:
+        return budget - (time.monotonic() - started)
+
     case_id = message.case_id
     # One key per record, led by the refId (identity.storage_key).
     key = storage_key(message.ref_id, case_id)
@@ -693,8 +725,11 @@ async def analyze_dlt(message: DltMessage):
     # stored copy can.
     payload_summary = summarise_payload(
         message.payload, (message.headers or {}).get("__TypeId__"))
+    # Every link of the declared chain, so the wrappers Spring logs a failed
+    # listener under are not read as exceptions the trace fails to explain.
     corroboration = corroborate(logs, failure["root_fqcn"],
-                                failure["business_code"], failure["frames"])
+                                failure["business_code"], failure["frames"],
+                                chain=[link["fqcn"] for link in failure["chain"]])
     metrics.record_dlt_corroboration(corroboration.verdict.value)
 
     if failure["failure_class"] == "A" and not failure["registry_description"]:
@@ -750,8 +785,14 @@ async def analyze_dlt(message: DltMessage):
     # by a schema change without anyone noticing.
     baseline_versions = await _off_loop(_recorded_baseline, storage, key)
     running = await _off_loop(deployed.for_service, log_service)
+    # When the packet failed, for "has the code changed since": the anchor
+    # the log window is built on, which is never a backoff timestamp still in
+    # the future. `headers.last_attempt_ms` can be one -- the retry Spring
+    # had scheduled when it gave up early -- and every commit between the real
+    # failure and that time would be missed, reading as NO_CHANGE.
+    window = derive_window(headers)
     code_check_result = await _off_loop(
-        code_check.evaluate, failure, headers.last_attempt_ms,
+        code_check.evaluate, failure, window.anchor_ms if window else None,
         baseline_versions, running.versions)
     metrics.record_dlt_code_check(code_check_result.verdict)
     if code_check_result.verdict != code_check.UNKNOWN:
@@ -774,15 +815,16 @@ async def analyze_dlt(message: DltMessage):
     # *because nothing is cached yet*: then a concurrent investigation of the
     # same fingerprint would answer this message too, so wait for it. The
     # gate is held through `attach_recommendation`, which is what the waiters
-    # are waiting to see.
-    budget = _dlt_analyze_timeout_seconds()
+    # are waiting to see. A waiter waits no longer than its own budget has
+    # left: what it spends waiting is time its own investigation will not
+    # have, since the budget runs from arrival.
     single_flight_outcome = None
-    gate = (single_flight.flight(fingerprint, single_flight.wait_seconds(budget))
+    gate = (single_flight.flight(fingerprint,
+                                 single_flight.wait_seconds(max(remaining(), 0.0)))
             if decision.awaits_cache and single_flight.enabled()
             else contextlib.nullcontext())
 
     async with gate as flight:
-        llm_budget = budget
         if flight is not None:
             # Re-read whether or not we waited. The decision above was taken
             # before the gate, so a leader may have cached an answer since --
@@ -802,12 +844,6 @@ async def analyze_dlt(message: DltMessage):
             else:
                 single_flight_outcome = "leader"
             metrics.record_dlt_singleflight(single_flight_outcome)
-            if flight.waited:
-                # Time spent waiting comes out of this request's budget -- the
-                # consumer's own timeout is end to end. Never below the smaller
-                # of the budget and 30s, so a waiter that does end up
-                # investigating is not handed an impossible deadline.
-                llm_budget = max(budget - flight.waited_seconds, min(budget, 30.0))
 
         # Recorded after the gate, so a waiter served from the cache counts
         # as the REUSE_GROUP it became rather than the LLM_REQUIRED it began.
@@ -821,27 +857,52 @@ async def analyze_dlt(message: DltMessage):
             finding = DltFinding(**(group or {})["recommendation"])
             provenance = "group_reuse"
         else:
-            log.info("Running the DLT analysis lane", reason=decision.reason)
+            llm_budget = remaining()
+            log.info("Running the DLT analysis lane", reason=decision.reason,
+                     budget_seconds=round(llm_budget, 1))
+            # What the LLM reads -- the prompt, and in harness mode the case
+            # files on local disk -- is redacted as the fetch stage's
+            # artifacts are, with the same identifiers allowed through.
+            allowlist = [v for v in (message.ref_id, case_id) if v]
             invoke = functools.partial(
-                orchestrator.investigate, key, failure, corroboration, logs,
-                payload_summary=payload_summary,
+                orchestrator.investigate, key,
+                _redacted_failure(failure, allowlist), corroboration, logs,
+                payload_summary=(redaction.redact_text(payload_summary,
+                                                       allowlist=allowlist).text
+                                 if payload_summary else payload_summary),
                 **({"service_resolution": resolution, "service_pack": pack}
                    if pack else {}))
-            try:
-                finding, parse_error = await asyncio.wait_for(
-                    asyncio.get_running_loop().run_in_executor(
-                        _dlt_invoke_executor, invoke),
-                    timeout=llm_budget,
-                )
-            except asyncio.TimeoutError:
+            # Set when the budget runs out, so the run stops at its next model
+            # call, tool call or node instead of running on to the end in a
+            # worker the next case needs (run_control; the rejection lane's
+            # fix of 2026-09-29, which this lane had not been given).
+            cancel = threading.Event()
+            run, finding = None, None
+            timed_out = llm_budget <= 0
+            if not timed_out:
+                run = _dlt_invoke_executor.submit(run_control.run_in_scope,
+                                                  cancel, invoke)
+                try:
+                    finding, parse_error = await asyncio.wait_for(
+                        asyncio.wrap_future(run), timeout=llm_budget)
+                except asyncio.TimeoutError:
+                    timed_out = True
+            if timed_out:
                 # The consumer's own client-side budget is about to fire (or has
                 # already), and it will write FAILED_TIMEOUT and DLQ the message.
                 # Recording the same verdict here keeps the two in agreement
                 # instead of leaving this side to finish later and overwrite it.
+                #
+                # A run still waiting for a worker was cancelled with the wait;
+                # a running one stops at its next step, and says how it ended.
+                cancel.set()
+                if run is not None:
+                    run.add_done_callback(functools.partial(_log_abandoned_run, key))
                 log.error("DLT analysis exceeded the server-side budget",
-                          timeout_seconds=llm_budget, state="FAILED_TIMEOUT")
+                          timeout_seconds=budget, llm_seconds=round(llm_budget, 1),
+                          state="FAILED_TIMEOUT")
                 await _off_loop(storage.save_terminal, key,
-                                _timeout_casebook(key, message.ref_id, llm_budget))
+                                _timeout_casebook(message, budget))
                 from src.utils.case_cleanup import cleanup_casebook_dir
                 cleanup_casebook_dir(key)
                 return {"status": "failed_timeout", "case_id": case_id}
@@ -868,7 +929,8 @@ async def analyze_dlt(message: DltMessage):
         )
 
         # What actually happened to this finding's cache entry -- reported as
-        # it is, never assumed. See groups.STATE_UNPERSISTED / STATE_WITHHELD.
+        # it is, never assumed. See groups.STATE_UNPERSISTED / STATE_WITHHELD
+        # / STATE_PER_OCCURRENCE.
         recommendation_state = groups.STATE_NONE
         per_code_check = None
 
@@ -884,14 +946,24 @@ async def analyze_dlt(message: DltMessage):
                             violations=sorted({v.pattern for v in per_code_check.violations}),
                             withheld=per_code_check.withhold)
 
-            if per_code_check.withhold:
+            if corroboration.is_discrepancy:
+                # This finding answers "what did these logs show instead of
+                # the declared exception?" -- a question about this
+                # occurrence. Cached, it replaced the failure mode's
+                # recommendation and was served, discrepancy, action and all,
+                # to every later occurrence, including those whose logs
+                # agree with their trace; a REDRIVE_AFTER_RECOVERY among them
+                # was auto-replayable there. It leads this casebook only.
+                recommendation_state = groups.STATE_PER_OCCURRENCE
+            elif per_code_check.withhold:
                 recommendation_state = groups.STATE_WITHHELD
             else:
                 try:
                     updated = await _off_loop(groups.attach_recommendation, fingerprint,
                                               finding.model_dump(),
                                               state=groups.STATE_DRAFT,
-                                              by_case_id=case_id)
+                                              by_case_id=case_id,
+                                              corroboration=corroboration.verdict.value)
                     metrics.record_dlt_group_write("recommendation", True)
                     recommendation_state = groups.STATE_DRAFT
                     if updated:
@@ -926,7 +998,11 @@ async def analyze_dlt(message: DltMessage):
     # packet. Parking requires everything a replay requires except the
     # version, so this can never become a second replay path that bypasses
     # DLT_AUTO_REPLAY_ENABLED (DLT_PLAN.md 14, phase C7).
-    park = await _off_loop(parked.maybe_park, key, message.ref_id,
+    #
+    # Parked under the case id, with the refId beside it: the refId is what a
+    # release sends to OIS. Passing the storage key here made it the parked
+    # entry's `ref_id`, and so the id a release would have replayed.
+    park = await _off_loop(parked.maybe_park, case_id, message.ref_id,
                            code_check_result, finding)
     if park["parked"]:
         log.info("Parked the replay until its fix deploys", reason=park["reason"])

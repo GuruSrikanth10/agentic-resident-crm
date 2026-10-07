@@ -10,7 +10,7 @@ from kafka import ConsumerRebalanceListener, KafkaConsumer
 from kafka.structs import OffsetAndMetadata
 from pathlib import Path
 from typing import Optional
-from .env import get_required_env
+from .env import get_required_env, split_names
 from src.utils import message_adapters
 from src.utils.atomic import replace_with_retry
 from src.utils.logging_config import get_logger
@@ -43,8 +43,16 @@ kafkaConsumerBrokers = [
 CONSUMER_ROLE = os.environ.get("CONSUMER_ROLE", "fast").strip().lower()
 
 if CONSUMER_ROLE == "dlt":
-    # Reads the dead-letter topic and forwards to /fetch-dlt-logs. Bounded
+    # Reads the dead-letter topics and forwards to /fetch-dlt-logs. Bounded
     # I/O only, exactly like the fast consumer -- see DLT_PLAN.md 6.1.
+    #
+    # Topics, plural: every service dead-letters to its own topic, and the
+    # rejection lane skips an ON_HOLD record on the understanding that this
+    # consumer analyses it from the dead-letter record. A single name left
+    # every other service's dead letters skipped by one lane and unseen by
+    # the other. A comma-separated list is accepted for every role (see
+    # `kafkaConsumerTopics`); config_validator refuses one naming this
+    # system's own queues.
     kafkaConsumerTopicName = get_required_env("DLT_CONSUMER_TOPIC_NAME", "packet-dlt")
     kafkaConsumerGroupId = get_required_env("DLT_CONSUMER_GROUP_ID", "dlt-analysis-group")
     kafkaConsumerInternalEndpoint = get_required_env(
@@ -91,6 +99,11 @@ else:
     kafkaConsumerInternalTimeoutSec = float(os.environ.get("FAST_CONSUMER_TIMEOUT_SECONDS", "90"))
     _HEARTBEAT_PATH = CONSUMER_HEARTBEAT_PATH
     _HEALTH_PORT_ENV = "CONSUMER_HEALTH_PORT"
+
+# What `consume_forever` subscribes to: the topic setting, read as a
+# comma-separated list. One name -- every role's setting until the DLT
+# consumer needed several -- is a list of one, so nothing else changes.
+kafkaConsumerTopics = split_names(kafkaConsumerTopicName)
 
 # Consumer will be instantiated lazily in consume_forever
 consumer = None
@@ -879,12 +892,13 @@ def consume_forever():
             max_poll_records=int(os.environ.get("KAFKA_MAX_POLL_RECORDS", MAX_CONCURRENT_INVESTIGATIONS)),
             max_poll_interval_ms=int(os.environ.get("KAFKA_MAX_POLL_INTERVAL_MS", "900000")),
         )
-        consumer.subscribe([kafkaConsumerTopicName],
+        consumer.subscribe(list(kafkaConsumerTopics),
                            listener=_RebalanceListener())
 
     _install_signal_handlers()
 
-    logger.info("Kafka consumer started", topic=kafkaConsumerTopicName, brokers=kafkaConsumerBrokers)
+    logger.info("Kafka consumer started", topics=list(kafkaConsumerTopics),
+                brokers=kafkaConsumerBrokers)
 
     heartbeat_file = _heartbeat_path()
     os.makedirs(heartbeat_file.parent, exist_ok=True)
