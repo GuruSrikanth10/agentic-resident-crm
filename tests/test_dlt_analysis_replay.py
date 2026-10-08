@@ -18,6 +18,7 @@ from src.api import dlt_routes
 from src.api.dlt_routes import FETCHED_LOGS_ARTIFACT
 from src.api.dlt_routes import analyze_dlt as _analyze_dlt_async
 from src.dlt import case_storage
+from src.dlt.identity import storage_key
 from src.models.dlt_schemas import DltMessage
 from src.models.dlt_synthesis import DltFinding
 
@@ -69,8 +70,16 @@ def message(case_id="dlt-T-63-3352", ref_id="REF-1", trace=None):
                       payload={"packetMetaData": {"refId": ref_id}}, ref_id=ref_id)
 
 
-def seed_logs(case_id, text):
-    case_storage.get_dlt_storage().save_artifact(case_id, FETCHED_LOGS_ARTIFACT, text)
+def seed_logs(case_id, text, ref_id="REF-1"):
+    """Under the case's storage key: `<refId>__<digest of case_id>` since
+    MULTI_SERVICE_PLAN.md Phase 8, which is where the analysis reads it."""
+    case_storage.get_dlt_storage().save_artifact(
+        storage_key(ref_id, case_id), FETCHED_LOGS_ARTIFACT, text)
+
+
+def stored(case_id="dlt-T-63-3352", ref_id="REF-1"):
+    """The casebook of the case `case_id`, from its storage key."""
+    return case_storage.get_dlt_storage().load(storage_key(ref_id, case_id))
 
 
 def stub_llm(monkeypatch, finding: DltFinding):
@@ -112,7 +121,7 @@ def test_a_high_confidence_mis_cast_finding_triggers_replay(monkeypatch):
     called_with = fake_tool.invoke.call_args[0][0]
     assert called_with["id"] == "REF-1"
 
-    casebook = case_storage.get_dlt_storage().load("dlt-T-63-3352")
+    casebook = stored("dlt-T-63-3352")
     assert casebook["replay"]["attempted"] is True
     assert casebook["replay"]["queued"] is True
     assert "REDRIVE_AFTER_RECOVERY" in casebook["replay"]["reason"]
@@ -149,7 +158,8 @@ def test_class_b_never_replays_even_with_the_feature_on(monkeypatch):
     Class B (ROUTE_TO_DEV) is the cleaner end-to-end check: wrong action AND
     no LLM confidence, both independently disqualifying."""
     monkeypatch.setenv("DLT_AUTO_REPLAY_ENABLED", "true")
-    seed_logs("dlt-B-0-1", "[ERROR] java.lang.NullPointerException: boom")
+    seed_logs("dlt-B-0-1", "[ERROR] java.lang.NullPointerException: boom",
+              ref_id="REF-2")
 
     patcher, fake_tool = mock_replay_tool()
     with patcher:
@@ -161,7 +171,7 @@ def test_class_b_never_replays_even_with_the_feature_on(monkeypatch):
     assert result["replay_attempted"] is False
     fake_tool.invoke.assert_not_called()
 
-    casebook = case_storage.get_dlt_storage().load("dlt-B-0-1")
+    casebook = stored("dlt-B-0-1", ref_id="REF-2")
     assert casebook["replay"]["attempted"] is False
 
 
@@ -219,7 +229,7 @@ def test_a_replay_tool_failure_does_not_break_casebook_persistence(monkeypatch):
     assert result["replay_attempted"] is True
     assert result["replay_queued"] is False
 
-    casebook = case_storage.get_dlt_storage().load("dlt-T-63-3352")
+    casebook = stored("dlt-T-63-3352")
     assert casebook["packet_status"]["status"]  # casebook still persisted
     assert "OIS unreachable" in casebook["replay"]["result"]
 
@@ -265,9 +275,9 @@ def stub_running(monkeypatch, running_versions):
             reason="" if running_versions else "stubbed as unavailable"))
 
 
-def seed_baseline(case_id, versions):
+def seed_baseline(case_id, versions, ref_id="REF-1"):
     case_storage.get_dlt_storage().save_artifact(
-        case_id, dlt_routes.DEPLOYED_ARTIFACT,
+        storage_key(ref_id, case_id), dlt_routes.DEPLOYED_ARTIFACT,
         json.dumps({"versions": list(versions), "ok": True}))
 
 
@@ -275,7 +285,7 @@ def test_the_casebook_always_carries_a_code_check_block(monkeypatch):
     """Even with the feature off. "We did not look" must be legible."""
     result = analyze_dlt(message(trace=NPE_TRACE))
 
-    casebook = case_storage.get_dlt_storage().load("dlt-T-63-3352")
+    casebook = stored("dlt-T-63-3352")
     assert casebook["code_check"]["verdict"] == "UNKNOWN"
     assert "DLT_CODE_CHECK_ENABLED" in casebook["code_check"]["reason"]
     assert result["code_check"] == "UNKNOWN"
@@ -289,7 +299,7 @@ def test_a_no_change_verdict_reaches_the_casebook(monkeypatch):
     result = analyze_dlt(message(trace=NPE_TRACE))
 
     assert result["code_check"] == "NO_CHANGE"
-    casebook = case_storage.get_dlt_storage().load("dlt-T-63-3352")
+    casebook = stored("dlt-T-63-3352")
     assert casebook["code_check"]["repo"] == "ENU/enu-biometric"
     assert casebook["code_check"]["branch"] == "release"
 
@@ -309,7 +319,7 @@ def test_the_baseline_is_read_from_the_artifact_not_from_today(monkeypatch):
 
     result = analyze_dlt(message(trace=NPE_TRACE))
 
-    casebook = case_storage.get_dlt_storage().load("dlt-T-63-3352")
+    casebook = stored("dlt-T-63-3352")
     assert casebook["code_check"]["baseline_version"] == "1.0.0"
     assert casebook["code_check"]["running_version"] == "1.0.2"
     assert result["code_check"] == "FIX_DEPLOYED"
@@ -338,7 +348,7 @@ def test_the_verdict_is_recorded_on_the_group(monkeypatch):
 
     analyze_dlt(message(trace=NPE_TRACE))
 
-    casebook = case_storage.get_dlt_storage().load("dlt-T-63-3352")
+    casebook = stored("dlt-T-63-3352")
     group = groups.load_group(casebook["failure"]["fingerprint"])
     assert group["code_check"]["verdict"] == "NO_CHANGE"
     assert group["code_check_history"] == {"NO_CHANGE": 1}
@@ -411,7 +421,7 @@ def test_the_gate_flag_turns_the_verdict_into_a_withheld_replay(monkeypatch):
     assert result["replay_attempted"] is False
     fake_tool.invoke.assert_not_called()
 
-    casebook = case_storage.get_dlt_storage().load("dlt-T-63-3352")
+    casebook = stored("dlt-T-63-3352")
     assert "no change at the failure site" in casebook["replay"]["reason"]
 
 
@@ -446,18 +456,20 @@ def test_a_withheld_replay_is_parked_end_to_end(monkeypatch):
     assert result["parked"] is True
     fake_tool.invoke.assert_not_called()
 
-    casebook = case_storage.get_dlt_storage().load("dlt-T-63-3352")
+    casebook = stored("dlt-T-63-3352")
     assert casebook["parked"]["parked"] is True
     assert casebook["parked"]["required_version"] == "1.0.5"
 
     entries = parked.list_parked()
     assert [e["case_id"] for e in entries] == ["dlt-T-63-3352"]
+    # The refId, which a release sends to OIS -- not the case's storage key.
+    assert entries[0]["ref_id"] == "REF-1"
     assert entries[0]["required_version"] == "1.0.5"
 
 
 def test_the_casebook_always_carries_a_parked_block(monkeypatch):
     analyze_dlt(message(trace=NPE_TRACE))
 
-    casebook = case_storage.get_dlt_storage().load("dlt-T-63-3352")
+    casebook = stored("dlt-T-63-3352")
     assert casebook["parked"]["parked"] is False
     assert "DLT_CODE_CHECK_PARK_ENABLED" in casebook["parked"]["reason"]

@@ -1304,10 +1304,11 @@ Ten things are worth knowing without reading the whole plan:
    `ENABLE_AUTO_REPLAY` switch still governs what happens once called:
    straight to OIS, or queued for human approval via `approve_replays.py`.
 
-9. **The DLT casebook has its own schema version**, currently `"1.1"`
+9. **The DLT casebook has its own schema version**, currently `"1.4"`
    (`DLT_CASEBOOK_SCHEMA_VERSION`), independent of the rejection casebook's --
    different schema, different lifecycle. `1.0` -> `1.1` added the
-   `code_check` and `parked` blocks.
+   `code_check` and `parked` blocks; ARCHITECTURE.md section 4.4 point 9 has
+   every version since.
 
 10. **The replay precheck answers deployment, never relevance.** Before a
    packet is replayed, `code_check.py` asks whether the code at the failure

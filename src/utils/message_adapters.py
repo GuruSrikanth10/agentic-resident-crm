@@ -281,13 +281,17 @@ class DltAdapter:
         return storage_key(body.get("ref_id"), case_id)
 
     def timeout_casebook(self, body: dict) -> dict:
-        identity = self.identity_of(body)
-        return {
-            "packet_metadata": {"eid": identity,
-                                "ref_id": body.get("ref_id")},
-            "packet_status": {"status": "FAILED_TIMEOUT"},
-            "resolution": {"synthesis": "DLT analysis exceeded maximum allowed time."},
-        }
+        # A DLT casebook, in the DLT schema. This was a rejection-shaped
+        # record, which the storage layer then stamped with the *rejection*
+        # schema version, and which carried neither the case id nor
+        # `packet.ref_id` -- the two things `dlt_report` looks a case up by.
+        from src.dlt.case_storage import timeout_casebook
+
+        return timeout_casebook(
+            body.get("case_id"), body.get("ref_id"),
+            "The DLT consumer gave up waiting for this case after its time "
+            "budget, and no finding was produced. The stack trace, headers "
+            "and any fetched logs are attached.")
 
     def save_terminal(self, identity: str, casebook: dict) -> None:
         from src.dlt.case_storage import get_dlt_storage

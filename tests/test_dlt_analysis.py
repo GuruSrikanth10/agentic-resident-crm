@@ -23,6 +23,7 @@ from src.api.dlt_routes import FETCHED_LOGS_ARTIFACT
 from src.api.dlt_routes import analyze_dlt as _analyze_dlt_async
 from src.dlt import canned, case_storage, groups
 from src.dlt.corroborate import Corroboration, Verdict
+from src.dlt.identity import storage_key
 from src.models.dlt_schemas import DltMessage
 from src.models.dlt_synthesis import DltFinding, apply_dlt_confidence_policy
 
@@ -77,8 +78,16 @@ def message(case_id="dlt-T-63-3352", trace=None, ref_id="REF-1"):
                       payload={"packetMetaData": {"refId": ref_id}}, ref_id=ref_id)
 
 
-def seed_logs(case_id, text):
-    case_storage.get_dlt_storage().save_artifact(case_id, FETCHED_LOGS_ARTIFACT, text)
+def seed_logs(case_id, text, ref_id="REF-1"):
+    """Under the case's storage key: `<refId>__<digest of case_id>` since
+    MULTI_SERVICE_PLAN.md Phase 8, which is where the analysis reads it."""
+    case_storage.get_dlt_storage().save_artifact(
+        storage_key(ref_id, case_id), FETCHED_LOGS_ARTIFACT, text)
+
+
+def stored(case_id, ref_id="REF-1"):
+    """The casebook of the case `case_id`, from its storage key."""
+    return case_storage.get_dlt_storage().load(storage_key(ref_id, case_id))
 
 
 def stub_llm(monkeypatch, finding: DltFinding, calls: list,
@@ -130,7 +139,7 @@ def test_class_b_narrative_refuses_to_diagnose(monkeypatch):
     seed_logs("dlt-B-0-1", "[ERROR] java.lang.NullPointerException: boom")
     analyze_dlt(message(case_id="dlt-B-0-1", trace=NPE_TRACE))
 
-    casebook = case_storage.get_dlt_storage().load("dlt-B-0-1")
+    casebook = stored("dlt-B-0-1")
     narrative = casebook["finding"]["narrative"]
     assert "No diagnosis is offered" in narrative
     assert "no access to the source" in narrative
@@ -142,7 +151,7 @@ def test_class_b_reports_aggregation_which_is_the_actual_value(monkeypatch):
         seed_logs(f"dlt-B-0-{i}", "[ERROR] java.lang.NullPointerException: boom")
         analyze_dlt(message(case_id=f"dlt-B-0-{i}", trace=NPE_TRACE))
 
-    casebook = case_storage.get_dlt_storage().load("dlt-B-0-3")
+    casebook = stored("dlt-B-0-3")
     assert "4 occurrences" in casebook["finding"]["narrative"]
 
 
@@ -168,7 +177,7 @@ def test_novel_class_a_fingerprint_invokes_the_llm(monkeypatch):
               "[UID_ORIGIN_TRACKER_DATA_NOT_FOUND] absent")
 
     result = analyze_dlt(message())
-    assert calls == ["dlt-T-63-3352"]
+    assert calls == [storage_key("REF-1", "dlt-T-63-3352")]
     assert result["decision"] == "LLM_REQUIRED"
     assert result["action"] == "DATA_FIX_REQUIRED"
 
@@ -232,7 +241,7 @@ def test_contradiction_overrides_the_cache_and_leads_the_casebook(monkeypatch):
     assert result["decision"] == "LLM_REQUIRED", "the cache must not win here"
     assert len(calls) == 2
 
-    casebook = case_storage.get_dlt_storage().load("dlt-T-63-3353")
+    casebook = stored("dlt-T-63-3353")
     assert casebook["finding"]["discrepancy"]
     assert casebook["evidence"]["unexplained_exceptions"]
 
@@ -247,7 +256,7 @@ def test_synthesis_failure_yields_a_manual_review_case(monkeypatch):
     result = analyze_dlt(message())
     assert result["action"] == "NEEDS_MANUAL_REVIEW"
 
-    casebook = case_storage.get_dlt_storage().load("dlt-T-63-3352")
+    casebook = stored("dlt-T-63-3352")
     assert casebook["provenance"]["source"] == "failed_synthesis"
     assert casebook["finding"]["parse_error"]
 
@@ -337,7 +346,7 @@ def test_casebook_carries_provenance_and_evidence(monkeypatch):
               "[UID_ORIGIN_TRACKER_DATA_NOT_FOUND] absent")
 
     analyze_dlt(message())
-    casebook = case_storage.get_dlt_storage().load("dlt-T-63-3352")
+    casebook = stored("dlt-T-63-3352")
 
     assert casebook["schema_version"] == dlt_routes.DLT_CASEBOOK_SCHEMA_VERSION
     assert casebook["source"]["consumer_group"] == "enu-biodedup-cg"
@@ -360,7 +369,7 @@ def test_no_path_writes_a_final_recommendation(monkeypatch):
               "[UID_ORIGIN_TRACKER_DATA_NOT_FOUND] absent")
     analyze_dlt(message())
 
-    casebook = case_storage.get_dlt_storage().load("dlt-T-63-3352")
+    casebook = stored("dlt-T-63-3352")
     assert casebook["provenance"]["recommendation_state"] == groups.STATE_DRAFT
 
     fingerprint = casebook["failure"]["fingerprint"]

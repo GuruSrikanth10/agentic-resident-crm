@@ -18,6 +18,24 @@ logger = get_logger(__name__)
 analysis_topic = get_required_env("PACKET_ANALYSIS_TOPIC_NAME", "packet-analysis-queue")
 brokers = _brokers()
 
+#: How long to wait for the broker's answer once `flush()` has returned. The
+#: record has been sent by then, so this only reads the outcome.
+CONFIRM_TIMEOUT_SECONDS = 10
+
+
+def _send_confirmed(producer, topic: str, message) -> None:
+    """Send one record and raise unless the broker accepted it.
+
+    `flush` waits for a send to finish but does not say how it ended: a
+    record the broker refused -- too large, or too few in-sync replicas for
+    `acks="all"` -- fails only on its future. Without reading it, a publish
+    that never landed returned True, the route answered 200, the consumer
+    committed, and the case was gone between the two stages.
+    """
+    future = producer.send(topic, message)
+    producer.flush()
+    future.get(timeout=CONFIRM_TIMEOUT_SECONDS)
+
 def publish_to_analysis_queue(payload: dict) -> bool:
     """Publish a fetched packet's payload for the slow consumer to pick up.
 
@@ -36,8 +54,7 @@ def publish_to_analysis_queue(payload: dict) -> bool:
 
     event_id = payload.get("eventId", "unknown") if isinstance(payload, dict) else "unknown"
 
-    producer.send(analysis_topic, payload)
-    producer.flush()
+    _send_confirmed(producer, analysis_topic, payload)
     logger.info("Published to analysis queue", event_id=event_id, topic=analysis_topic)
     return True
 
@@ -73,7 +90,6 @@ def publish_to_dlt_analysis_queue(message: dict) -> bool:
         raise RuntimeError("DLT analysis-queue producer is not available")
 
     case_id = message.get("case_id", "unknown") if isinstance(message, dict) else "unknown"
-    producer.send(topic, message)
-    producer.flush()
+    _send_confirmed(producer, topic, message)
     logger.info("Published to DLT analysis queue", case_id=case_id, topic=topic)
     return True

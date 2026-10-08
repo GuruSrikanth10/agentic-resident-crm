@@ -444,7 +444,9 @@ def test_a_dlt_case_is_one_trace_of_its_nodes(exported, monkeypatch):
             MagicMock(verdict=MagicMock(value="CORROBORATED"), reason="", unexplained=()), "")
     finally:
         orchestrator.reset_agent_cache()
-    assert error is None and result == finding
+    # The lane stamps the Reviewer's verdict on the finding (reviewer_approved).
+    assert error is None
+    assert result == finding.model_copy(update={"reviewer_approved": True})
 
     spans = exported()
     (root,) = _named(spans, "analyze-dlt")

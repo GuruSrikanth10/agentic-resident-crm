@@ -31,9 +31,13 @@ Last-writer-wins on `recommendation.json` is correct here rather than merely
 tolerated. The finding is cached against a *fingerprint* and re-served to
 every later packet with the same stack trace, so it must already be free of
 packet-specific detail -- which means any two concurrent investigations of one
-fingerprint produce equally valid answers, and keeping either is fine. The
-record carries `by_case_id` and `written_at` so an operator can still see
-which case produced the stored text.
+fingerprint produce equally valid answers, and keeping either is fine. That
+holds only for findings that describe the failure mode: one reasoned from a
+CONTRADICTED or PARTIAL verdict explains one occurrence's discrepancy, and the
+analysis lane does not cache it (`groups.has_usable_recommendation` also
+refuses one cached before that rule). The record carries `by_case_id`,
+`corroboration` and `written_at` so an operator can still see which case
+produced the stored text, and under what verdict.
 
 Cost: every object under `occurrences/` and `code_checks/` is written
 create-only and never modified, so each is fetched at most once per process
@@ -241,13 +245,21 @@ def record_occurrence(fingerprint: str,
 
 
 def attach_recommendation(fingerprint: str, recommendation: dict,
-                          state: str, by_case_id: Optional[str] = None) -> dict:
-    """Cache the finding this fingerprint's investigation produced."""
+                          state: str, by_case_id: Optional[str] = None,
+                          corroboration: Optional[str] = None) -> dict:
+    """Cache the finding this fingerprint's investigation produced.
+
+    `corroboration` is the verdict the finding was reasoned under, kept with
+    it so a finding that explained one occurrence's discrepancy can be told
+    apart from one that describes the failure mode (`groups.
+    has_usable_recommendation`).
+    """
     storage = get_group_storage()
     storage.save(fingerprint, {
         "recommendation": recommendation,
         "recommendation_state": state,
         "by_case_id": by_case_id,
+        "corroboration": corroboration,
         "written_at": time.time(),
     }, filename=RECOMMENDATION_FILENAME)
     invalidate(fingerprint, storage)
@@ -396,6 +408,7 @@ def load_group(fingerprint: str) -> Optional[dict]:
         "recommendation": recommendation.get("recommendation"),
         "recommendation_state": recommendation.get("recommendation_state", "none"),
         "recommendation_by_case_id": recommendation.get("by_case_id"),
+        "recommendation_corroboration": recommendation.get("corroboration"),
         "corroboration_history": corroboration_history,
         "code_check": code_check.get("code_check"),
         "code_check_history": code_check_history,

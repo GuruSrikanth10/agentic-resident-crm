@@ -934,7 +934,7 @@ def resolve_dlt(payload, *, consumer_group: Optional[str] = None,
     4. the failure site's first application frame claimed by any pack's
        `dlt.java_packages`, longest prefix first;
     5. `sourceTopic`, against `match.source_topics`;
-    6. the reason code -- the payload's, else the one the trace carries --
+    6. the reason code -- the one the trace carries, else the payload's --
        when exactly one documentation file documents it.
 
     Every later step that names exactly one other service is recorded in
@@ -950,8 +950,23 @@ def resolve_dlt(payload, *, consumer_group: Optional[str] = None,
     stage = _text(flow.get("stage"))
     sub_stage = _text(flow.get("subStage"))
     topic = _text(payload.get("sourceTopic"))
-    code = _reason_code_of(payload) or _text(business_code)
     package_services, package_frame = registry.by_java_package(frames)
+
+    # The trace's business code is what the failing code threw. The payload's
+    # came first, and under the AUDIT contract a dead-lettered record's
+    # payload carries a code describing the dead-lettering itself --
+    # `UNHANDLED_EXCEPTION` in the 2026-09-29 sample -- which shadowed the
+    # one that names the failure. The first code any documentation file
+    # documents is the one this step weighs; a code documented by several
+    # services still decides nothing.
+    codes = tuple(dict.fromkeys(
+        code for code in (_text(business_code), _reason_code_of(payload)) if code))
+    code, documented_by = (codes[0] if codes else None), ()
+    for option in codes:
+        documented_by = _documented_by(option, registry, docs_root)
+        if documented_by:
+            code = option
+            break
 
     steps = [
         (SOURCE_CONSUMER_GROUP, group,
@@ -963,7 +978,7 @@ def resolve_dlt(payload, *, consumer_group: Optional[str] = None,
          registry.by_original_topic(origin) if origin else []),
         (SOURCE_JAVA_PACKAGE, package_frame, package_services),
         (SOURCE_SOURCE_TOPIC, topic, registry.by_topic(topic) if topic else []),
-        (SOURCE_REASON_CODE_DOCS, code, list(_documented_by(code, registry, docs_root))),
+        (SOURCE_REASON_CODE_DOCS, code, list(documented_by)),
     ]
 
     candidate, source, matched, conflict = None, SOURCE_NONE, None, {}

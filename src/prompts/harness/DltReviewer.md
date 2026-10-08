@@ -59,6 +59,20 @@ lacking log citations when no logs were available.
    record was absent"), not the values ("3 items, item abc-123 was missing").
    The recommendation must be actionable for any packet with this fingerprint.
 
+## STEP 4 — Approve a sound investigation
+
+Approve when the investigation is *sound*, not when it is perfect: it states
+what the exception chain declares and where it fired, handles the
+corroboration verdict as error 4 above describes, grounds every claim in the
+stack trace, a cited document or a log line, and says plainly where the
+evidence runs out.
+
+Do NOT reject for style, length, phrasing or ordering; for omitting a detail
+that would not change the conclusion; for declining to name a cause the
+evidence does not establish; or for lacking log citations when no logs were
+available. If you cannot name a specific claim that is wrong or unsupported,
+approve.
+
 CRITICAL: You MUST write your output to EXACTLY this file path:
   {{output_path}}
 Do NOT write to any other filename.

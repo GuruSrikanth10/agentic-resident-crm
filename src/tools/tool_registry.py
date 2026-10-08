@@ -498,6 +498,22 @@ def fetch_elastic_logs(event_id: str) -> Optional[str]:
     """
     return fetch_logs_for(event_id)
 
+#: How every successful outcome of `queue_for_replay` begins. The tool answers
+#: in text because an agent reads it, and it reports a failure as text rather
+#: than raising -- so a Python caller that took "it returned" to mean "it was
+#: queued" recorded every failed replay as a queued one (the DLT lane's
+#: casebooks, its metrics and `dlt_report --code-check-accuracy` all did).
+#: `replay_succeeded` is how such a caller reads the outcome instead. Every
+#: success message below is built on this prefix, and no failure message is.
+REPLAY_OK_PREFIX = "Successfully"
+
+
+def replay_succeeded(result) -> bool:
+    """Whether a `queue_for_replay` result reports the packet replayed or
+    queued for approval."""
+    return isinstance(result, str) and result.startswith(REPLAY_OK_PREFIX)
+
+
 @tool
 def queue_for_replay(id: str, idType: str, priority: int, operatorName: str, category: str, fromSedaStart: bool) -> str:
     """Queue a packet for replay through the OIS pipeline."""
@@ -545,7 +561,7 @@ def queue_for_replay(id: str, idType: str, priority: int, operatorName: str, cat
             headers = {"X-API-Key": ois_api_key} if ois_api_key else {}
             response = requests.post(endpoint, json=payload, headers=headers, timeout=10)
             response.raise_for_status()
-            return f"Successfully auto-replayed packet {id}: {response.text}"
+            return f"{REPLAY_OK_PREFIX} auto-replayed packet {id}: {response.text}"
         except Exception as e:
             logger.error("Auto-replay failed", packet_id=id, error=f"{type(e).__name__}: {e}")
             return f"Failed to replay packet {id} directly: {e}"
@@ -598,7 +614,7 @@ def _queue_pending_replay(packet_id: str, payload: dict) -> str:
     try:
         get_scoped_storage(PENDING_REPLAY_ROOT).save(
             entry_id, entry, filename=PENDING_REPLAY_FILENAME)
-        return f"Successfully queued packet {packet_id} for human review before replay."
+        return f"{REPLAY_OK_PREFIX} queued packet {packet_id} for human review before replay."
     except Exception as e:
         logger.error("Failed to queue replay", packet_id=packet_id,
                      error=f"{type(e).__name__}: {e}")

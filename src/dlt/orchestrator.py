@@ -26,6 +26,7 @@ reads one packet's data would put that packet's facts into it. Should a tool
 be given to them, what it returns joins the evidence block below, so the
 Reviewer checks against it like any other evidence.
 """
+import functools
 import json
 import os
 import threading
@@ -35,7 +36,7 @@ from langchain_core.messages import HumanMessage
 from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
 
-from src.core import prompt_composer
+from src.core import prompt_composer, run_control
 from src.core.agent_factory import build_agent
 from src.dlt.corroborate import Corroboration
 from src.tools import mcp_client
@@ -283,6 +284,9 @@ def _build_dlt_agent():
                 for _ in range(60):
                     if docs_loader.corpus_available():
                         break
+                    # A minute is long enough for the run to be abandoned,
+                    # and the harness task after it is longer still.
+                    run_control.check()
                     import time
                     time.sleep(1)
 
@@ -423,8 +427,9 @@ def _build_dlt_agent():
         if retries >= limit:
             # Synthesise the best available findings rather than dropping the
             # case: an unreviewed narrative with a capped confidence is more
-            # useful than nothing, and the casebook records that it was never
-            # approved.
+            # useful than nothing. The synthesis node records that it was
+            # never approved (`reviewer_approved`), and the confidence policy
+            # caps it and labels it `unreviewed`, which auto-replay refuses.
             logger.bind(case_id=state.get("case_id")).warning(
                 "DLT reviewer never approved; synthesising anyway",
                 retries=retries)
@@ -435,8 +440,27 @@ def _build_dlt_agent():
         log = logger.bind(case_id=state.get("case_id"))
         log.info("DLT synthesis started", state="DLT_SYNTHESISING")
 
-        prompt = (f"Convert these approved findings into the JSON contract.\n\n"
+        # Read off the last verdict rather than carried from check_approval:
+        # a conditional edge cannot write state, and the last verdict is the
+        # one the findings below were judged by.
+        approved = is_approved(state.get("reviewer_feedback", ""))
+
+        # The verdict travels with the findings because the contract's
+        # `discrepancy` and the confidence guidance both turn on it, and the
+        # findings alone may not say it. The code enforces both anyway
+        # (apply_dlt_confidence_policy); this is so the model's answer is
+        # right before it has to be corrected.
+        corroboration = state.get("corroboration") or {}
+        prompt = (f"Convert these findings into the JSON contract.\n\n"
+                  f"### Corroboration verdict\n"
+                  f"{corroboration.get('verdict')}: {corroboration.get('reason')}\n\n"
+                  f"### Findings\n"
                   f"{state.get('investigation', '')}\n")
+
+        def stamped(finding: DltFinding) -> dict:
+            # Whatever the reply said about its own review is overwritten.
+            return finding.model_copy(
+                update={"reviewer_approved": approved}).model_dump()
 
         @llm_breaker
         @retry_transient
@@ -454,7 +478,7 @@ def _build_dlt_agent():
 
         finding, error = parse_finding(raw)
         if finding is not None:
-            return {"finding": finding.model_dump(), "parse_error": None}
+            return {"finding": stamped(finding), "parse_error": None}
 
         # One repair attempt, mirroring the rejection path.
         log.warning("DLT synthesis output failed the contract; repairing",
@@ -475,10 +499,26 @@ def _build_dlt_agent():
         metrics.record_llm_usage("dlt_synthesis_repair", repaired)
         finding, error = parse_finding(repaired["messages"][-1].content)
         if finding is not None:
-            return {"finding": finding.model_dump(), "parse_error": None}
+            return {"finding": stamped(finding), "parse_error": None}
 
         log.error("DLT synthesis failed the contract after repair", error=error)
         return {"finding": None, "parse_error": error}
+
+    def stoppable(node):
+        """`node`, refusing to start once its run has been abandoned.
+
+        The agents' own middleware stops them between model calls; this stops
+        the graph between nodes, which also covers the opencode harness path
+        that makes no model call through an agent (run_control). The same
+        guard the rejection graph has had since 2026-09-29: without it, a DLT
+        run the route had stopped waiting for went on through every retry and
+        synthesis in a worker the next case needed.
+        """
+        @functools.wraps(node)
+        def run(state: DltGraphState):
+            run_control.check()
+            return node(state)
+        return run
 
     def traced(name, node, as_type: tracing.ObservationType = "span"):
         """`node`, recorded as an observation in the case's trace. Tool
@@ -486,10 +526,12 @@ def _build_dlt_agent():
         return tracing.node(name, node, as_type=as_type, output=lambda update: {
             key: value for key, value in (update or {}).items() if key != "tool_evidence"})
 
+    # Cancellation is checked before the node's span opens, as in the
+    # rejection graph: an abandoned run starts no node and records none.
     graph = StateGraph(DltGraphState)
-    graph.add_node("investigate", traced("investigate", investigator_node))
-    graph.add_node("review", traced("review", reviewer_node, "evaluator"))
-    graph.add_node("synthesise", traced("synthesize", synthesis_node))
+    graph.add_node("investigate", stoppable(traced("investigate", investigator_node)))
+    graph.add_node("review", stoppable(traced("review", reviewer_node, "evaluator")))
+    graph.add_node("synthesise", stoppable(traced("synthesize", synthesis_node)))
 
     graph.add_edge(START, "investigate")
     graph.add_edge("investigate", "review")

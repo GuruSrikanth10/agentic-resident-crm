@@ -196,7 +196,8 @@ def _error_lines(logs: str) -> list:
 def corroborate(logs: Optional[str],
                 root_fqcn: Optional[str],
                 business_code: Optional[str] = None,
-                frames: Optional[Sequence] = None) -> Corroboration:
+                frames: Optional[Sequence] = None,
+                chain: Optional[Sequence] = None) -> Corroboration:
     """Compare a declared root cause against the fetched logs.
 
     Matching is deliberately generous about *how* the declared root appears --
@@ -211,6 +212,16 @@ def corroborate(logs: Optional[str],
     error-level and carrying this packet's identifier -- the two axes tracked
     on `ScannedLine`. What the weaker lines held is reported rather than
     discarded, so a human can see what was set aside and why.
+
+    `chain` is the FQCN of every link of the declared exception chain, and
+    none of them is unexplained: they are the trace itself. Spring logs a
+    failed listener as its wrapper -- `ListenerExecutionFailedException:
+    Listener failed; ... BusinessException: [CODE] ...`, the very shape of the
+    `kafka_exception-message` header -- so the wrapper sits on this packet's
+    own ERROR line. Counted as an exception the trace fails to explain, it
+    turned an ordinary corroboration into PARTIAL: an LLM call on every
+    occurrence, never served from the cache. Matched by full FQCN only, so a
+    same-named class from another package is still a different exception.
     """
     if not logs or not logs.strip():
         return Corroboration(Verdict.UNVERIFIABLE, "no logs were fetched",
@@ -277,10 +288,15 @@ def corroborate(logs: Optional[str],
         if frame and frame.rsplit(".", 1)[-1] and frame.rsplit(".", 1)[-1] in haystack
     )
 
+    declared = {fqcn for fqcn in (chain or ()) if fqcn}
+
+    def _explained(fqcn: str) -> bool:
+        return fqcn == root_fqcn or _simple_name(fqcn) == simple or fqcn in declared
+
     def _unexplained_in(text: str) -> tuple:
         return tuple(sorted(
             fqcn for fqcn in set(_FQCN_IN_TEXT.findall(text))
-            if fqcn != root_fqcn and _simple_name(fqcn) != simple
+            if not _explained(fqcn)
         ))
 
     seen_fqcns = set(_FQCN_IN_TEXT.findall(accusable))
@@ -309,6 +325,10 @@ def corroborate(logs: Optional[str],
         "matched_on": matched_on,
         "frame_hits": list(frame_hits),
         "exceptions_in_logs": sorted(seen_fqcns),
+        # Links of the declared chain that turned up on this packet's own
+        # error lines: seen, and explained by the trace rather than against it.
+        "exceptions_in_declared_chain": sorted(
+            fqcn for fqcn in seen_fqcns if fqcn in declared and fqcn != root_fqcn),
         # What the narrowing dropped, and how much of it there was.
         "exceptions_on_context_lines": list(set_aside["exceptions_on_context_lines"]),
         "exceptions_on_warn_lines": list(set_aside["exceptions_on_warn_lines"]),

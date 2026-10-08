@@ -210,10 +210,11 @@ def cmd_parked() -> None:
               "has\nnot deployed yet, and leave when the pods reach its version.")
         return
 
-    print(f"{'REF':<40} {'WAITING FOR':<22} {'PARKED':<17} REPO")
-    print("-" * 110)
+    print(f"{'CASE':<40} {'REF':<38} {'WAITING FOR':<22} {'PARKED':<17} REPO")
+    print("-" * 150)
     for entry in entries:
-        print(f"{(entry.get('ref_id') or '-')[:39]:<40} "
+        print(f"{(entry.get('case_id') or '-')[:39]:<40} "
+              f"{(entry.get('ref_id') or '-')[:37]:<38} "
               f"{(entry.get('required_version') or '-')[:21]:<22} "
               f"{_when(entry.get('parked_at')):<17} "
               f"{(entry.get('repo') or '-')[:30]}")

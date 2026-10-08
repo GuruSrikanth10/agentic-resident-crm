@@ -23,6 +23,7 @@ from src.api.dlt_routes import (
 )
 from src.dlt import case_storage, deployed
 from src.dlt.headers import parse_headers
+from src.dlt.identity import storage_key
 from src.dlt.window import derive_window
 from src.models.dlt_schemas import DltMessage
 
@@ -181,7 +182,8 @@ def test_pii_in_a_stacktrace_is_redacted_but_the_ref_id_survives():
     )
     fetch_dlt_logs(message(ref_id="REF-1", headers=headers))
 
-    trace = case_storage.get_dlt_storage().load_artifact("dlt-T-63-3352", TRACE_ARTIFACT)
+    trace = case_storage.get_dlt_storage().load_artifact(
+        storage_key("REF-1", "dlt-T-63-3352"), TRACE_ARTIFACT)
     assert "123456789012" not in trace
     assert "[REDACTED:AADHAAR]" in trace
     assert "REF-1" in trace, "the correlation id must survive scrubbing"
@@ -216,8 +218,10 @@ def test_window_too_old_skips_the_fetch(monkeypatch):
     assert called == [], "no fetch may be issued"
 
 
-def test_fetch_searches_on_ref_id_and_persists_under_case_id(monkeypatch):
-    """DLT_PLAN.md 5.5 -- the two identifiers are deliberately different."""
+def test_fetch_searches_on_ref_id_and_persists_under_the_storage_key(monkeypatch):
+    """DLT_PLAN.md 5.5 -- the two identifiers are deliberately different. The
+    persisted key is the record's storage key, `<refId>__<digest of case_id>`,
+    since MULTI_SERVICE_PLAN.md Phase 8."""
     monkeypatch.setenv("DLT_MAX_LOG_AGE_SECONDS", "999999999")
     captured = {}
 
@@ -231,7 +235,7 @@ def test_fetch_searches_on_ref_id_and_persists_under_case_id(monkeypatch):
     result = fetch_dlt_logs(message(ref_id="REF-99"))
 
     assert captured["search_id"] == "REF-99"
-    assert captured["storage_key"] == result["case_id"]
+    assert captured["storage_key"] == storage_key("REF-99", result["case_id"])
     assert captured["window"] is not None
     assert captured["storage"] is case_storage.get_dlt_storage()
 
@@ -249,7 +253,8 @@ def test_log_fetch_failure_degrades_rather_than_losing_the_case(monkeypatch):
     assert result["status"] == "queued_for_analysis"
 
     storage = case_storage.get_dlt_storage()
-    assert storage.artifact_exists(result["case_id"], TRACE_ARTIFACT), \
+    assert storage.artifact_exists(storage_key("REF-1", result["case_id"]),
+                                   TRACE_ARTIFACT), \
         "the stacktrace was already persisted and must survive"
 
 
@@ -261,8 +266,9 @@ def test_status_advances_to_logs_fetched():
 
 
 def test_terminal_case_short_circuits():
-    case_storage.get_dlt_storage().save_terminal("dlt-T-63-3352", {
-        "packet_metadata": {"eid": "dlt-T-63-3352"},
+    key = storage_key("REF-1", "dlt-T-63-3352")
+    case_storage.get_dlt_storage().save_terminal(key, {
+        "packet_metadata": {"eid": key},
         "packet_status": {"status": "NEEDS_MANUAL_REVIEW"},
     })
     assert fetch_dlt_logs(message())["status"] == "already_processed"

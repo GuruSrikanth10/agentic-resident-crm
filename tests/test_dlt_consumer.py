@@ -21,6 +21,8 @@ from types import SimpleNamespace
 import pytest
 
 from src.dlt import case_storage
+from src.dlt.case_storage import DLT_CASEBOOK_SCHEMA_VERSION
+from src.dlt.identity import storage_key
 from src.utils.message_adapters import DltAdapter, RejectionAdapter, for_role
 
 REFERENCE_HEADERS = [
@@ -242,10 +244,15 @@ def test_dlt_identity_and_timeout_casebook():
     body = adapter.parse(kafka_message(
         json.dumps({"refId": "R9"}).encode("utf-8"), REFERENCE_HEADERS)).body
 
-    assert adapter.identity_of(body) == body["case_id"]
+    # One key per record, led by the refId (MULTI_SERVICE_PLAN.md Phase 8).
+    assert adapter.identity_of(body) == storage_key("R9", body["case_id"])
     casebook = adapter.timeout_casebook(body)
     assert casebook["packet_status"]["status"] == "FAILED_TIMEOUT"
-    assert casebook["packet_metadata"]["ref_id"] == "R9"
+    # A DLT casebook in the DLT schema, found by case id and by refId.
+    assert casebook["schema_version"] == DLT_CASEBOOK_SCHEMA_VERSION
+    assert casebook["case_id"] == body["case_id"]
+    assert casebook["packet"]["ref_id"] == "R9"
+    assert casebook["finding"]["action"] == "NEEDS_MANUAL_REVIEW"
 
 
 # ======================================================================

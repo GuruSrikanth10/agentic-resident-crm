@@ -1928,7 +1928,7 @@ exactly one service decides:
 4. the failure site's first application frame that any pack's
    `dlt.java_packages` claims, longest prefix first;
 5. `sourceTopic`;
-6. the reason code -- the payload's, else the trace's business code -- when
+6. the reason code -- the trace's business code, else the payload's -- when
    exactly one documentation file documents it.
 
 Every later step that names exactly one other service is recorded in
@@ -1989,7 +1989,7 @@ services sharing a failure mode through a common library never share a group.
 Every enu-biometric and unresolved fingerprint, and the groups and
 recommendations under them, is unchanged.
 
-**The casebook** is schema 1.3. It adds:
+**The casebook** is schema 1.3 (1.4 since 2026-10-06; section 4.4 point 9). It adds:
 
 - `packet.event_id`, `packet.service` and `packet.service_resolution`;
 - `failure.fingerprint_service`;
@@ -2204,7 +2204,7 @@ To ensure zero hallucinations, `routes.py` deterministically extracts static met
   - `resolution.shadow`: present only in `RUNBOOK_MODE=shadow`, carrying what the runbook would have decided.
   - On a contract breach the status is `FAILED_SYNTHESIS_PARSE` and `resolution` additionally carries `parse_error` and a 2000-char `raw_output`, with `action` set explicitly to `MANUAL_REVIEW` rather than left null.
 - **resolution_outcome** (optional; written by `POST /outcome/{event_id}`, not by the pipeline) -- the operator's ground-truth verdict (`CORRECT`/`INCORRECT`/`PARTIAL`), which is what `accuracy_report` scores against.
-- **schema_version** (injected by the storage layer, currently `"1.2"`; `CASEBOOK_SCHEMA_VERSION` in `src/storage/base.py`). `1.1` -> `1.2` added the optional `resolution_outcome` block and is purely additive: a 1.1 casebook is a valid 1.2 casebook with no outcome recorded yet. The DLT casebook versions independently, at `"1.1"` (section 4.4 point 9).
+- **schema_version** (injected by the storage layer, currently `"1.2"`; `CASEBOOK_SCHEMA_VERSION` in `src/storage/base.py`). `1.1` -> `1.2` added the optional `resolution_outcome` block and is purely additive: a 1.1 casebook is a valid 1.2 casebook with no outcome recorded yet. The DLT casebook versions independently, at `"1.4"` (section 4.4 point 9).
 
 `packet_metadata.is_mbu` and `is_child` are emitted as `null` because the
 mapping is not derivable from the payload alone. `update_type` carries the raw
@@ -2767,14 +2767,24 @@ Ten things are worth knowing without reading the whole plan:
    documentation-reasoned findings could score higher (4.4.2), it had to
    become a rule. It is read off `ceilings_applied`, so parking -- whose
    entries are released later without re-entering the gate -- is covered too.
+   **Nor does a finding the Reviewer never approved** (`unreviewed` in
+   `ceilings_applied`), by the same reasoning. A replay is recorded as
+   `queued` only when `queue_for_replay` reported success
+   (`tool_registry.replay_succeeded`): the tool reports a failure as text
+   rather than raising, so "it returned" used to read as "it was queued".
 
-9. **The DLT casebook has its own schema version**, currently `"1.2"`
-   (`DLT_CASEBOOK_SCHEMA_VERSION`), independent of the rejection casebook's --
-   different schema, different lifecycle. `1.0` -> `1.1` added the
-   `code_check` and `parked` blocks; `1.1` -> `1.2` added
-   `provenance.group_state`, `provenance.single_flight` and
+9. **The DLT casebook has its own schema version**, currently `"1.4"`
+   (`DLT_CASEBOOK_SCHEMA_VERSION`, in `src/dlt/case_storage.py`), independent
+   of the rejection casebook's -- different schema, different lifecycle.
+   `1.0` -> `1.1` added the `code_check` and `parked` blocks; `1.1` -> `1.2`
+   added `provenance.group_state`, `provenance.single_flight` and
    `finding.per_code_violations`, and made `recommendation_state` report what
-   actually happened (4.4.2).
+   actually happened (4.4.2); `1.2` -> `1.3` added the service fields (section
+   3.2.3, "The DLT lane per service"); `1.3` -> `1.4` added
+   `finding.reviewer_approved` and the `per_occurrence` recommendation state,
+   made `finding.discrepancy` null unless the verdict was CONTRADICTED or
+   PARTIAL, and put both timeout casebooks in this schema (section 5, update
+   2026-10-06).
 
 10. **The replay precheck answers deployment, never relevance.** Before a
    packet is replayed, `code_check.py` asks whether the code at the failure
@@ -2965,7 +2975,12 @@ lose an increment, and a redelivered case is the same object. Objects under
 `occurrences/` and `code_checks/` never change once written, so each is
 fetched at most once per process. Last-writer-wins on the recommendation is
 correct because any two concurrent per-code findings for one fingerprint are
-equally valid. The old `group.json` is never written again and is folded in
+equally valid -- which holds only for findings that describe the failure
+mode. One reasoned from a CONTRADICTED or PARTIAL verdict explains a single
+occurrence's discrepancy, so it is not cached, and one cached before that
+rule is refused on read (`groups.describes_one_occurrence`); the verdict a
+recommendation was reasoned under is stored with it. The old `group.json` is
+never written again and is folded in
 on every read (count, members, histories, recommendation), so switching
 stores loses nothing, and rolling back to `DLT_GROUP_STORE=v1` and forward
 again stays consistent. `update_json` itself now detects an endpoint that
@@ -3001,15 +3016,19 @@ an `asyncio.Lock`. The first one investigates; the rest wait, re-read the
 group and are served the result. The re-read happens whether or not a request
 waited, because its decision was taken before the gate. It is asyncio rather
 than threading because the gate is held across an `await`, and a thread lock
-there would block the event loop. The wait is bounded by the analysis budget,
-after which a waiter investigates anyway. The gate is per process only; a
-burst split across N replicas can still cost up to N investigations.
+there would block the event loop. The wait is bounded by what is left of the
+waiter's own analysis budget, which runs from the request's arrival; a waiter
+that gives up investigates with whatever remains, and one with nothing left
+records FAILED_TIMEOUT rather than starting a run it cannot finish. The gate
+is per process only; a burst split across N replicas can still cost up to N
+investigations.
 
 **Casebooks report what happened, not what was intended.**
 `recommendation_state` is `draft` only when the recommendation was actually
 cached. It is `unpersisted` when that write failed, `withheld` when the
-per-code check kept the finding out of the cache, and `none` for canned
-findings. It used to say `draft` unconditionally. `group_state` separates
+per-code check kept the finding out of the cache, `per_occurrence` when the
+finding explained this occurrence's discrepancy and so was not cached, and
+`none` for canned findings. It used to say `draft` unconditionally. `group_state` separates
 "counted" from "this case's occurrence was not recorded" from "the group
 could not be read", so a null `group_occurrences` is never mistaken for a
 first occurrence. `single_flight` records leader / reused / waited_then_ran /
@@ -3053,6 +3072,91 @@ first means group state is not accumulating.
 
 This section records where the running code diverges from the design intent above.
 It is maintained deliberately so the document stays a truthful source of truth.
+
+**Update 2026-10-06:** An end-to-end review of the DLT lane, and its fixes.
+`tests/test_dlt_review_fixes.py` pins each one. What to know:
+
+1. **The DLT tests had been failing since 2026-09-09.** 45 of them still
+   read and wrote cases under the `case_id`, which storage stopped using
+   when it moved to the refId and then, in Phase 8, to `<refId>__<digest>`.
+   They are updated, so the timeout, late-result, parking and casebook
+   tests exercise the current code again. Two rejection-lane tests
+   (`test_audit_phase1.py::test_unparseable_output_preserves_the_evidence`,
+   `test_phase1_fixes.py::test_routes_falls_back_to_truncated_logs_when_s3_unset`)
+   fail for reasons of their own, and `test_rejection_docs_pipeline.py`
+   hangs on macOS; none of the three was touched.
+2. **A finding reasoned from a CONTRADICTED or PARTIAL verdict is no longer
+   cached.** It explains one occurrence, and as the group's recommendation it
+   was served -- discrepancy and action included -- to later occurrences
+   whose logs agreed with their trace: a mis-cast's REDRIVE_AFTER_RECOVERY,
+   reused at 0.57, was auto-replayable there. Its casebook records
+   `recommendation_state: per_occurrence`. A recommendation cached that way
+   before this change is refused on read, so its fingerprint re-investigates
+   once and is overwritten -- one extra LLM call per affected group. A reused
+   finding never carries a discrepancy, and the confidence policy now
+   enforces the contract's rule that only a disagreeing verdict may.
+3. **The declared exception chain explains itself.** Corroboration counted
+   every exception on this packet's error lines other than the root as
+   unexplained, including the Spring wrapper the trace itself opens with
+   (`ListenerExecutionFailedException: Listener failed; ...BusinessException:
+   [CODE]`). On the reference trace that made a corroborating log PARTIAL:
+   an LLM call on every occurrence, never served from the cache. Expect
+   fewer PARTIAL verdicts in `corroboration_history` from this date.
+4. **A timed-out DLT run is cancelled** (`run_control`, the rejection lane's
+   fix of 2026-09-29), and the graph refuses to start a node once its run is
+   abandoned. **The server-side budget is end to end**: it runs from the
+   request's arrival, as the consumer's clock does, so time spent on group
+   writes, the Kubernetes read, the code check and a single-flight wait
+   counts. A case with no budget left when the LLM would start records
+   FAILED_TIMEOUT without starting it.
+5. **The DLT Reviewer prompt gained the rejection Reviewer's output contract**
+   (first line `APPROVED` or `REJECTED`), when to approve, and what not to
+   reject for; the harness Reviewer template gained the last two. The
+   prompt fingerprint moves for every pack, since every pack's covers the DLT
+   prompts: compare accuracy per period across this date. **Whether the
+   Reviewer approved is recorded** (`finding.reviewer_approved`); a finding
+   synthesised after its last rejection is capped at
+   `DLT_UNREVIEWED_CEILING` (0.5), labelled `unreviewed`, and never
+   auto-replayed. It is still cached, as before. Synthesis is now given the
+   corroboration verdict.
+6. **What the LLM reads is redacted.** The analysis re-derived the failure
+   from the raw headers, so exception messages reached the prompt, and the
+   harness case files, unredacted.
+7. **The replay precheck's failure time is the log window's anchor**, never a
+   backoff timestamp still in the future.
+8. **Replay.** `queued` is true only when `queue_for_replay` reported success.
+   The "no refId" guard is reachable from `/analyze-dlt` again; the case key
+   is never sent to OIS. **Parking** is keyed on the case id with the refId
+   beside it (Phase 8 had made a release replay the storage key), is
+   create-only so a released case is never re-queued, marks entries with
+   plain writes (an If-Match-refusing store had made every release repeat),
+   and leaves an entry parked when its replay was not queued.
+   `release_parked_replays` reports those as `failed`.
+9. **The DLT consumer takes a list of topics** (`DLT_CONSUMER_TOPIC_NAME`,
+   comma-separated), and boot refuses one naming this system's own queues.
+   The rejection lane skips every ON_HOLD record on the understanding that
+   this consumer analyses it, so the list should hold every service's
+   dead-letter topic. **A deployment naming one topic still reads only that
+   one.**
+10. **The consumer's own timeout casebook is a DLT casebook**: DLT schema,
+    `case_id`, `packet.ref_id`. It was rejection-shaped and stamped with the
+    rejection schema version. The API's names the case id rather than the
+    storage key.
+11. **A dead-lettered record's reason-code step weighs the trace's business
+    code before the payload's**, which under the AUDIT contract is the
+    generic `UNHANDLED_EXCEPTION`.
+12. **`publish_to_dlq` raises when the message did not get there**, as every
+    consumer path calling it was written to expect: the offset is held for
+    redelivery instead of being retired past a message that exists nowhere.
+    The API catches it and answers as before. Both analysis-queue publishers
+    now read the broker's answer, not only `flush()`. **Nothing consumes
+    `rejected-packets-dlq` yet**, and a DLT record that reaches it is not
+    analysed by any lane.
+13. **Not changed:** enu-biometric's `dlt.consumer_groups` is still empty,
+    although the reference record names `enu-biodedup-cg`. Records are placed
+    by its Java package today; adding the group moves the pack's digest, and
+    with it every enu-biometric prompt fingerprint, so it waits on the
+    group's ownership being confirmed.
 
 **Update 2026-09-28 (g):** Phase 8 of `MULTI_SERVICE_PLAN.md` -- the DLT lane
 per service (section 3.2.3, "The DLT lane per service"). What to know:
