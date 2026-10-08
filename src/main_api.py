@@ -247,6 +247,11 @@ async def lifespan(app: FastAPI):
     # Last: the drain above may still have been calling tools.
     mcp_server.stop_local_server()
 
+    # After the drain, so the traces of the investigations it let finish are
+    # sent rather than dropped with the process (utils/tracing).
+    from src.utils import tracing
+    await asyncio.to_thread(tracing.shutdown)
+
 app = FastAPI(
     title="Agentic Resident CRM API",
     description="AI-driven, self-learning service to ingest, analyze, and resolve rejected packets within the UIDAI ecosystem.",

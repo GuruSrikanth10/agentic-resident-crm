@@ -51,6 +51,7 @@ from langchain.agents.middleware import (
 
 from src.core.run_control import CancellationMiddleware
 from src.tools import mcp_client
+from src.utils import tracing
 from src.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -143,6 +144,8 @@ def build_agent(role: str, model, system_prompt: str, tools: Sequence = (), *,
         "tools": registered,
         "middleware": _limits(),
     }
+    # The run name is what a Langfuse trace calls the agent (utils/tracing):
+    # `investigator-agent`, typed as an agent there. `name` stays the role.
     agent = create_deep_agent(
         model=model,
         tools=[*explicit, *registered],
@@ -150,7 +153,7 @@ def build_agent(role: str, model, system_prompt: str, tools: Sequence = (), *,
         middleware=_limits(),
         subagents=[general_purpose],
         name=role,
-    )
+    ).with_config({"run_name": tracing.agent_name(role)})
     logger.info("Agent built", role=role, service_pack=pack,
                 explicit_tools=[tool.name for tool in explicit],
                 mcp_tools=[tool.name for tool in registered],

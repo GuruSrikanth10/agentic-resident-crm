@@ -49,6 +49,9 @@ filelock==3.32.2
 structlog==26.1.0
 # Optional: /metrics degrades to 501 and all counters no-op without it.
 prometheus-client==0.26.0
+# Langfuse tracing of the LLM lanes (src/utils/tracing.py). Imported only
+# while LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY are set.
+langfuse==4.17.0
 
 # --- Test ---
 pytest==9.1.1

@@ -701,6 +701,7 @@ agentic-resident-crm/
 │   ├── s3_fakes.py                 # S3 fakes that misbehave the way real S3-compatible stores do
 │   ├── manual_payload_demo.py      # Manual demo: parse a real rejection payload, print extracts
 │   ├── test_end_to_end.py          # End-to-end contract test (audit G22a, N4)
+│   ├── test_tracing.py             # Langfuse tracing: off is invisible; on, what is exported
 │   ├── test_fetch_analyze_split.py # Fetch/analyze consumer split (two topics, two consumers)
 │   ├── test_api_concurrency.py     # API concurrency (REMEDIATION_PLAN phase 2)
 │   ├── test_resilience.py          # Resilience / idempotency / DLQ regression tests
@@ -950,6 +951,7 @@ agentic-resident-crm/
 │       ├── message_adapters.py     # Per-role record handling: rejection payload vs DLT case
 │       ├── atomic.py               # Atomic file replace with retry (Windows os.replace)
 │       ├── metrics.py              # Counters for the DLT lane and LLM usage
+│       ├── tracing.py              # Langfuse tracing of the LLM lanes, masked (section 3.13)
 │       ├── llm_utils.py            # LLM factory (local OpenAI-compatible / Mistral / HF)
 │       ├── resilience.py           # tenacity retries + pybreaker circuit breakers
 │       ├── dlq_publisher.py        # Dead Letter Queue producer
@@ -2413,6 +2415,91 @@ lists the AUDIT one.
 
 `tests/test_kafka_audit_contract.py` guards the translation against the two
 captured samples in `tests/fixtures/audit/`.
+
+### 3.13 Langfuse tracing (`src/utils/tracing.py`)
+
+Off unless `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` are both set
+(`LANGFUSE_TRACING_ENABLED=false` switches it off without removing them). Off,
+it is invisible: every agent is invoked exactly as before, with no config
+argument, and the SDK (`langfuse==4.17.0`) is never imported. On, it can never
+fail a packet: a client that cannot start, a trace that cannot open or an
+unreachable server degrades to running untraced, with a warning in the log.
+
+**One trace per unit of LLM work.** `analyze-rejection` is one run of the
+rejection graph (`agent_orchestrator.traced_investigation`, which
+`routes._investigate_packet` wraps around the invoke so the trace opens on the
+`agent-invoke` worker -- a thread pool does not copy context variables);
+`analyze-dlt` is one run of the DLT analysis lane (`dlt/orchestrator.investigate`);
+`draft-runbook` is one draft in `build_runbooks.py`, which flushes before it
+exits. A rejection trace's session is the eventId and a DLT trace's the case
+key, so a packet resumed from a checkpoint, redelivered or replayed has all its
+runs side by side. Tags: `lane:rejection|dlt|runbooks`, `service:<service>`, and
+`pilot`. The rejection trace's `version` is the pack's prompt fingerprint
+(section 3.8), so a quality change can be put down to a prompt change; the
+release is `version.json` (or `LANGFUSE_RELEASE`), the environment `ENV` (or
+`LANGFUSE_TRACING_ENVIRONMENT`). The root's input is the packet's identifiers
+(eventId, reason code, enrolment type, stage, service, pack) and its output the
+validated resolution, how it was reached and how many reviews it took -- never
+the raw payload.
+
+```
+analyze-rejection (chain)
+  fetch-logs (retriever)
+  lookup-runbook (retriever)
+  investigate (span)                    once per attempt
+    investigator-agent (agent)          deep agent, via langfuse.langchain.CallbackHandler
+      model > ChatOpenAI (generation)   model, tokens, the tool calls it requested
+      tools > <tool> (tool)
+  review (evaluator)
+    reviewer-agent (agent)
+  synthesize (span)
+    synthesis-agent (agent)
+```
+
+The graph's nodes are spans of our own (`tracing.node`, applied with
+`stoppable` when the graph is built), recording each node's state update less
+the logs, messages, tool evidence and document text, which the agents' own
+inputs already carry. The handler is given only to the agents
+(`tracing.invoke(agent, request)` at every call site), never to the outer
+graph: there it would record the whole state -- logs included -- as the input of
+every node. Each deep agent's run name is `<role>-agent`
+(`agent_factory.build_agent`, `with_config(run_name=...)`; its `name` stays the
+role), which is what makes the handler type it as an `agent`. The deep agents'
+middleware hooks (`TodoListMiddleware.after_model` and the like) are dropped at
+export (`should_export_span`): each carried the full message history and nothing
+a reader needs. Summarization's hook is kept, since it can call the model.
+
+**The opencode harness.** opencode makes its model calls in its own process.
+`opencode_runner.run_task_json` records the task as the node's agent
+(`tracing.harness_task`), rebuilt live from the `--format json` events the
+runner already reads (`run_task(on_event=...)`): each step a
+`harness-model-call` generation (model without the provider prefix, so it
+compares with the direct path; input/output/cache tokens; cost; its text and
+the tool calls it requested as OpenAI-format `tool_calls`), and each tool call a
+`tool` observation beside it. A generation's input is what was new to the
+model in that step: the task instructions, then the previous step's tool
+results. A harness task that fails is marked ERROR, and the direct-path
+fallback appears after it in the same node. The Langfuse opencode plugin is not
+used: it would send prompts and tool output unmasked, as separate traces.
+
+**Masking.** Every attribute of every exported span goes through
+`tracing.mask_spans`, the SDK's `mask_otel_spans` hook, which applies the log
+pipeline's redaction (`log_pipeline/redaction.py`: Aadhaar, VID, mobile and
+e-mail patterns, `K8S_REDACT_EXTRA_PATTERNS`, and the personal-data JSON keys
+of `REDACT_JSON_KEYS`) -- always, whatever `K8S_REDACT_ENABLED` says. A JSON
+attribute (inputs, outputs, metadata) is parsed and walked: string leaves are
+redacted whole, a personal-data key's value is replaced, except a `name` in a
+message, tool call or tool definition, which is a tool's or agent's name. The
+trace's own session (eventId or case key) is allowlisted, as the log pipeline
+allowlists it. An attribute that cannot be masked is replaced by
+`[REDACTED:MASKING_FAILED]`, not sent. Langfuse must be self-hosted inside the
+network (`LANGFUSE_BASE_URL`): a cloud region would put resident packets'
+prompts outside it, masked or not.
+
+`tests/test_tracing.py` runs the real SDK against an in-memory exporter behind
+the same filter and masking hook, and asserts on what would leave the process:
+the tree, the types, the session, the dropped middleware, and that no Aadhaar
+number, mobile number or resident name is exported while the eventId is.
 
 ---
 

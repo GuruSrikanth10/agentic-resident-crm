@@ -40,7 +40,7 @@ from src.core.agent_factory import build_agent
 from src.dlt.corroborate import Corroboration
 from src.tools import mcp_client
 from src.models.dlt_synthesis import DltFinding
-from src.utils import metrics
+from src.utils import metrics, tracing
 from src.utils.llm_utils import get_llm
 from src.utils.logging_config import get_logger
 from src.utils.resilience import llm_breaker, retry_transient
@@ -326,7 +326,7 @@ def _build_dlt_agent():
             with mcp_client.recording() as calls, \
                     mcp_client.call_context(role="dlt_investigator",
                                             case_id=state.get("case_id")):
-                result = agent_for("dlt_investigator", state.get("service_pack")).invoke({"messages": [
+                result = tracing.invoke(agent_for("dlt_investigator", state.get("service_pack")), {"messages": [
                     HumanMessage(content=prompt),
                 ]})
             return result, calls
@@ -402,7 +402,7 @@ def _build_dlt_agent():
         @retry_transient
         def invoke():
             with mcp_client.call_context(role="dlt_reviewer", case_id=state.get("case_id")):
-                return agent_for("dlt_reviewer", state.get("service_pack")).invoke({"messages": [
+                return tracing.invoke(agent_for("dlt_reviewer", state.get("service_pack")), {"messages": [
                     HumanMessage(content=prompt),
                 ]})
 
@@ -442,7 +442,7 @@ def _build_dlt_agent():
         @retry_transient
         def invoke():
             with mcp_client.call_context(role="dlt_synthesis", case_id=state.get("case_id")):
-                return agent_for("dlt_synthesis", state.get("service_pack")).invoke({"messages": [
+                return tracing.invoke(agent_for("dlt_synthesis", state.get("service_pack")), {"messages": [
                     HumanMessage(content=prompt),
                 ]})
 
@@ -464,7 +464,7 @@ def _build_dlt_agent():
         @retry_transient
         def invoke_repair():
             with mcp_client.call_context(role="dlt_synthesis", case_id=state.get("case_id")):
-                return agent_for("dlt_synthesis", state.get("service_pack")).invoke({"messages": [
+                return tracing.invoke(agent_for("dlt_synthesis", state.get("service_pack")), {"messages": [
                     HumanMessage(content=(
                         f"Your previous reply did not satisfy the contract: {error}\n\n"
                         f"Previous reply:\n{raw}\n\n"
@@ -480,10 +480,16 @@ def _build_dlt_agent():
         log.error("DLT synthesis failed the contract after repair", error=error)
         return {"finding": None, "parse_error": error}
 
+    def traced(name, node, as_type: tracing.ObservationType = "span"):
+        """`node`, recorded as an observation in the case's trace. Tool
+        results are tool observations of their own, so not repeated here."""
+        return tracing.node(name, node, as_type=as_type, output=lambda update: {
+            key: value for key, value in (update or {}).items() if key != "tool_evidence"})
+
     graph = StateGraph(DltGraphState)
-    graph.add_node("investigate", investigator_node)
-    graph.add_node("review", reviewer_node)
-    graph.add_node("synthesise", synthesis_node)
+    graph.add_node("investigate", traced("investigate", investigator_node))
+    graph.add_node("review", traced("review", reviewer_node, "evaluator"))
+    graph.add_node("synthesise", traced("synthesize", synthesis_node))
 
     graph.add_edge(START, "investigate")
     graph.add_edge("investigate", "review")
@@ -508,6 +514,32 @@ def parse_finding(text: str):
         return None, f"{type(e).__name__}: {e}"
 
 
+def _trace_attributes(case_id: str, failure: dict, corroboration: dict,
+                      service_resolution: Optional[dict],
+                      service_pack: Optional[str]) -> dict:
+    """The `analyze-dlt` trace's input, session and attributes: the declared
+    failure a reader scans the trace list by. The stack trace and the logs are
+    in the investigator's own input."""
+    service = (service_resolution or {}).get("service") or "unknown"
+    facts = {
+        "case_id": case_id,
+        "failure_class": failure.get("failure_class"),
+        "root_exception": failure.get("root_fqcn"),
+        "business_code": failure.get("business_code"),
+        "origin_topic": failure.get("origin_topic"),
+        "type_id": failure.get("type_id"),
+        "service": service,
+        "service_pack": service_pack,
+    }
+    return {
+        "input": {**facts, "root_message": failure.get("root_message"),
+                  "corroboration": corroboration.get("verdict")},
+        "session_id": case_id,
+        "tags": ["lane:dlt", f"service:{service}"],
+        "metadata": {**facts, "corroboration": corroboration.get("verdict")},
+    }
+
+
 def investigate(ref_id: str, failure: dict, corroboration: Corroboration,
                 logs: str, payload_summary: Optional[str] = None,
                 service_resolution: Optional[dict] = None,
@@ -520,20 +552,28 @@ def investigate(ref_id: str, failure: dict, corroboration: Corroboration,
     them for no pack, as before services were resolved.
     """
     agent = get_dlt_agent()
-    result = agent.invoke({
-        "case_id": ref_id,
-        "failure": failure,
-        "payload_summary": payload_summary,
-        "service_resolution": service_resolution,
-        "service_pack": service_pack,
-        "corroboration": {
-            "verdict": corroboration.verdict.value,
-            "reason": corroboration.reason,
-            "unexplained": list(corroboration.unexplained),
-        },
-        "logs": logs,
-        "retry_count": 0,
-    })
+    corroborated = {
+        "verdict": corroboration.verdict.value,
+        "reason": corroboration.reason,
+        "unexplained": list(corroboration.unexplained),
+    }
+    # One Langfuse trace per run when tracing is on (utils/tracing). This
+    # runs on the analysis pool's worker, which is where it has to open.
+    with tracing.run("analyze-dlt", **_trace_attributes(
+            ref_id, failure, corroborated, service_resolution, service_pack)) as trace:
+        result = agent.invoke({
+            "case_id": ref_id,
+            "failure": failure,
+            "payload_summary": payload_summary,
+            "service_resolution": service_resolution,
+            "service_pack": service_pack,
+            "corroboration": corroborated,
+            "logs": logs,
+            "retry_count": 0,
+        })
+        trace.update(output={"finding": result.get("finding"),
+                             "parse_error": result.get("parse_error"),
+                             "reviews": result.get("retry_count")})
 
     finding = result.get("finding")
     if finding is None:

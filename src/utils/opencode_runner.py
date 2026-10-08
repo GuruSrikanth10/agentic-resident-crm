@@ -22,7 +22,7 @@ import re
 import subprocess
 import threading
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from src.utils.logging_config import get_logger
 
@@ -462,7 +462,8 @@ def run_task(prompt: str, output_path: str,
              session: Optional[Session] = None,
              timeout: Optional[int] = None,
              node: Optional[str] = None,
-             service: Optional[str] = None) -> Dict[str, Any]:
+             service: Optional[str] = None,
+             on_event: Optional[Callable[[Dict[str, Any]], None]] = None) -> Dict[str, Any]:
     """Run one task via opencode and return what the agent wrote.
 
     The agent writes its output to `output_path` as a file on disk.
@@ -473,7 +474,8 @@ def run_task(prompt: str, output_path: str,
     LLM calls and tokens are metered under it, the same labels the direct
     LLM path uses, so the two paths are comparable on one graph. `service` is
     the packet's service pack, for a rejection node: the task runs as that
-    pack's opencode agent, and so reaches only its tools.
+    pack's opencode agent, and so reaches only its tools. `on_event` is given
+    every event of the task's stream as it arrives, on the reader thread.
 
     Raises OpencodeUnavailable on failure.
     """
@@ -572,6 +574,8 @@ def run_task(prompt: str, output_path: str,
                 logger.info(f"  [Harness] [{task_name}] | {clean}")
                 continue
             trace.add(event)
+            if on_event:
+                on_event(event)
             _log_event(task_name, event)
 
     def _log_event(task: str, event: Dict[str, Any]) -> None:
@@ -689,18 +693,25 @@ def run_task_json(prompt: str, output_path: str,
                   service: Optional[str] = None) -> Dict[str, Any]:
     """Run a task and parse the output as JSON.
 
-    Extracts the first JSON object from the output file.
+    Extracts the first JSON object from the output file. Inside a Langfuse
+    trace the task is recorded as its node's agent, from the event stream
+    (utils/tracing.harness_task).
     """
-    result = run_task(prompt, output_path, session, timeout, node, service)
-    raw = result["output"]
+    from src.utils import tracing
 
-    start, end = raw.find("{"), raw.rfind("}")
-    if start < 0 or end <= start:
-        raise OpencodeUnavailable(f"{output_path} holds no JSON object.")
-    try:
-        parsed = json.loads(raw[start:end + 1])
-    except ValueError as error:
-        raise OpencodeUnavailable(f"{output_path} is not valid JSON: {error}") from error
+    with tracing.harness_task(node, prompt=prompt, model=_model()) as recorder:
+        result = run_task(prompt, output_path, session, timeout, node, service,
+                          on_event=recorder.add)
+        raw = result["output"]
 
-    result["result"] = parsed
+        start, end = raw.find("{"), raw.rfind("}")
+        if start < 0 or end <= start:
+            raise OpencodeUnavailable(f"{output_path} holds no JSON object.")
+        try:
+            parsed = json.loads(raw[start:end + 1])
+        except ValueError as error:
+            raise OpencodeUnavailable(f"{output_path} is not valid JSON: {error}") from error
+
+        result["result"] = parsed
+        recorder.finish(result)
     return result

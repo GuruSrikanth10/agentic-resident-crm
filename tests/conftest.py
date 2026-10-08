@@ -163,6 +163,14 @@ ISOLATED_ENV_VARS = (
     # LLM provider selection.
     "USE_HF",
     "MOCK_LLM_WITH_MISTRAL",
+    # Langfuse tracing (utils/tracing). Keys exported in the parent shell
+    # would switch it on and send the suite's runs to a real project.
+    "LANGFUSE_PUBLIC_KEY",
+    "LANGFUSE_SECRET_KEY",
+    "LANGFUSE_BASE_URL",
+    "LANGFUSE_HOST",
+    "LANGFUSE_TRACING_ENABLED",
+    "LANGFUSE_SAMPLE_RATE",
     # Consumer role: resolved at import time, so a stray value here would
     # point kafkaConsumer at the wrong topic for the whole session.
     "CONSUMER_ROLE",

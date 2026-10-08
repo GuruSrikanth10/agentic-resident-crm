@@ -6,7 +6,7 @@ import datetime
 from langchain_core.messages import SystemMessage, HumanMessage
 from src.utils.llm_utils import get_llm
 from src.utils.runbook_validator import validate_generic_text
-from src.utils import reason_code_docs, service_registry
+from src.utils import reason_code_docs, service_registry, tracing
 from src.utils.runbook_store import (
     BINDING_DB_RULE,
     BINDING_REASON_CODE_DOC,
@@ -215,7 +215,17 @@ def main():
         ]
         
         try:
-            response = llm_client().invoke(messages)
+            # One Langfuse trace per draft when tracing is on (utils/tracing).
+            # The casebooks' resolutions are the model's input; the
+            # identifiers here are what the draft is found by.
+            with tracing.run("draft-runbook", input={
+                    "service": service, "reason_code": reason_code,
+                    "enrolment_type": etype, "samples": len(casebooks)},
+                    tags=["lane:runbooks", f"service:{service}"],
+                    metadata={"service": service, "reason_code": reason_code,
+                              "enrolment_type": etype}) as trace:
+                response = tracing.invoke(llm_client(), messages)
+                trace.update(output=response.content)
             text = response.content
             
             # Extract JSON block
@@ -267,4 +277,8 @@ def main():
             continue
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        # A script exits before the exporter's next batch would go.
+        tracing.flush()

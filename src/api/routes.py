@@ -21,7 +21,7 @@ from src.utils.outcomes import (
     UnknownEventError,
     record_outcome,
 )
-from src.core.agent_orchestrator import get_agent, prompt_fingerprint
+from src.core.agent_orchestrator import get_agent, prompt_fingerprint, traced_investigation
 from src.core import run_control
 from src.core.run_control import RunCancelled
 from src.log_pipeline import scope as log_scope
@@ -991,6 +991,11 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
                                "pilot": pilot},
                 config=config
             )
+        # One Langfuse trace per run when tracing is on (utils/tracing). Opened
+        # inside the worker, since the executor does not copy context.
+        invoke_call = functools.partial(
+            traced_investigation, invoke_call, signal_dict, service_resolution,
+            service_pack, pilot, resumed=has_active_checkpoint)
         run = _agent_invoke_executor.submit(run_control.run_in_scope, cancel, invoke_call)
         try:
             result = await asyncio.wait_for(asyncio.wrap_future(run),

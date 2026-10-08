@@ -8,7 +8,7 @@ from typing import Optional, TypedDict
 from langgraph.graph import StateGraph, START, END
 from langchain_core.messages import HumanMessage
 
-from src.utils import metrics, reason_code_docs, service_registry
+from src.utils import metrics, reason_code_docs, service_registry, tracing
 from src.core import prompt_composer, rejection_context, run_control
 from src.core.run_control import RunCancelled
 from src.log_pipeline import scope as log_scope
@@ -438,6 +438,105 @@ def _persist_tool_evidence(event_id: str, records: list, log) -> None:
     except Exception as e:
         log.warning("Failed to persist the tool evidence artifact",
                     error=f"{type(e).__name__}: {e}")
+
+
+#: State a node's trace observation leaves out of its output (utils/tracing).
+#: The logs are already in every agent's prompt, the tool results are tool
+#: observations of their own, the messages are the agent's, and the document
+#: text is the investigator's input; repeated once per node they would make up
+#: most of the trace.
+_UNTRACED_STATE = ("logs", "messages", "tool_evidence", "reason_code_doc", "payload")
+
+
+def _traced_update(update) -> dict:
+    """What a node's observation shows: its state update, less the evidence
+    above. How much log text there was is kept, since none is a finding."""
+    if not isinstance(update, dict):
+        return update
+    shown = {key: value for key, value in update.items() if key not in _UNTRACED_STATE}
+    if "logs" in update:
+        shown["logs_chars"] = len(update.get("logs") or "")
+    doc = update.get("reason_code_doc")
+    if isinstance(doc, dict):
+        shown["reason_code_doc"] = {key: doc.get(key) for key in
+                                    ("outcome", "requested_type", "matched_type", "sha256")}
+    return shown
+
+
+def _trace_attributes(payload: dict, resolution: dict, pack: str, pilot: bool,
+                      resumed: bool) -> dict:
+    """The `analyze-rejection` trace's input, session and attributes.
+
+    The input is what identifies the packet and its failure, which is what a
+    reader of the trace list needs -- not the payload, which the investigator's
+    own input carries. The version is the pack's prompt fingerprint, so a
+    change in the agents' scores can be put down to a prompt change (G23)."""
+    from src.utils.opencode_runner import lane_enabled
+
+    event_id = str(payload.get("eventId") or "unknown")
+    meta = payload.get("packetMetaData") or {}
+    service = str(resolution.get("service") or "unknown")
+    facts = {
+        "event_id": event_id,
+        "reason_code": _reason_code_of(payload),
+        "enrolment_type": meta.get("enrolmentType"),
+        "stage": (payload.get("flowMetaData") or {}).get("stage"),
+        "service": service,
+        "service_pack": pack,
+    }
+    return {
+        "input": {**facts, "pilot": pilot, "resumed": resumed},
+        "session_id": event_id,
+        "tags": ["lane:rejection", f"service:{service}", *(["pilot"] if pilot else [])],
+        "metadata": {**facts, "resolved_by": resolution.get("source"),
+                     "runbook_mode": os.environ.get("RUNBOOK_MODE", "off").lower(),
+                     "harness": lane_enabled("rejection")},
+        "version": prompt_fingerprint(pack, pilot),
+    }
+
+
+def _trace_output(result) -> dict:
+    """The `analyze-rejection` trace's output: the resolution, how it was
+    reached, and how many reviews it took."""
+    if not isinstance(result, dict):
+        return {}
+    parsed, error = parse_synthesis(result.get("synthesis") or "")
+    return {
+        "resolution": parsed.model_dump() if parsed is not None else None,
+        "synthesis_error": error,
+        "resolution_source": result.get("resolution_source"),
+        "investigator_path": result.get("investigator_path"),
+        "reviewer_path": result.get("reviewer_path"),
+        "reviews": result.get("retry_count"),
+        "shadow_comparison": result.get("shadow_comparison"),
+    }
+
+
+def traced_investigation(invoke, payload: dict, resolution: dict, pack: str,
+                         pilot: bool, resumed: bool = False):
+    """`invoke()` -- one run of the graph -- recorded as an `analyze-rejection`
+    trace when tracing is on (utils/tracing). Call it on the thread the graph
+    runs on: the trace is carried in context variables, which a thread pool
+    does not copy."""
+    if not tracing.enabled():
+        return invoke()
+    event_id = str(payload.get("eventId") or "unknown")
+    attributes: dict
+    try:
+        attributes = _trace_attributes(payload, resolution, pack, pilot, resumed)
+    except Exception as e:
+        # A trace with less on it, never a failed packet.
+        logger.bind(event_id=event_id).warning(
+            "Could not describe the packet's trace", error=f"{type(e).__name__}: {e}")
+        attributes = {"input": {"event_id": event_id}, "session_id": event_id,
+                      "metadata": {"event_id": event_id}}
+    with tracing.run("analyze-rejection", **attributes) as trace:
+        if trace.active:
+            logger.bind(event_id=event_id).info("Langfuse trace opened",
+                                                trace_id=trace.trace_id)
+        result = invoke()
+        trace.update(output=_trace_output(result))
+        return result
 
 
 class GraphState(TypedDict):
@@ -1017,7 +1116,7 @@ def _build_agent():
         @retry_transient
         def invoke_filter():
             with mcp_client.call_context(role="log_filter", event_id=event_id):
-                return log_filter_agent.invoke({"messages": [
+                return tracing.invoke(log_filter_agent, {"messages": [
                     HumanMessage(content=prompt)
                 ]})
             
@@ -1253,7 +1352,7 @@ def _build_agent():
             # the run that produced the answer.
             with mcp_client.recording() as calls, \
                     mcp_client.call_context(role="investigator", event_id=event_id):
-                result = agent_for("investigator", pack).invoke({"messages": [
+                result = tracing.invoke(agent_for("investigator", pack), {"messages": [
                     HumanMessage(content=prompt)
                 ]})
             return result, calls
@@ -1394,7 +1493,7 @@ def _build_agent():
         @retry_transient
         def invoke_reviewer():
             with mcp_client.call_context(role="reviewer", event_id=event_id):
-                return agent_for("reviewer", pack).invoke({"messages": [
+                return tracing.invoke(agent_for("reviewer", pack), {"messages": [
                     HumanMessage(content=prompt)
                 ]})
 
@@ -1479,7 +1578,7 @@ def _build_agent():
         @retry_transient
         def invoke_synthesis():
             with mcp_client.call_context(role="synthesis", event_id=event_id):
-                return agent_for("synthesis", pack, pilot).invoke({"messages": [
+                return tracing.invoke(agent_for("synthesis", pack, pilot), {"messages": [
                     HumanMessage(content=prompt)
                 ]})
 
@@ -1511,7 +1610,7 @@ def _build_agent():
             @retry_transient
             def invoke_repair():
                 with mcp_client.call_context(role="synthesis", event_id=event_id):
-                    return agent_for("synthesis", pack, pilot).invoke({"messages": [
+                    return tracing.invoke(agent_for("synthesis", pack, pilot), {"messages": [
                         HumanMessage(content=repair_prompt)
                     ]})
 
@@ -1619,15 +1718,20 @@ def _build_agent():
             return node(state)
         return run
 
+    def traced(name, node, as_type: tracing.ObservationType = "span"):
+        """`node`, recorded as an observation in the packet's trace."""
+        return tracing.node(name, node, as_type=as_type, output=_traced_update)
+
     # Build Graph
     workflow = StateGraph(GraphState)
-    workflow.add_node("fetch_logs", stoppable(fetch_logs_node))
-    workflow.add_node("runbook_lookup", stoppable(runbook_lookup_node))
-    workflow.add_node("filter_logs", stoppable(filter_logs_node))
-    workflow.add_node("investigate", stoppable(investigator_node))
-    workflow.add_node("review", stoppable(reviewer_node))
-    workflow.add_node("synthesize", stoppable(synthesis_node))
-    workflow.add_node("escalate", stoppable(escalate_node))
+    workflow.add_node("fetch_logs", stoppable(traced("fetch-logs", fetch_logs_node, "retriever")))
+    workflow.add_node("runbook_lookup", stoppable(traced("lookup-runbook", runbook_lookup_node,
+                                                         "retriever")))
+    workflow.add_node("filter_logs", stoppable(traced("filter-logs", filter_logs_node)))
+    workflow.add_node("investigate", stoppable(traced("investigate", investigator_node)))
+    workflow.add_node("review", stoppable(traced("review", reviewer_node, "evaluator")))
+    workflow.add_node("synthesize", stoppable(traced("synthesize", synthesis_node)))
+    workflow.add_node("escalate", stoppable(traced("escalate", escalate_node)))
     
     workflow.add_edge(START, "fetch_logs")
     workflow.add_edge("fetch_logs", "runbook_lookup")
