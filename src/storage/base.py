@@ -35,6 +35,15 @@ TERMINAL_STATUSES = (
 #: "successful" result.
 PROTECTED_TERMINAL_STATUSES = ("FAILED_TIMEOUT", "DLQ")
 
+#: Terminal statuses a redelivery still investigates. FAILED_SHUTDOWN is
+#: terminal so nothing waits on the packet as IN_PROGRESS, and its Kafka offset
+#: was never committed, so the packet comes back -- where every terminal-status
+#: check used to skip it as already processed. Nothing investigated it again
+#: and nothing sent it to the DLQ: each deploy or restart silently dropped the
+#: packets in flight (2026-10-08). A redelivery now resumes it from its
+#: checkpoint, and the packet claim it held is taken over (packet_claims).
+REDELIVERABLE_TERMINAL_STATUSES = ("FAILED_SHUTDOWN",)
+
 #: Non-terminal status written by POST /fetch-logs once it has persisted the
 #: `fetched_logs.txt` artifact and published the payload onto the analysis
 #: queue. Deliberately absent from TERMINAL_STATUSES: it must never satisfy a

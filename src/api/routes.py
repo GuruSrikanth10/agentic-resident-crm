@@ -21,17 +21,27 @@ from src.utils.outcomes import (
     UnknownEventError,
     record_outcome,
 )
-from src.core.agent_orchestrator import get_agent, prompt_fingerprint, traced_investigation
+from src.core.agent_orchestrator import (
+    get_agent,
+    invoke_fresh,
+    prompt_fingerprint,
+    traced_investigation,
+)
 from src.core import run_control
 from src.core.run_control import RunCancelled
 from src.log_pipeline import scope as log_scope
-from src.utils import packet_claims, service_registry
+from src.utils import packet_claims, service_registry, tracing
 from src.storage.factory import get_casebook_storage
 from src.utils.dlq_publisher import publish_to_dlq
 from src.utils.analysis_queue_publisher import publish_to_analysis_queue
 from src.tools.tool_registry import fetch_and_persist_logs
 from src.utils.logging_config import get_logger
-from src.storage.base import LOGS_FETCHED_STATUS, PROTECTED_TERMINAL_STATUSES, TERMINAL_STATUSES
+from src.storage.base import (
+    LOGS_FETCHED_STATUS,
+    PROTECTED_TERMINAL_STATUSES,
+    REDELIVERABLE_TERMINAL_STATUSES,
+    TERMINAL_STATUSES,
+)
 
 logger = get_logger(__name__)
 
@@ -167,7 +177,10 @@ def drain_and_shutdown() -> None:
                 if storage.terminal_status(event_id):
                     continue
                 storage.save_terminal(event_id, {
-                    "packet_metadata": {"eid": event_id},
+                    # When the run was abandoned: the redelivery takes over
+                    # the packet claim the abandoned run still holds, and only
+                    # a claim at least this old (packet_claims).
+                    "packet_metadata": {"eid": event_id, "abandoned_at": time.time()},
                     "packet_status": {"status": "FAILED_SHUTDOWN"},
                     "resolution": {"synthesis": (
                         "The API shut down while this investigation was in "
@@ -845,6 +858,16 @@ async def analyze_rejection(signal: MessagePayload):
         return response
 
 
+def _score_packet_status(trace_ref: dict, status) -> None:
+    """The packet's final status as a score on its trace (`packet_status`),
+    so the trace table shows how each packet ended -- completed, rejected,
+    escalated, timed out or dead-lettered -- next to how the Reviewer
+    treated it. Decided here, after the graph returned or while it still
+    runs; a no-op when the run was not traced."""
+    tracing.score(trace_ref.get("trace_id"), "packet_status", str(status),
+                  data_type="CATEGORICAL")
+
+
 async def _investigate_packet(signal: MessagePayload, outcome: dict):
     """The packet lifecycle. `outcome` carries the terminal status back out to
     the metrics wrapper above."""
@@ -860,7 +883,12 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
     # for either.
     if existing_casebook:
         status = existing_casebook.get("packet_status", {}).get("status")
-        if status in TERMINAL_STATUSES:
+        if status in REDELIVERABLE_TERMINAL_STATUSES:
+            # The API shut down mid-investigation and this is the redelivery
+            # the casebook promised; it resumes from the run's checkpoint.
+            logger.bind(event_id=event_id).info(
+                "Investigating a packet the API shut down on", recorded_status=status)
+        elif status in TERMINAL_STATUSES:
             logger.bind(event_id=event_id).info("Skipping event; a terminal casebook already exists", recorded_status=status)
             return {"status": "already_processed", "event_id": event_id}
 
@@ -990,6 +1018,7 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
     # Set when the budget runs out, so the run stops at its next step instead
     # of running on to the end in a worker nobody is waiting on (run_control).
     cancel = threading.Event()
+    trace_ref: dict = {}
     try:
         if has_active_checkpoint:
             invoke_call = functools.partial(agent.invoke, None, config=config)
@@ -1002,19 +1031,25 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
             #
             # The service resolution travels in with the payload, so every
             # node reads the one the gate acted on (MULTI_SERVICE_PLAN.md D1).
+            #
+            # Resetting retry_count was not enough: every other value of an
+            # earlier, finished run of this packet survived on the thread, so
+            # the run starts on an emptied one (`invoke_fresh`).
             invoke_call = functools.partial(
-                agent.invoke, {"payload": signal_dict, "retry_count": 0,
-                               "service": service_resolution["service"],
-                               "service_resolution": service_resolution,
-                               "service_pack": service_pack,
-                               "pilot": pilot},
-                config=config
+                invoke_fresh, agent, {"payload": signal_dict, "retry_count": 0,
+                                      "service": service_resolution["service"],
+                                      "service_resolution": service_resolution,
+                                      "service_pack": service_pack,
+                                      "pilot": pilot},
+                config
             )
         # One Langfuse trace per run when tracing is on (utils/tracing). Opened
-        # inside the worker, since the executor does not copy context.
+        # inside the worker, since the executor does not copy context. Its id
+        # comes back in `trace_ref`, so the packet's final status can be scored
+        # on it here, whichever way the run ends.
         invoke_call = functools.partial(
             traced_investigation, invoke_call, signal_dict, service_resolution,
-            service_pack, pilot, resumed=has_active_checkpoint)
+            service_pack, pilot, resumed=has_active_checkpoint, trace_ref=trace_ref)
         run = _agent_invoke_executor.submit(run_control.run_in_scope, cancel, invoke_call)
         try:
             result = await asyncio.wait_for(asyncio.wrap_future(run),
@@ -1038,6 +1073,7 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
                 "packet_status": {"status": "FAILED_TIMEOUT"},
                 "resolution": {"synthesis": f"Investigation exceeded the server-side budget of {agent_invoke_timeout_seconds}s."}
             })
+            _score_packet_status(trace_ref, "FAILED_TIMEOUT")
             # This response is a 200, so the consumer commits the offset, and
             # FAILED_TIMEOUT is terminal, so a redelivery is skipped. Without
             # the DLQ entry the packet existed nowhere replayable -- unlike
@@ -1066,6 +1102,7 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
             "packet_status": {"status": "DLQ"},
             "resolution": {"synthesis": f"Failed with {type(e).__name__}: {str(e)}"}
         })
+        _score_packet_status(trace_ref, "DLQ")
         from src.utils.case_cleanup import cleanup_casebook_dir
         cleanup_casebook_dir(event_id)
         return {"status": "dlq", "event_id": event_id, "error": str(e)}
@@ -1308,6 +1345,7 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
     cleanup_casebook_dir(event_id)
 
     final_status = casebook_data["packet_status"]["status"]
+    _score_packet_status(trace_ref, final_status)
     resolution_source = casebook_data["resolution"]["source"] or "agent"
     # Recorded by the _packet_metrics wrapper on the way out, so the timeout,
     # DLQ, and skip paths are counted on the same footing (G15).

@@ -555,7 +555,9 @@ stateDiagram-v2
 
 Every LLM node is wrapped in `@llm_breaker` over `@retry_transient`: three
 tenacity attempts on transient provider errors, then the breaker opens after
-three consecutive failures and fails fast for 60s.
+three consecutive failures and fails fast for 60s. The breaker no longer
+serialises calls (section 3.4, External Call Resilience); how many model calls
+run at once is bounded instead by `LLM_MAX_CONCURRENT_CALLS` per process.
 
 #### 1.3.4 Idempotency -- the same packet arriving twice
 
@@ -612,10 +614,30 @@ flowchart TD
 | G8 | `_investigate_packet` | `IN_PROGRESS` stale, no checkpoint | reprocess, `retry_count=0` |
 | G9 | `_investigate_packet` | `PROTECTED_TERMINAL_STATUSES` set | discard late result |
 
-> **`retry_count` is reset explicitly on G8.** `thread_id` is the `eventId`, so a
-> redelivered "fresh" invocation can otherwise resume a persisted checkpoint whose
-> `retry_count` is already at `MAX_INVESTIGATION_RETRIES` and escalate instantly
-> without doing any work.
+> **A fresh invocation starts on an emptied thread (G8 and every other fresh
+> run).** `thread_id` is the `eventId`, and LangGraph keeps a finished run's values
+> on its thread: a new input overwrites only the keys it names. Resetting
+> `retry_count` alone (the original fix, so a redelivery could not escalate
+> instantly) left everything else, and a packet run again -- its casebook removed,
+> or taken over after a crash between the graph ending and the casebook write --
+> began with the last run's `reviewer_feedback`, `investigation`, documentation,
+> rule text, tool evidence and shadowed runbook. The Investigator took the old
+> verdict for a rejection and "fixed" the previous analysis instead of
+> investigating. `agent_orchestrator.invoke_fresh` now deletes the thread's
+> checkpoints (`delete_thread`, implemented by the SQLite, Postgres and MySQL
+> savers) when it holds a finished run's values, then invokes. A run that stopped
+> part-way still resumes from its checkpoint.
+
+> **A packet the API shut down on is investigated again when it is redelivered.**
+> The drain records `FAILED_SHUTDOWN` -- terminal, so nothing waits on it as
+> `IN_PROGRESS` -- with the time it abandoned the run (`abandoned_at`). The packet's
+> offset was never committed, so it comes back; every terminal-status check used
+> to skip it as already processed, and it was never investigated nor sent to the
+> DLQ, so each deploy dropped the packets in flight. `FAILED_SHUTDOWN` is now
+> `REDELIVERABLE_TERMINAL_STATUSES` (`storage/base.py`): the route investigates it,
+> resuming the abandoned run's checkpoint, and the packet claim the dead run still
+> holds is taken over at once when it predates `abandoned_at` (`packet_claims`) --
+> a later duplicate finds the redelivery's newer claim and is refused as before.
 
 > **Scope limit.** G3/G4 rely on `filelock` (local backend) or last-writer-wins
 > (S3). Neither coordinates across pods, which is why `config_validator` refuses
@@ -642,7 +664,7 @@ flowchart LR
     F --> E["any other forward error"] --> E1["DLQ, then abandoned,<br/>so the floor advances"]
     F --> G["DLQ itself unreachable"] --> G1["offset HELD uncommitted,<br/>stalls then redelivers"]
     F --> H["consumer SIGTERM"] --> H1["drain SHUTDOWN_DRAIN_SECONDS,<br/>commit what finished, rest redelivers"]
-    F --> I["API SIGTERM mid-investigation"] --> I1["FAILED_SHUTDOWN written<br/>so nothing strands at IN_PROGRESS"]
+    F --> I["API SIGTERM mid-investigation"] --> I1["FAILED_SHUTDOWN written<br/>so nothing strands at IN_PROGRESS;<br/>the redelivery resumes the run"]
     F --> J["partition revoked"] --> J1["commit safe floor, then forget<br/>- never commit for a partition we lost"]
 
     class C1,D1,E1,H1,I1,J1 good
@@ -702,6 +724,8 @@ agentic-resident-crm/
 │   ├── manual_payload_demo.py      # Manual demo: parse a real rejection payload, print extracts
 │   ├── test_end_to_end.py          # End-to-end contract test (audit G22a, N4)
 │   ├── test_tracing.py             # Langfuse tracing: off is invisible; on, what is exported
+│   ├── test_breaker_concurrency.py # Breakers that do not serialise calls; the model-call limit
+│   ├── test_rerun_and_shutdown.py  # Reruns start fresh; shutdown packets are redelivered; verdicts
 │   ├── test_fetch_analyze_split.py # Fetch/analyze consumer split (two topics, two consumers)
 │   ├── test_api_concurrency.py     # API concurrency (REMEDIATION_PLAN phase 2)
 │   ├── test_resilience.py          # Resilience / idempotency / DLQ regression tests
@@ -2008,7 +2032,7 @@ Instead of relying on an unpredictable LLM to orchestrate the subagents, the sys
 2. **Runbook Lookup Node**: First resolves the packet's reason-code documentation, whatever the mode, and returns it for the Investigator to reuse. Then checks `RUNBOOK_MODE` (off/serve/shadow). If `serve`, it looks up a final runbook by `(reason_code, enrolment_type)` in `src/runbooks/final/<pack>/`, verifies its binding -- the DB rule fingerprint for a service with a rules table, the documentation entries' hash for one without (section 3.2.3, Phase 5) -- hasn't changed, and short-circuits the graph directly to `END` with the pre-built resolution (no LLM calls). In `shadow` mode, it records the runbook match but lets the agents run normally; `synthesis_node` later compares the two results and logs any divergence. If `off` (the default) or no runbook matches, it falls through to the Investigator.
 3. **Investigator Node**: A deep agent (section 3.5.1). For a service whose pack names the rules table as its rule source, the rule is still fetched deterministically in Python before the call: `lookup_rule_by_reason_code` is invoked by the node itself, the result is filtered by `enrolmentType` using the pack's own filter, and the rule text is injected into the prompt. If the rule lookup fails or returns nothing, it falls back to `get_error_description` (from `tool_registry.py`) to inject hardcoded error definitions (e.g., for `RESIDENT_BIOMETRIC_UPDATE_IDENTIFY_FAILURE`). For a service with no rules table nothing here queries one, and the prompt carries a `Rule source` note instead (section 3.2.3). On top of that the agent gets the MCP tools the `investigator` role is given (section 3.5.1) -- the process DB tools when `PROCESS_DB_ENABLED=true`, otherwise none -- and every call it makes, including one inside a `task` subagent, is recorded into the `tool_evidence` state field (merged across retries), saved as the `tool_evidence.json` artifact, and listed in the casebook's `resolution.provenance.tool_calls`. The harness path appends the same AVAILABLE TOOLS section to its prompt, runs as the `crm_investigator` opencode agent, and keeps the MCP calls it made -- read off the task's event stream -- as evidence the same way. A retry is shown the earlier attempts' tool results under `Evidence retrieved with tools`. The prompt is projected down to only the fields the Investigator needs (`eventId`, `packetMetaData`, `packetExecutionSummary`, `flowMetaData.stage`) rather than the full raw Kafka message, and on a retry it sends only the delta -- the prior investigation plus the Reviewer's feedback -- instead of resending the full payload/logs/rule context again. When `REJECTION_REASON_CODE_DOCS_ENABLED=true` the node additionally resolves the reason-code documentation for this packet (section 3.2.2) before anything else, stores it in graph state as `reason_code_doc` so every later node reuses the same version, counts the outcome on `reason_code_doc_lookups_total`, and builds both its prompts through `core/rejection_context.py` -- documentation and rule first, logs last, task restated after them, and only the logs trimmed when `REJECTION_PROMPT_MAX_CHARS` binds. With that switch off the prompts are byte-for-byte the ones described above. Either way it returns `investigator_path` (`harness` or `direct`), because a harness task that fails falls back silently and a comparison of the two paths would otherwise score the wrong one. When `USE_OPENCODE_HARNESS_REJECTION=true`, the node writes `context.json` and `supported_logs.txt` to the local casebook directory, renders the `RejectionInvestigator` harness prompt template, and calls `opencode_runner.run_task_json()` -- giving the agent Glob/Grep/Read access to the `docs_cache/` DROA corpus. It falls back to the direct LLM path on harness failure (section 3.2.1).
 4. **Reviewer Node**: A distinct deep agent, built once at graph-construction time (not per review) and bound to the `simple` LLM tier, that acts as a strict QC validator holding one tool (`add_learning_rule`). The tool no longer closes over the current `event_id`/investigation text per call -- it reads them from a pair of `contextvars.ContextVar`s that `reviewer_node` sets before each invocation, since each packet already runs on its own dedicated thread. `REJECTION_REVIEWER_EVIDENCE` defaults to **true**, so on the direct path it is now given the same evidence the Investigator had -- including what the Investigator's tools returned, as an `Evidence retrieved with tools` section (and, for a harness Reviewer, as `tool_evidence.txt`), without which every finding resting on a tool result could only be rejected -- the rule, the enrolment type, the projected payload, the logs, and the stored document -- through `build_review_prompt`, rather than the investigation text alone. It could not otherwise check the citation it most often rejects for, while `ReviewerAgent.md` asked it to do exactly that; setting the variable to false restores the older prompt character for character. It returns `reviewer_path` alongside its verdict. When `USE_OPENCODE_HARNESS_REJECTION=true`, the node rewrites `context.json`/`supported_logs.txt` from graph state (the same `_write_harness_case_files` the Investigator uses), writes `investigation_text.txt`, and renders the `RejectionReviewer` harness prompt template, giving the reviewer agent the same corpus access to verify the investigator's claims against service documentation. The harness reviewer has no tools, so a rejection returns its proposed rule as an optional `learning_rule` object in its JSON, which is passed to the same `queue_learning_rule` function behind `add_learning_rule` -- one validated path to `pending_rules.jsonl` either way. All file writes sit inside the harness `try`, so a missing or unwritable case directory falls back to the direct LLM like any other harness failure.
-5. **Conditional Router & Loop Guard**: A pure Python control edge that checks the Reviewer's output via `is_reviewer_approved()`: the (markdown/whitespace-stripped) feedback must *start with* the literal token `APPROVED`, not merely contain it -- this closes the "NOT APPROVED"/"DISAPPROVED" false-positive that a substring match would produce. Otherwise it increments `retry_count`; once `retry_count >= MAX_INVESTIGATION_RETRIES` it routes to the `escalate` node (preventing infinite LLM loops), else it loops back to the Investigator Node. A fresh (non-resumed) invocation always starts `retry_count` at 0, so a redelivered packet can never resume a stale checkpoint with the retry budget already exhausted.
+5. **Conditional Router & Loop Guard**: A pure Python control edge that checks the Reviewer's output via `is_reviewer_approved()`: the first non-empty line, stripped of markdown, must *be* the verdict `APPROVED` -- optionally ending its sentence (`APPROVED.`, `APPROVED! ...`) -- not merely contain it or start with it. A substring match approved "NOT APPROVED"/"DISAPPROVED"; a prefix match approved "APPROVED: NO -- not grounded", "APPROVED? No." and "Approved with corrections: ..."; each is a rejection, as `ReviewerAgent.md` says anything but the one word is. A leading `<think>` block (a model served without a reasoning parser) is skipped. The routing rule is `review_decision()`, shared with the trace's account of each review: approved goes to Synthesis; otherwise, once `retry_count >= MAX_INVESTIGATION_RETRIES` it routes to the `escalate` node (preventing infinite LLM loops), else it loops back to the Investigator Node. A fresh (non-resumed) invocation always starts `retry_count` at 0, on a thread emptied of any earlier run (`invoke_fresh`, section 1.3.4), so a redelivered packet can never resume a stale checkpoint with the retry budget already exhausted, nor a packet run again inherit an old verdict.
 6. **Synthesis Node**: The final agent that takes the approved, heavily vetted technical diagnosis and translates it into a human-readable JSON `Casebook`. It holds the `queue_for_replay` tool, except for a pilot service's packet, whose Synthesis is built without it (section 3.2.3, Phase 7). In shadow mode, it also compares its output to the runbook's pre-built resolution and logs a warning on any `action` divergence. When `REJECTION_SYNTHESIS_DOC_GUIDANCE=true` **and** the stored document both hit and carries `resolution_guidance`, the prompt gains a `### Resolution guidance from the reason code documentation` section holding those `- action: X | resident_action: Y | when: Z` lines; the validator has already checked the values against `ACTIONS` and `RESIDENT_ACTIONS`, so the model is never offered an action the contract would then reject. It has its own switch, **off by default**, so its effect on the chosen action can be measured apart from everything else the documentation changes. The repair prompt is untouched.
 7. **Log Processor**: After the graph completes, `routes.py` structures the final casebook's `packet_status.rejection_data.rejection_logs` field into an object containing `path` and `gaps`. `path` records the **relative** name of the artifact that already holds the trace, so the evidence travels with the casebook and resolves identically on local disk and on S3. That name comes from the graph's `logs_artifact` state field: `fetch_logs_node` sets it to `"fetched_logs.txt"` and `filter_logs_node` overwrites it with `"filtered_logs.txt"` once that artifact is successfully written (on a failed write the pointer stays on `fetched_logs.txt`, which exists and holds a superset, rather than naming a key nothing wrote). A checkpoint resumed from state serialised before the field existed falls back to `"fetched_logs.txt"`. There is no size threshold and no truncation: whatever was fetched is persisted whole. When no logs were obtained (or `ENABLE_LOG_FETCHING=false`), `path` is the literal string `"No logs found"` and `gaps` is `null`.
 
@@ -2026,7 +2050,7 @@ The architecture incorporates several resilience mechanisms to prevent runaway c
 - **Pipeline Timeouts**: `PACKET_TIMEOUT_SECONDS` bounds the **slow consumer's HTTP client** waiting on `/analyze-rejection` -- the LLM investigation budget, same variable and meaning this had before the fetch/analyze split. The fast consumer gets its own, much shorter `FAST_CONSUMER_TIMEOUT_SECONDS` for the bounded `/fetch-logs` call. The API side is independently bounded too: `routes.py` runs `agent.invoke()` (from `/analyze-rejection` or `/process-rejection`) on a dedicated executor thread with its own budget (`AGENT_INVOKE_TIMEOUT_SECONDS`, defaulting to `PACKET_TIMEOUT_SECONDS - 30s`) so the server is authoritative about its own failure and returns `FAILED_TIMEOUT` before the consumer's deadline fires. `/fetch-logs` has no equivalent dedicated executor -- it's bounded I/O (`K8S_TOTAL_FETCH_TIMEOUT_SECONDS`, `ES_REQUEST_TIMEOUT_SECONDS`), not a multi-minute LLM call, so it runs on Starlette's own sync-dispatch threadpool like `/health`/`/ready`. Both the LLM clients (`LLM_TIMEOUT_SECONDS`, `max_retries=0`) and `agent.invoke` are bounded. If a terminal `FAILED_TIMEOUT`/`DLQ` status is already recorded by the time a slow invocation finally returns, that late result is discarded rather than overwriting it.
 - **Human-in-the-Loop Replays**: Agents cannot fire destructive API requests directly. Unless `ENABLE_AUTO_REPLAY=true`, replay actions invoked by the LLM are queued for an operator to approve via `approve_replays.py`. The queue is **one document per packet id** under the `pending_replays` storage root (`get_scoped_storage`), not the `src/db/pending_replays.jsonl` file it used to be: that file lived on whichever pod happened to write it, so under `CASEBOOK_STORAGE_BACKEND=s3` with more than one replica an operator saw only their own pod's entries and the rest were invisible indefinitely. `approve_replays.py` still drains any leftover local jsonl for backwards compatibility. Both the auto-replay call and `approve_replays.py` send the replay payload as an authenticated (`OIS_API_KEY`) JSON body rather than query params, so PII like `notificationEmail`/`notificationMobile` doesn't land in server access logs. The packet id is pattern-guarded (`EVENT_ID_PATTERN`) before it is interpolated into a storage path.
 - **Safe Self-Learning & Drift Checks**: The Reviewer's `add_learning_rule` tool stages suggestions to `src/prompts/pending_rules.jsonl` using `filelock`. A human runs `src/tools/promote_rules.py` (which includes top-level locking and git-status safety checks) to approve and Git-commit the rules; only promoted entries are removed from the pending file, so skipped/errored/concurrently-appended entries survive. Additionally, `src/tools/check_drift.py` detects database schema/policy drift, and distinguishes a genuinely changed schema from a malformed single-column CSV export.
-- **External Call Resilience**: `tenacity` handles exponential backoff retries, and `pybreaker` provides circuit breakers for database, Elasticsearch, LLM, Kubernetes, and Bitbucket calls (`db_breaker`, `es_breaker`, `llm_breaker`, `k8s_breaker`, `bitbucket_breaker` -- all `fail_max=3`, `reset_timeout=60`). Every one is sampled onto the `breaker_state` gauge at scrape time rather than on transition, so a breaker that reset on a timeout doesn't leave a stale "open" reading behind. The two newest are read-only paths whose failure must only ever *degrade* a result: a tripped `k8s_breaker` makes the running image version unknown, and a tripped `bitbucket_breaker` makes a replay-precheck verdict `UNKNOWN` -- neither raises into the analysis lane.
+- **External Call Resilience**: `tenacity` handles exponential backoff retries, and `pybreaker` provides circuit breakers for database, Elasticsearch, LLM, Kubernetes, and Bitbucket calls (`db_breaker`, `process_db_breaker`, `es_breaker`, `llm_breaker`, `k8s_breaker`, `bitbucket_breaker` -- all `fail_max=3`, `reset_timeout=60`). They are `resilience.CircuitBreaker`, a subclass that overrides `call()` alone: pybreaker 1.4.1 (its latest release) runs the guarded call while holding the breaker's lock, so every call through a shared breaker waited for the one before it -- the API made one LLM call at a time however many investigations it ran, and log fetches, rule lookups and Bitbucket reads queued the same way (one traced packet spent 9m23s of 12m45s waiting before its agents started, 2026-10-07). The subclass takes the lock only to admit a call and to record its outcome, through pybreaker's own state objects, so tripping at `fail_max` (with `CircuitBreakerError` on the tripping call), refusing while open, the half-open trial and excluded exceptions behave as before; calls arriving during a trial go ahead beside it rather than queueing. It uses pybreaker internals (`_lock`, `_state_storage`, the state objects' `_handle_error`/`_handle_success`); `tests/test_breaker_concurrency.py` pins both the behaviour and the upstream defect, so an upgrade that changes either fails loudly. The deliberate limit that replaced the accidental one is `LLM_MAX_CONCURRENT_CALLS` (default 2): every agent's `ModelCallSlotMiddleware` holds one of the process's slots for each model call -- never across a tool call or a retry's backoff -- and a wait for one is recorded in the trace as `wait-for-model-slot`; an abandoned run stops waiting within a second. Every one is sampled onto the `breaker_state` gauge at scrape time rather than on transition, so a breaker that reset on a timeout doesn't leave a stale "open" reading behind. The two newest are read-only paths whose failure must only ever *degrade* a result: a tripped `k8s_breaker` makes the running image version unknown, and a tripped `bitbucket_breaker` makes a replay-precheck verdict `UNKNOWN` -- neither raises into the analysis lane.
 - **Storage Abstraction & Schema Versioning**: The `CasebookStorage` interface implements retried atomic `.tmp` writes (to safely handle concurrent readers/AV scanners holding the file on Windows) and enforces a `"schema_version"` field on every saved casebook for backwards compatibility.
 - **Structured Logging & Health Checks**: `agent_orchestrator.py`, `tool_registry.py`, `kafkaConsumer.py`, `dlq_publisher.py`, `analysis_queue_publisher.py`, `s3_uploader.py` and the entire `log_pipeline/` package log through the same `structlog` logger as `routes.py` (bound to `event_id` where available) rather than bare `print()`. Verbosity is set by `LOG_LEVEL`. The operator CLIs still print to stdout deliberately -- they are interactive tools, not services. The FastAPI server provides `/health` and `/ready`. `/health` reports this process's own `status`/`draining`/`in_flight`/`capacity`, plus a heartbeat block for each of the four consumer roles (`fast_consumer`, `slow_consumer`, `dlt_consumer`, `dlt_analysis_consumer`) and a top-level `last_heartbeat`/`consumer_alive` alias for the fast consumer that predates the split. A heartbeat file that is absent reads as `null`, not `false` -- "unknown", not "dead" -- because a split-pod deployment has no local heartbeat file for any consumer, and the DLT roles are off by default; each consumer answers its own liveness on `CONSUMER_HEALTH_PORT` / `SLOW_CONSUMER_HEALTH_PORT` / `DLT_HEALTH_PORT` / `DLT_ANALYSIS_HEALTH_PORT` instead. `/ready` verifies checkpoint store connectivity and Kafka producer reachability (cached for `PRODUCER_HEALTH_TTL_SECONDS`, default 30s). When any lane uses the harness, `/ready` additionally waits for the DROA corpus download (`docs_loader.corpus_available()`) and the opencode server (`opencode_runner.server_ready()`), returning 503 with "Downloading documentation corpus" or "Starting opencode server" respectively until both are ready; when the API runs its own agent tool server, `/ready` also returns 503 "Starting agent tool server" until that answers its health check -- so consumers do not forward packets before the harness can serve them. `validate_config()` provides fail-fast configuration validation at boot.
 - **Agent Caching**: The Investigator, LogFilter, Synthesis and Reviewer deep agents (and the DLT lane's three) are all created once at graph construction time and reused across invocations, avoiding per-packet (and, for the Reviewer, per-retry) LLM handshake overhead.
@@ -2443,17 +2467,21 @@ validated resolution, how it was reached and how many reviews it took -- never
 the raw payload.
 
 ```
-analyze-rejection (chain)
+analyze-rejection (chain)               WARNING when escalated
   fetch-logs (retriever)
   lookup-runbook (retriever)
-  investigate (span)                    once per attempt
-    investigator-agent (agent)          deep agent, via langfuse.langchain.CallbackHandler
-      model > ChatOpenAI (generation)   model, tokens, the tool calls it requested
+  investigate (span)                    once per attempt: {attempt, retry, reviewer_feedback}
+    lookup-rule (retriever)             the rules-database query (first pass only)
+    wait-for-model-slot (span)          only when every model-call slot was taken
+    investigator-agent (agent)          deep agent, via the LangChain CallbackHandler
+      model > ChatOpenAI (generation)   model, tokens, reasoning, the tool calls it requested
       tools > <tool> (tool)
-  review (evaluator)
+  review (evaluator)                    {verdict, review n of max, next}; WARNING when REJECTED
     reviewer-agent (agent)
   synthesize (span)
+    repair-synthesis (span)             only when the contract rejected the reply
     synthesis-agent (agent)
+  escalate (span)                       WARNING: no review approved
 ```
 
 The graph's nodes are spans of our own (`tracing.node`, applied with
@@ -2468,6 +2496,54 @@ role), which is what makes the handler type it as an `agent`. The deep agents'
 middleware hooks (`TodoListMiddleware.after_model` and the like) are dropped at
 export (`should_export_span`): each carried the full message history and nothing
 a reader needs. Summarization's hook is kept, since it can call the model.
+The LangChain run's own metadata (`thread_id`, `checkpoint_ns`, `lc_agent_name`,
+...), which the handler propagates as *trace* metadata, is removed at export
+-- only the keys a trace of ours set stay trace metadata; the observations keep
+it as their own. The resource's `service.name` is the app name in
+`version.json` (`OTEL_SERVICE_NAME`, set when the deployment has not).
+
+**Rejections and retries.** Every place a step is rejected says so in the trace,
+with its count:
+
+- `investigate` opens with `{attempt, retry}` -- attempt 2 is the first retry --
+  and, for a retry, the `reviewer_feedback` it has to answer.
+- `review` opens with `{review, of}` (`MAX_INVESTIGATION_RETRIES`) and closes with
+  the `verdict` (APPROVED or REJECTED), the `next` step (synthesize, investigate
+  again, escalate to manual review) and the Reviewer's words. A rejection is
+  level WARNING with the status message `REJECTED in review 1 of 3; next:
+  investigate again`. The verdict and the next step come from
+  `review_decision()`, the graph's own routing rule, so the trace cannot disagree
+  with what the graph did.
+- `escalate` is a WARNING, and so is the root of an escalated packet:
+  `Escalated to manual review after N rejected reviews`.
+- `repair-synthesis` wraps the repair call when the contract rejects
+  Synthesis's reply: WARNING when the repair passes, ERROR when it does not and
+  the packet escalates.
+- The DLT lane records the same (`review_decision` there routes a case out of
+  reviews to `synthesize without approval`, and its root is then a WARNING).
+
+The root's output carries `reviews`, `reviewer_rejections` and `review_outcome`
+(`approved`, `approved_after_rejection`, `escalated`, `runbook`, `not_reviewed`;
+`synthesized_unapproved` in the DLT lane). Because tags are fixed when a trace
+starts, what is learned during the run is recorded as **Langfuse scores**, which
+the trace table filters and charts on: per review `review_verdict` (categorical,
+on the review observation), and per trace `reviews` and `reviewer_rejections`
+(numeric), `review_outcome` (categorical) and, from the route once the casebook
+is written, `packet_status` -- the casebook's final status (`COMPLETED`,
+`REJECTED`, `NEEDS_MANUAL_REVIEW`, ..., or `FAILED_TIMEOUT`/`DLQ` when the run
+did not finish). Scores go to Langfuse's ingestion API, not through the
+exporter, so masking never sees them: their values are only ever counts and
+fixed labels. Their ids are derived from what they score, so recording one
+again replaces it, and a trace that `LANGFUSE_SAMPLE_RATE` left out gets none.
+The score names are an API -- dashboards and evaluators find them by name.
+
+**Reasoning.** vLLM returns the model's thinking in `reasoning_content` beside
+the answer; `ChatOpenAI` drops fields the official API lacks, so it reached
+nothing. `llm_utils` builds a `ChatOpenAI` subclass that keeps it in the
+AIMessage's `additional_kwargs` (content untouched; what is sent back to the
+model on the next turn leaves it out), and the tracing handler writes it into
+each generation's assistant message as `reasoning_content`, which Langfuse's
+formatted view renders -- masked like everything else.
 
 **The opencode harness.** opencode makes its model calls in its own process.
 `opencode_runner.run_task_json` records the task as the node's agent
@@ -2498,8 +2574,10 @@ prompts outside it, masked or not.
 
 `tests/test_tracing.py` runs the real SDK against an in-memory exporter behind
 the same filter and masking hook, and asserts on what would leave the process:
-the tree, the types, the session, the dropped middleware, and that no Aadhaar
-number, mobile number or resident name is exported while the eventId is.
+the tree, the types, the session, the dropped middleware and metadata, the
+reasoning, every rejection, retry and escalation with its scores (through the
+real route and the real DLT lane), and that no Aadhaar number, mobile number or
+resident name is exported while the eventId is.
 
 ---
 

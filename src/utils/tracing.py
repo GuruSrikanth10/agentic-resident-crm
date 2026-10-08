@@ -53,6 +53,7 @@ import json
 import os
 import re
 import threading
+import uuid
 from typing import Any, Callable, Literal, Optional
 
 from src.utils.env import get_bool_env
@@ -71,16 +72,46 @@ _METADATA_VALUE_LIMIT = 200
 #: The observation types this module opens, in Langfuse's names.
 ObservationType = Literal["span", "chain", "retriever", "evaluator", "agent"]
 
+#: The score types this module records, in Langfuse's names.
+ScoreType = Literal["NUMERIC", "CATEGORICAL", "BOOLEAN"]
+
 #: Name of the opencode harness's model-call generations.
 HARNESS_GENERATION = "harness-model-call"
+
+#: The service name traces carry when OTEL_SERVICE_NAME is unset and
+#: version.json names none.
+DEFAULT_SERVICE_NAME = "agentic-resident-crm"
 
 _client = None
 _client_failed = False
 _client_lock = threading.Lock()
 
+#: The trace metadata keys this module's traces propagate. The LangChain
+#: handler propagates the LangChain run's own metadata as trace metadata too
+#: (thread_id, checkpoint_ns, lc_agent_name, ...) -- a different value on each
+#: agent's observations, and none of it about the packet -- so `mask_spans`
+#: removes every trace metadata key not recorded here. The observations keep
+#: that metadata as their own. Replaced, never mutated, under the lock, so the
+#: exporter thread always reads a whole set.
+_trace_metadata_keys: frozenset = frozenset()
+_trace_metadata_lock = threading.Lock()
 
-class _Trace:
-    """The trace this thread is recording into, or none (`observation` None)."""
+
+def _recording(observation) -> bool:
+    """Whether `observation` will be exported: not when LANGFUSE_SAMPLE_RATE
+    left its trace out. A score for a trace that was never exported would
+    point at nothing."""
+    span = getattr(observation, "_otel_span", None)
+    try:
+        return bool(span is not None and span.is_recording())
+    except Exception:
+        return False
+
+
+class _Observed:
+    """An observation this module opened -- a trace's root, a graph node or a
+    step -- or none at all (`observation` None), when every method is a no-op.
+    Nothing here raises: tracing must never fail a packet."""
 
     def __init__(self, observation=None):
         self.observation = observation
@@ -93,22 +124,35 @@ class _Trace:
     def trace_id(self) -> Optional[str]:
         return getattr(self.observation, "trace_id", None)
 
+    @property
+    def sampled(self) -> bool:
+        return self.observation is not None and _recording(self.observation)
+
     def update(self, **fields) -> None:
-        """Set fields on the root observation; a failure is logged, not raised."""
+        """Set fields on the observation; a failure is logged, not raised."""
         if self.observation is None:
             return
         try:
             self.observation.update(**fields)
         except Exception as e:
-            logger.warning("Could not update the Langfuse trace",
+            logger.warning("Could not update a Langfuse observation",
                            error=f"{type(e).__name__}: {e}")
 
+    def score(self, name: str, value, data_type: ScoreType, *,
+              whole_trace: bool = False, comment: Optional[str] = None) -> None:
+        """Score this observation, or with `whole_trace` the trace it is in
+        (`score`). Skipped for a trace the sample rate left out."""
+        if not self.sampled:
+            return
+        score(self.trace_id, name, value, data_type=data_type, comment=comment,
+              observation_id=None if whole_trace else getattr(self.observation, "id", None))
 
-_UNTRACED = _Trace()
+
+_UNTRACED = _Observed()
 
 #: The trace open on this thread. Context variables are copied into the
 #: threads LangGraph runs nodes on, so a node sees the trace its run opened.
-_current: contextvars.ContextVar[_Trace] = contextvars.ContextVar(
+_current: contextvars.ContextVar[_Observed] = contextvars.ContextVar(
     "langfuse_trace", default=_UNTRACED)
 
 
@@ -137,16 +181,25 @@ def _environment() -> str:
     return f"env-{cleaned}" if cleaned.startswith("langfuse") else cleaned
 
 
-def _release() -> Optional[str]:
-    """LANGFUSE_RELEASE, else the version in version.json."""
-    release = os.environ.get("LANGFUSE_RELEASE")
-    if release:
-        return release
+def _version_info() -> dict:
+    """version.json, or {} when it cannot be read."""
     try:
         with open(VERSION_FILE, encoding="utf-8") as handle:
-            return str(json.load(handle).get("version") or "") or None
-    except (OSError, ValueError, AttributeError):
-        return None
+            info = json.load(handle)
+        return info if isinstance(info, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _release() -> Optional[str]:
+    """LANGFUSE_RELEASE, else the version in version.json."""
+    return os.environ.get("LANGFUSE_RELEASE") or str(_version_info().get("version") or "") or None
+
+
+def _service_name() -> str:
+    """What the traces' `service.name` resource attribute says: the app name
+    in version.json. Without it every span reads `unknown_service:python`."""
+    return str(_version_info().get("app_name") or "") or DEFAULT_SERVICE_NAME
 
 
 #: A deep-agent middleware hook run as a graph node -- "TodoListMiddleware.
@@ -167,9 +220,11 @@ def _should_export(span) -> bool:
 
 def _build_client(**overrides):
     """The Langfuse client. Keys, LANGFUSE_BASE_URL and LANGFUSE_SAMPLE_RATE
-    are read by the SDK itself."""
+    are read by the SDK itself, as is OTEL_SERVICE_NAME: set here, when the
+    deployment has not, before the SDK builds its OpenTelemetry resource."""
     from langfuse import Langfuse
 
+    os.environ.setdefault("OTEL_SERVICE_NAME", _service_name())
     return Langfuse(environment=_environment(), release=_release(),
                     mask_otel_spans=mask_spans, should_export_span=_should_export,
                     **overrides)
@@ -239,6 +294,11 @@ def run(name: str, *, input: Any = None, session_id: Optional[str] = None,
 
     from langfuse import propagate_attributes
 
+    global _trace_metadata_keys
+    metadata = _string_metadata(metadata)
+    if not set(metadata) <= _trace_metadata_keys:
+        with _trace_metadata_lock:
+            _trace_metadata_keys = _trace_metadata_keys | frozenset(metadata)
     stack = contextlib.ExitStack()
     trace = _UNTRACED
     try:
@@ -246,8 +306,8 @@ def run(name: str, *, input: Any = None, session_id: Optional[str] = None,
             as_type=as_type, name=name, input=input))
         stack.enter_context(propagate_attributes(
             trace_name=name, session_id=session_id, tags=list(tags) or None,
-            metadata=_string_metadata(metadata) or None, version=version))
-        trace = _Trace(observation)
+            metadata=metadata or None, version=version))
+        trace = _Observed(observation)
         stack.callback(_current.reset, _current.set(trace))
     except Exception as e:
         stack.close()
@@ -265,8 +325,9 @@ def run(name: str, *, input: Any = None, session_id: Optional[str] = None,
 
 
 @contextlib.contextmanager
-def _child(name: str, as_type: ObservationType):
-    """A child of the current observation, or None outside a trace."""
+def _child(name: str, as_type: ObservationType, **fields):
+    """A child of the current observation, opened with `fields` (input,
+    metadata), or None outside a trace."""
     client = _client if _current.get().active else None
     if client is None:
         yield None
@@ -275,8 +336,9 @@ def _child(name: str, as_type: ObservationType):
     stack = contextlib.ExitStack()
     observation = None
     try:
-        observation = stack.enter_context(
-            client.start_as_current_observation(as_type=as_type, name=name))
+        observation = stack.enter_context(client.start_as_current_observation(
+            as_type=as_type, name=name,
+            **{key: value for key, value in fields.items() if value is not None}))
     except Exception as e:
         stack.close()
         observation = None
@@ -292,23 +354,121 @@ def _child(name: str, as_type: ObservationType):
             raise
 
 
+@contextlib.contextmanager
+def step(name: str, *, as_type: ObservationType = "span", input: Any = None,
+         metadata: Optional[dict] = None):
+    """Record the block as an observation of its own in the current trace --
+    a step no integration sees, such as the rule lookup or a wait for a model
+    slot. Yields a handle to set its output with; outside a trace the handle
+    does nothing and the block runs the same."""
+    with _child(name, as_type, input=input, metadata=metadata) as observation:
+        yield _Observed(observation)
+
+
+def _describe(describer: Callable, value, name: str) -> dict:
+    """`describer(value)`, the fields an observation is recorded with. A
+    describer that fails costs the observation its details, never the node."""
+    try:
+        fields = describer(value)
+        return dict(fields) if fields else {}
+    except Exception as e:
+        logger.warning("Could not describe a node for its trace", node=name,
+                       error=f"{type(e).__name__}: {e}")
+        return {}
+
+
 def node(name: str, fn: Callable, *, as_type: ObservationType = "span",
-         output: Optional[Callable[[Any], Any]] = None) -> Callable:
+         start: Optional[Callable[[Any], dict]] = None,
+         end: Optional[Callable[[Any], dict]] = None) -> Callable:
     """Graph node `fn`, recorded as an observation named `name` when it runs
-    inside a trace. `output` turns the node's state update into what the
-    observation shows (default: the update as it is)."""
+    inside a trace.
+
+    `start(state)` returns the fields the observation opens with (input,
+    metadata). `end(update)` returns the fields it closes with -- output,
+    level, status_message, metadata -- and, under `scores`, {name: (value,
+    data_type)} to score it with. Without `end` the node's state update is the
+    output. Neither is called outside a trace.
+    """
     @functools.wraps(fn)
     def traced(state):
-        with _child(name, as_type) as observation:
+        traced_run = _current.get().active
+        opening = _describe(start, state, name) if (start and traced_run) else {}
+        with _child(name, as_type, **opening) as observation:
             update = fn(state)
             if observation is not None:
-                try:
-                    observation.update(output=output(update) if output else update)
-                except Exception as e:
-                    logger.warning("Could not record a node's output", node=name,
-                                   error=f"{type(e).__name__}: {e}")
+                fields = _describe(end, update, name) if end else {"output": update}
+                scores = fields.pop("scores", None) or {}
+                observed = _Observed(observation)
+                observed.update(**fields)
+                for score_name, (value, data_type) in scores.items():
+                    observed.score(score_name, value, data_type)
             return update
     return traced
+
+
+def current() -> _Observed:
+    """The trace open on this thread: a handle that does nothing outside one."""
+    return _current.get()
+
+
+def score(trace_id: Optional[str], name: str, value, *, data_type: ScoreType,
+          observation_id: Optional[str] = None, comment: Optional[str] = None) -> None:
+    """Attach a score to a trace, or to one observation in it.
+
+    A score is how a trace is labelled with something learned while it ran --
+    a verdict, a count, how the packet ended -- since tags are fixed when a
+    trace starts; the trace table filters and charts on scores. Their names
+    are an API: dashboards and evaluators find them by name.
+
+    Scores go to Langfuse's ingestion API, not through the exporter, so
+    `mask_spans` never sees them: a value or comment must only ever be a
+    count or a fixed label, never text from a packet. The score's id is
+    derived from what it scores, so recording it again replaces it.
+    """
+    if not trace_id or _client is None:
+        return
+    try:
+        target = f"{trace_id}/{observation_id or ''}/{name}"
+        _client.create_score(
+            name=name, value=value, data_type=data_type, trace_id=trace_id,
+            observation_id=observation_id, comment=comment,
+            score_id=str(uuid.uuid5(uuid.NAMESPACE_URL, target)))
+    except Exception as e:
+        logger.warning("Could not record a Langfuse score", score=name,
+                       error=f"{type(e).__name__}: {e}")
+
+
+_handler_class = None
+
+
+def _callback_handler():
+    """The LangChain handler, as the SDK's but with each model reply's
+    reasoning in its message (`reasoning_content`, where Langfuse renders it
+    in the formatted view).
+
+    vLLM returns a reasoning model's thinking beside its answer, and
+    `llm_utils` keeps it in the AIMessage's `additional_kwargs`; the SDK's
+    handler records a message's content and tool calls only. Without the
+    reasoning, a trace shows what an agent decided but not why.
+    """
+    global _handler_class
+    if _handler_class is None:
+        from langchain_core.messages import AIMessage
+        from langfuse.langchain import CallbackHandler
+
+        class _ReasoningCallbackHandler(CallbackHandler):
+            def _convert_message_to_dict(self, message):
+                converted = super()._convert_message_to_dict(message)
+                reasoning = (message.additional_kwargs or {}).get("reasoning_content") \
+                    if isinstance(message, AIMessage) else None
+                if reasoning and isinstance(converted, dict):
+                    converted["reasoning_content"] = reasoning
+                return converted
+
+        _handler_class = _ReasoningCallbackHandler
+    # By key: with a second Langfuse client in the process, a handler without
+    # one is given a disabled client, and records nothing.
+    return _handler_class(public_key=os.environ.get("LANGFUSE_PUBLIC_KEY"))
 
 
 def invoke(runnable, request):
@@ -318,11 +478,7 @@ def invoke(runnable, request):
     if not _current.get().active:
         return runnable.invoke(request)
     try:
-        from langfuse.langchain import CallbackHandler
-
-        # By key: with a second Langfuse client in the process, a handler
-        # without one is given a disabled client, and records nothing.
-        handler = CallbackHandler(public_key=os.environ.get("LANGFUSE_PUBLIC_KEY"))
+        handler = _callback_handler()
     except Exception as e:
         logger.warning("Could not create the Langfuse callback handler",
                        error=f"{type(e).__name__}: {e}")
@@ -543,6 +699,9 @@ _UNMASKED = frozenset({
     "langfuse.trace.name", "langfuse.trace.tags", "langfuse.trace.public",
 })
 
+#: Where the SDK puts propagated trace metadata, one attribute per key.
+_TRACE_METADATA_PREFIX = "langfuse.trace.metadata."
+
 #: The span attributes holding the identifiers redaction must keep: the
 #: session (the eventId or case key) and the same values in the metadata.
 _ALLOWLIST_ATTRIBUTES = ("session.id", "langfuse.trace.metadata.event_id",
@@ -615,25 +774,47 @@ def mask_spans(*, params):
 
     Runs on the exporter's thread, one batch at a time. An attribute that
     cannot be masked is replaced with a placeholder rather than sent as it
-    is; the SDK would drop the whole batch if this raised.
+    is; the SDK would drop the whole batch if this raised. Trace metadata
+    that no trace of ours set -- the LangChain run's, propagated by the
+    handler -- is removed (`_trace_metadata_keys`).
     """
     from langfuse.types import MaskOtelSpansResult, OtelSpanPatch
 
+    own_metadata = {f"{_TRACE_METADATA_PREFIX}{key}" for key in _trace_metadata_keys}
     patches = {}
     for identifier, span in params.spans.items():
         attributes = span.attributes or {}
-        allowlist = [str(attributes[key]) for key in _ALLOWLIST_ATTRIBUTES
-                     if attributes.get(key)]
-        replacements = {}
-        for key, value in attributes.items():
-            if key in _UNMASKED or key.startswith("langfuse.internal."):
-                continue
-            try:
-                masked = _mask_attribute(value, allowlist)
-            except Exception:
-                masked = _MASK_FAILED
-            if masked != value:
-                replacements[key] = masked
-        if replacements:
-            patches[identifier] = OtelSpanPatch(set_attributes=replacements)
+        try:
+            patch = _span_patch(attributes, own_metadata)
+        except Exception:
+            # Fail closed: the span goes without anything that could hold
+            # packet data, rather than the batch going without masking.
+            patch = OtelSpanPatch(delete_attributes=tuple(
+                key for key in attributes if key not in _UNMASKED))
+        if patch is not None:
+            patches[identifier] = patch
     return MaskOtelSpansResult(span_patches=patches)
+
+
+def _span_patch(attributes, own_metadata: set):
+    """One span's patch for `mask_spans`, or None when nothing changes."""
+    from langfuse.types import OtelSpanPatch
+
+    allowlist = [str(attributes[key]) for key in _ALLOWLIST_ATTRIBUTES if attributes.get(key)]
+    replacements = {}
+    removals = []
+    for key, value in attributes.items():
+        if key.startswith(_TRACE_METADATA_PREFIX) and key not in own_metadata:
+            removals.append(key)
+            continue
+        if key in _UNMASKED or key.startswith("langfuse.internal."):
+            continue
+        try:
+            masked = _mask_attribute(value, allowlist)
+        except Exception:
+            masked = _MASK_FAILED
+        if masked != value:
+            replacements[key] = masked
+    if not (replacements or removals):
+        return None
+    return OtelSpanPatch(set_attributes=replacements, delete_attributes=tuple(removals))

@@ -45,13 +45,14 @@ from typing import Optional, Sequence
 from deepagents import create_deep_agent
 from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT
 from langchain.agents.middleware import (
+    AgentMiddleware,
     ModelCallLimitMiddleware,
     ToolCallLimitMiddleware,
 )
 
 from src.core.run_control import CancellationMiddleware
 from src.tools import mcp_client
-from src.utils import tracing
+from src.utils import resilience, tracing
 from src.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -74,7 +75,10 @@ question, so never ask one: work from the evidence you have and say plainly
 what is missing. Only your final message is read. Put your complete answer in
 it, in exactly the format the instructions above require -- not in a file and
 not in a todo list. The file tools are private scratch space, discarded when
-you finish; they hold nothing you were not given."""
+you finish; they hold nothing you were not given. They start empty: a file
+named in your instructions or evidence -- a `[Source: ...]` reference in the
+documentation, for instance -- is a citation, not a file you can open, so do
+not look for it."""
 
 
 def _limit(variable: str, default: int) -> int:
@@ -96,13 +100,34 @@ def max_model_calls() -> int:
     return _limit("AGENT_MAX_MODEL_CALLS", DEFAULT_MAX_MODEL_CALLS)
 
 
+class ModelCallSlotMiddleware(AgentMiddleware):
+    """Hold one of the process's model-call slots for each model call: at most
+    LLM_MAX_CONCURRENT_CALLS calls from this pod reach the model server at
+    once, across every agent of both lanes (resilience). A slot is held for
+    the call alone -- never across a tool call, a retry's backoff or a
+    Reviewer's wait -- and a wait for one shows in the trace."""
+
+    def wrap_model_call(self, request, handler):
+        with resilience.model_call_slot():
+            return handler(request)
+
+    async def awrap_model_call(self, request, handler):
+        await resilience.acquire_model_call_slot_async()
+        try:
+            return await handler(request)
+        finally:
+            resilience.release_model_call_slot()
+
+
 def _limits() -> list:
     """Fresh limit middleware; each agent and subagent counts its own run.
 
     Cancellation comes first, so an abandoned run is stopped before a limit
-    counts a call it will never make (run_control)."""
+    counts a call it will never make (run_control), or waits for a model-call
+    slot it will never use."""
     return [
         CancellationMiddleware(),
+        ModelCallSlotMiddleware(),
         ToolCallLimitMiddleware(run_limit=max_tool_calls(), exit_behavior="continue"),
         ModelCallLimitMiddleware(run_limit=max_model_calls(), exit_behavior="error"),
     ]

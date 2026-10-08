@@ -1,10 +1,11 @@
 import os
 import json
+import re
 import contextvars
 import functools
 import threading
 import time
-from typing import Optional, TypedDict
+from typing import Any, Optional, TypedDict
 from langgraph.graph import StateGraph, START, END
 from langchain_core.messages import HumanMessage
 
@@ -101,6 +102,16 @@ def _counted(node: str, invoke, service: str = "unknown"):
         raise
 
 
+#: A leading block of reasoning, as a model served without a reasoning parser
+#: writes it into its answer.
+_LEADING_THINK = re.compile(r"^\s*<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+
+#: An approving verdict line, once leading markdown is stripped: the word,
+#: then the end of the line -- or a full stop or exclamation mark ending the
+#: verdict, and whatever commentary follows it. Markdown may close the word.
+_APPROVED_LINE = re.compile(r"APPROVED[*_`'\"]*(?:[.!][*_`'\"]*(?:\s.*)?)?", re.IGNORECASE)
+
+
 def is_reviewer_approved(feedback: str) -> bool:
     """Return True only if the Reviewer's verdict is an unqualified APPROVED.
 
@@ -108,7 +119,7 @@ def is_reviewer_approved(feedback: str) -> bool:
     "NOT APPROVED", "DISAPPROVED", or prose like "this is not approved
     because...", silently skipping the QC loop. The Reviewer is instructed to
     put its verdict on the FIRST line, so that line -- stripped of markdown and
-    whitespace -- must start with the token.
+    whitespace -- must be the token.
 
     Only the first non-empty line is read, and that matters more than it
     looks. A react agent's final message can carry a leading blank line or a
@@ -118,12 +129,46 @@ def is_reviewer_approved(feedback: str) -> bool:
     any reply that opened with a newline, and reading further than the first
     line would let a discussion of what "approved" would require count as an
     approval. One line, at the top, is the contract ReviewerAgent.md states.
+
+    And the line must BE the verdict, not merely start with it: ReviewerAgent.md
+    asks for exactly one word and says anything else counts as a rejection.
+    A prefix check approved "APPROVED: NO -- not grounded", "APPROVED? No."
+    and "Approved with corrections: ..." and sent them on to Synthesis. The
+    word may be wrapped in markdown (`**APPROVED**`, `# APPROVED`) and may end
+    its sentence ("APPROVED. Nice work."); a word qualifying it -- a colon, a
+    question mark, "with ...", a dash -- makes the line a rejection, as the
+    prompt says. A leading <think> block is skipped: it is reasoning, not the
+    reply.
     """
-    for line in (feedback or "").splitlines():
-        candidate = line.strip().strip("*_`\"' \t\r")
-        if candidate:
-            return candidate.upper().startswith("APPROVED")
+    text = _LEADING_THINK.sub("", feedback or "", count=1)
+    for line in text.splitlines():
+        candidate = line.strip().lstrip("*_`\"'# \t")
+        if candidate.strip("*_`\"' \t\r"):
+            return bool(_APPROVED_LINE.fullmatch(candidate.rstrip()))
     return False
+
+
+#: Where a Reviewer verdict sends the packet: the graph's routing names, and
+#: how a trace describes each.
+REVIEW_NEXT_STEPS = {"synthesis": "synthesize", "investigator": "investigate again",
+                     "escalate": "escalate to manual review"}
+
+
+def max_reviews() -> int:
+    """MAX_INVESTIGATION_RETRIES: how many Reviewer verdicts a packet gets
+    before a rejected one escalates it."""
+    return int(os.environ.get("MAX_INVESTIGATION_RETRIES", 3))
+
+
+def review_decision(feedback: str, reviews: int) -> str:
+    """Where the packet goes after `reviews` reviews, the last of which
+    returned `feedback`: "synthesis", "investigator" or "escalate". The
+    graph's routing and the trace's account of it, from one rule."""
+    if is_reviewer_approved(feedback):
+        return "synthesis"
+    if reviews >= max_reviews():
+        return "escalate"
+    return "investigator"
 
 
 def enrolment_type_display(payload: dict, pack: Optional[str] = None) -> str:
@@ -463,6 +508,101 @@ def _traced_update(update) -> dict:
     return shown
 
 
+def _attempt_started(state) -> dict:
+    """What the `investigate` observation opens with: which attempt this is,
+    and for a retry the Reviewer verdict it has to answer."""
+    feedback = state.get("reviewer_feedback") or ""
+    attempt = (state.get("retry_count") or 0) + 1
+    opening = {"attempt": attempt, "retry": bool(feedback)}
+    if feedback:
+        opening["reviewer_feedback"] = feedback
+    return {"input": opening, "metadata": {"attempt": attempt}}
+
+
+def _review_started(state) -> dict:
+    """What the `review` observation opens with: which review of how many."""
+    review = (state.get("retry_count") or 0) + 1
+    return {"input": {"review": review, "of": max_reviews()},
+            "metadata": {"review": review}}
+
+
+def _review_ended(update) -> dict:
+    """What the `review` observation closes with: the verdict, which review
+    it was, where it sends the packet -- by `review_decision`, the graph's own
+    rule -- and the Reviewer's words. A rejection is a WARNING, so it stands
+    out in the trace tree, and every verdict is scored (`review_verdict`)."""
+    feedback = update.get("reviewer_feedback") or ""
+    reviews = update.get("retry_count") or 0
+    decision = review_decision(feedback, reviews)
+    verdict = "APPROVED" if decision == "synthesis" else "REJECTED"
+    fields: dict[str, Any] = {
+        "output": {"verdict": verdict, "review": reviews, "of": max_reviews(),
+                   "next": REVIEW_NEXT_STEPS[decision], **_traced_update(update)},
+        "scores": {"review_verdict": (verdict, "CATEGORICAL")},
+    }
+    if verdict == "REJECTED":
+        fields["level"] = "WARNING"
+        fields["status_message"] = (f"REJECTED in review {reviews} of {max_reviews()}; "
+                                    f"next: {REVIEW_NEXT_STEPS[decision]}")
+    return fields
+
+
+def _escalation_started(state) -> dict:
+    return {"input": {"reviews": state.get("retry_count") or 0}}
+
+
+def _escalation_ended(update) -> dict:
+    return {"output": _traced_update(update), "level": "WARNING",
+            "status_message": "Escalated to manual review: no review approved the "
+                              "investigation"}
+
+
+def review_summary(result) -> dict:
+    """How the Reviewer treated the packet, from the graph's final state:
+    `reviews` and `reviewer_rejections`, and `review_outcome` -- `approved`
+    first time, `approved_after_rejection`, `escalated` (never approved),
+    `runbook` (answered by a runbook, never reviewed) or `not_reviewed`. On a
+    run resumed from a checkpoint the counts cover the whole packet."""
+    result = result if isinstance(result, dict) else {}
+    reviews = int(result.get("retry_count") or 0)
+    if str(result.get("resolution_source") or "").startswith("runbook:"):
+        return {"reviews": 0, "reviewer_rejections": 0, "review_outcome": "runbook"}
+    if reviews == 0:
+        return {"reviews": 0, "reviewer_rejections": 0, "review_outcome": "not_reviewed"}
+    approved = is_reviewer_approved(result.get("reviewer_feedback") or "")
+    rejections = reviews - 1 if approved else reviews
+    if not approved:
+        outcome = "escalated"
+    else:
+        outcome = "approved_after_rejection" if rejections else "approved"
+    return {"reviews": reviews, "reviewer_rejections": rejections, "review_outcome": outcome}
+
+
+def invoke_fresh(agent, inputs: dict, config: dict):
+    """`agent.invoke(inputs)` as a new run of the packet, on a thread with
+    nothing left from an earlier run.
+
+    LangGraph keeps a thread's values after its run ends, and a new input
+    overwrites only the keys it names. The route reset `retry_count` alone
+    (0.5), so a packet run again -- its casebook removed to re-run it, or
+    taken over after a crash between the graph ending and the casebook write
+    -- began with the last run's `reviewer_feedback`, `investigation`,
+    documentation, rule text, tool evidence and shadowed runbook. The
+    Investigator then took the old verdict for a Reviewer rejection and
+    "fixed" the previous analysis instead of investigating (2026-10-08). A
+    run that stopped part-way is resumed, never started fresh, so a thread
+    that has values here always holds a finished run's.
+    """
+    state = agent.get_state(config)
+    checkpointer = getattr(agent, "checkpointer", None)
+    if state is not None and getattr(state, "values", None) and checkpointer:
+        thread_id = config["configurable"]["thread_id"]
+        checkpointer.delete_thread(thread_id)
+        logger.bind(event_id=thread_id).info(
+            "Discarded the state of an earlier run of this packet; starting fresh")
+    return agent.invoke(inputs, config=config)
+
+
 def _trace_attributes(payload: dict, resolution: dict, pack: str, pilot: bool,
                       resumed: bool) -> dict:
     """The `analyze-rejection` trace's input, session and attributes.
@@ -497,7 +637,7 @@ def _trace_attributes(payload: dict, resolution: dict, pack: str, pilot: bool,
 
 def _trace_output(result) -> dict:
     """The `analyze-rejection` trace's output: the resolution, how it was
-    reached, and how many reviews it took."""
+    reached, and how the Reviewer treated it (`review_summary`)."""
     if not isinstance(result, dict):
         return {}
     parsed, error = parse_synthesis(result.get("synthesis") or "")
@@ -507,17 +647,40 @@ def _trace_output(result) -> dict:
         "resolution_source": result.get("resolution_source"),
         "investigator_path": result.get("investigator_path"),
         "reviewer_path": result.get("reviewer_path"),
-        "reviews": result.get("retry_count"),
+        **review_summary(result),
         "shadow_comparison": result.get("shadow_comparison"),
     }
 
 
+def _record_outcome(trace, result) -> None:
+    """Close the packet's trace with its outcome: the output, and the review
+    counts as trace scores the trace table filters on (`reviews`,
+    `reviewer_rejections`, `review_outcome`). An escalated packet's trace is a
+    WARNING, so it stands out in the list."""
+    summary = review_summary(result)
+    fields: dict[str, Any] = {"output": _trace_output(result)}
+    if summary["review_outcome"] == "escalated":
+        fields["level"] = "WARNING"
+        fields["status_message"] = (f"Escalated to manual review after "
+                                    f"{summary['reviewer_rejections']} rejected reviews")
+    trace.update(**fields)
+    trace.score("reviews", summary["reviews"], "NUMERIC", whole_trace=True)
+    trace.score("reviewer_rejections", summary["reviewer_rejections"], "NUMERIC",
+                whole_trace=True)
+    trace.score("review_outcome", summary["review_outcome"], "CATEGORICAL", whole_trace=True)
+
+
 def traced_investigation(invoke, payload: dict, resolution: dict, pack: str,
-                         pilot: bool, resumed: bool = False):
+                         pilot: bool, resumed: bool = False,
+                         trace_ref: Optional[dict] = None):
     """`invoke()` -- one run of the graph -- recorded as an `analyze-rejection`
     trace when tracing is on (utils/tracing). Call it on the thread the graph
     runs on: the trace is carried in context variables, which a thread pool
-    does not copy."""
+    does not copy.
+
+    `trace_ref`, when given, receives the trace's id under `trace_id` as soon
+    as the trace opens (and only if it is sampled), so the route can score
+    the packet's final status on it -- including when it stops waiting."""
     if not tracing.enabled():
         return invoke()
     event_id = str(payload.get("eventId") or "unknown")
@@ -534,8 +697,16 @@ def traced_investigation(invoke, payload: dict, resolution: dict, pack: str,
         if trace.active:
             logger.bind(event_id=event_id).info("Langfuse trace opened",
                                                 trace_id=trace.trace_id)
+            if trace_ref is not None and trace.sampled:
+                trace_ref["trace_id"] = trace.trace_id
         result = invoke()
-        trace.update(output=_trace_output(result))
+        try:
+            _record_outcome(trace, result)
+        except Exception as e:
+            # The investigation is done; describing it must not undo that.
+            logger.bind(event_id=event_id).warning(
+                "Could not record the packet's outcome in its trace",
+                error=f"{type(e).__name__}: {e}")
         return result
 
 
@@ -1166,21 +1337,33 @@ def _build_agent():
                 # its own copy of the filter, which drifted from the three
                 # runbook call sites' copy (F2). The filter is the pack's.
                 packet_type = payload.get("packetMetaData", {}).get("enrolmentType", "")
-                try:
-                    db_rule = lookup_rule_text(
-                        reason_code, packet_type,
-                        type_filter=service_registry.rule_type_filter(pack))
-                    # If db_rule is empty or indicates failure, fallback to hardcoded description
-                    if db_rule.startswith("Rule not found") or db_rule == "[]":
+                # A step of its own in the trace: a rules-database query can
+                # take as long as a model call, and without it the wait showed
+                # only as an unexplained gap at the start of `investigate`.
+                with tracing.step("lookup-rule", as_type="retriever",
+                                  input={"reason_code": reason_code,
+                                         "enrolment_type": packet_type}) as lookup:
+                    try:
+                        db_rule = lookup_rule_text(
+                            reason_code, packet_type,
+                            type_filter=service_registry.rule_type_filter(pack))
+                        # If db_rule is empty or indicates failure, fallback to hardcoded description
+                        if db_rule.startswith("Rule not found") or db_rule == "[]":
+                            fallback_desc = get_error_description(reason_code)
+                            if fallback_desc != "Unknown error code.":
+                                db_rule += f"\n\nSystem Error Description: {fallback_desc}"
+                            lookup.update(output=db_rule, level="WARNING",
+                                          status_message="No rule found for this reason code")
+                        else:
+                            lookup.update(output=db_rule)
+                    except Exception as e:
+                        log.warning("Rule lookup failed", error=f"{type(e).__name__}: {e}")
+                        db_rule = f"Rule lookup failed for reason code {reason_code}: {e}"
                         fallback_desc = get_error_description(reason_code)
                         if fallback_desc != "Unknown error code.":
                             db_rule += f"\n\nSystem Error Description: {fallback_desc}"
-                except Exception as e:
-                    log.warning("Rule lookup failed", error=f"{type(e).__name__}: {e}")
-                    db_rule = f"Rule lookup failed for reason code {reason_code}: {e}"
-                    fallback_desc = get_error_description(reason_code)
-                    if fallback_desc != "Unknown error code.":
-                        db_rule += f"\n\nSystem Error Description: {fallback_desc}"
+                        lookup.update(output=db_rule, level="WARNING",
+                                      status_message=f"Rule lookup failed: {type(e).__name__}")
             else:
                 db_rule = "No errorReasonCode found in payload."
 
@@ -1516,22 +1699,22 @@ def _build_agent():
     def check_approval(state: GraphState):
         feedback = state.get("reviewer_feedback", "")
         retry_count = state.get("retry_count", 0)
-        max_retries = int(os.environ.get("MAX_INVESTIGATION_RETRIES", 3))
         event_id = state.get("payload", {}).get("eventId", "unknown")
         log = logger.bind(event_id=event_id, retry_count=retry_count)
 
-        if is_reviewer_approved(feedback):
+        # The same rule the review's trace observation reports
+        # (`_review_ended`), so the trace can never disagree with the routing.
+        decision = review_decision(feedback, retry_count)
+        if decision == "synthesis":
             log.info("Reviewer APPROVED findings", transition="synthesis")
-            return "synthesis"
-        elif retry_count >= max_retries:
-            log.warning("Maximum retries reached", max_retries=max_retries,
+        elif decision == "escalate":
+            log.warning("Maximum retries reached", max_retries=max_reviews(),
                         transition="escalate", state="NEEDS_MANUAL_REVIEW",
                         verdict=(feedback or "").strip()[:600])
-            return "escalate"
         else:
             log.info("Reviewer REJECTED findings", transition="investigator",
                      state="RETRYING", verdict=(feedback or "").strip()[:600])
-            return "investigator"
+        return decision
 
     def escalate_node(state: GraphState):
         event_id = state.get("payload", {}).get("eventId", "unknown")
@@ -1614,10 +1797,23 @@ def _build_agent():
                         HumanMessage(content=repair_prompt)
                     ]})
 
-            res = _counted("synthesis", invoke_repair, service)
-            metrics.record_llm_usage("synthesis", res)
-            synthesis_content = res["messages"][-1].content
-            parsed, error = parse_synthesis(synthesis_content)
+            # The contract rejecting Synthesis's reply is a rejection too, and
+            # shows in the trace as one: a step holding the repair call, a
+            # WARNING when the repair passes and an ERROR when it does not.
+            with tracing.step("repair-synthesis", input={"contract_error": error}) as repair:
+                res = _counted("synthesis", invoke_repair, service)
+                metrics.record_llm_usage("synthesis", res)
+                synthesis_content = res["messages"][-1].content
+                parsed, error = parse_synthesis(synthesis_content)
+                if parsed is None:
+                    repair.update(output={"valid": False, "contract_error": error},
+                                  level="ERROR",
+                                  status_message="Still invalid after a repair; escalated "
+                                                 "to manual review")
+                else:
+                    repair.update(output={"valid": True}, level="WARNING",
+                                  status_message="Synthesis reply failed the contract; "
+                                                 "repaired")
 
         if parsed is None:
             # Two failures. Escalating is the only honest outcome: we have no
@@ -1718,9 +1914,11 @@ def _build_agent():
             return node(state)
         return run
 
-    def traced(name, node, as_type: tracing.ObservationType = "span"):
-        """`node`, recorded as an observation in the packet's trace."""
-        return tracing.node(name, node, as_type=as_type, output=_traced_update)
+    def traced(name, node, as_type: tracing.ObservationType = "span", start=None, end=None):
+        """`node`, recorded as an observation in the packet's trace: by
+        default its state update, less the evidence (`_traced_update`)."""
+        return tracing.node(name, node, as_type=as_type, start=start,
+                            end=end or (lambda update: {"output": _traced_update(update)}))
 
     # Build Graph
     workflow = StateGraph(GraphState)
@@ -1728,10 +1926,14 @@ def _build_agent():
     workflow.add_node("runbook_lookup", stoppable(traced("lookup-runbook", runbook_lookup_node,
                                                          "retriever")))
     workflow.add_node("filter_logs", stoppable(traced("filter-logs", filter_logs_node)))
-    workflow.add_node("investigate", stoppable(traced("investigate", investigator_node)))
-    workflow.add_node("review", stoppable(traced("review", reviewer_node, "evaluator")))
+    workflow.add_node("investigate", stoppable(traced("investigate", investigator_node,
+                                                      start=_attempt_started)))
+    workflow.add_node("review", stoppable(traced("review", reviewer_node, "evaluator",
+                                                 start=_review_started, end=_review_ended)))
     workflow.add_node("synthesize", stoppable(traced("synthesize", synthesis_node)))
-    workflow.add_node("escalate", stoppable(traced("escalate", escalate_node)))
+    workflow.add_node("escalate", stoppable(traced("escalate", escalate_node,
+                                                   start=_escalation_started,
+                                                   end=_escalation_ended)))
     
     workflow.add_edge(START, "fetch_logs")
     workflow.add_edge("fetch_logs", "runbook_lookup")

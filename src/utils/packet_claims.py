@@ -29,9 +29,13 @@ so a create-only write against it would always lose.
 
 The rules for an existing claim:
 
-  holder finished  the packet is already terminal. Skip -- though the
-                   terminal-casebook check ahead of this normally gets there
-                   first.
+  holder abandoned the API shut down mid-run and recorded FAILED_SHUTDOWN
+                   after the claim was taken. The holder is dead and the
+                   packet is redelivered to be investigated: take the claim
+                   over now, not after the TTL.
+  holder finished  the packet is already terminal -- FAILED_SHUTDOWN aside.
+                   Skip -- though the terminal-casebook check ahead of this
+                   normally gets there first.
   holder stale     the claim is older than the TTL, so its run died without
                    finishing. Take it over. The TTL is twice the invoke
                    budget, because a run may legitimately use all of it and
@@ -136,7 +140,22 @@ def _claim(event_id: str) -> Claim:
         return Claim(won=True, outcome="won")
 
     existing = storage.load(event_id, filename=CLAIM_FILENAME) or {}
-    age = now - float(existing.get("claimed_at") or 0.0)
+    claimed_at = float(existing.get("claimed_at") or 0.0)
+    age = now - claimed_at
+
+    abandoned_at = _abandoned_at(event_id)
+    if abandoned_at is not None and claimed_at <= abandoned_at:
+        # The holder is the run the API abandoned when it shut down
+        # (FAILED_SHUTDOWN): dead, but younger than the TTL, so this
+        # redelivery would have waited on it as a duplicate and given up.
+        # Only a claim from before the abandonment is taken: once one
+        # redelivery has taken it, a later duplicate finds a newer claim.
+        storage.save(event_id, {"event_id": event_id, "claimed_at": now,
+                                "reclaimed_after_shutdown": True},
+                     filename=CLAIM_FILENAME)
+        logger.info("Took over the claim of a run abandoned at shutdown",
+                    event_id=event_id, claim_age_seconds=round(age, 1))
+        return Claim(won=True, outcome="reclaimed", age_seconds=round(age, 1))
 
     if _is_finished(event_id):
         return Claim(won=False, outcome="finished", age_seconds=round(age, 1))
@@ -157,10 +176,31 @@ def _claim(event_id: str) -> Claim:
 
 
 def _is_finished(event_id: str) -> bool:
-    from src.storage.base import TERMINAL_STATUSES
+    """Whether the packet is terminal -- other than a status a redelivery
+    still investigates (FAILED_SHUTDOWN)."""
+    from src.storage.base import REDELIVERABLE_TERMINAL_STATUSES, TERMINAL_STATUSES
     from src.storage.factory import get_casebook_storage
 
     try:
-        return get_casebook_storage().terminal_status(event_id) in TERMINAL_STATUSES
+        status = get_casebook_storage().terminal_status(event_id)
     except Exception:
         return False
+    return status in TERMINAL_STATUSES and status not in REDELIVERABLE_TERMINAL_STATUSES
+
+
+def _abandoned_at(event_id: str) -> Optional[float]:
+    """When the API's shutdown abandoned this packet's run, from its
+    FAILED_SHUTDOWN casebook, or None. A casebook written before the time was
+    recorded has none; its claim is taken over after the TTL, as before."""
+    from src.storage.base import REDELIVERABLE_TERMINAL_STATUSES
+    from src.storage.factory import get_casebook_storage
+
+    try:
+        casebook = get_casebook_storage().load(event_id, filename="casebook.json") or {}
+        if (casebook.get("packet_status") or {}).get("status") not in \
+                REDELIVERABLE_TERMINAL_STATUSES:
+            return None
+        abandoned_at = (casebook.get("packet_metadata") or {}).get("abandoned_at")
+        return float(abandoned_at) if abandoned_at is not None else None
+    except Exception:
+        return None

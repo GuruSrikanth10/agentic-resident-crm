@@ -6,6 +6,48 @@ import os
 # the two don't compound into surprising multi-minute retry storms.
 LLM_TIMEOUT_SECONDS = float(os.environ.get("LLM_TIMEOUT_SECONDS", "60"))
 
+_reasoning_chat_openai = None
+
+
+def _chat_openai_class():
+    """ChatOpenAI, keeping a reasoning model's thinking.
+
+    vLLM serves a reasoning model (glm-5.2) with its thinking in the reply's
+    `reasoning_content` field, beside the answer. ChatOpenAI targets the
+    official OpenAI API and drops fields it does not know, so the thinking --
+    usually most of a call's output tokens -- reached neither the trace nor
+    anything else: a trace showed what an agent decided and never why. This
+    keeps it in the AIMessage's `additional_kwargs["reasoning_content"]`
+    (`reasoning`, as some servers name it, is read too). The answer itself is
+    untouched: `content` is what it was, and what is sent back to the model
+    on the next turn leaves additional_kwargs out, so the model never sees its
+    old thinking again. Built on first use, like the import it needs.
+    """
+    global _reasoning_chat_openai
+    if _reasoning_chat_openai is None:
+        from langchain_openai import ChatOpenAI
+
+        class ReasoningChatOpenAI(ChatOpenAI):
+            def _create_chat_result(self, response, generation_info=None):
+                result = super()._create_chat_result(response, generation_info)
+                try:
+                    dumped = response if isinstance(response, dict) else response.model_dump(
+                        exclude={"choices": {"__all__": {"message": {"parsed"}}}})
+                    for choice, generation in zip(dumped.get("choices") or [],
+                                                  result.generations):
+                        message = choice.get("message") or {}
+                        reasoning = message.get("reasoning_content") or message.get("reasoning")
+                        if isinstance(reasoning, str) and reasoning.strip():
+                            generation.message.additional_kwargs["reasoning_content"] = reasoning
+                except Exception:
+                    # The answer stands without its reasoning.
+                    pass
+                return result
+
+        _reasoning_chat_openai = ReasoningChatOpenAI
+    return _reasoning_chat_openai
+
+
 # The only two tiers any caller passes (see agent_orchestrator.get_agent).
 # A typo'd or stale tier name (e.g. "medium") used to silently fall through
 # to the "simple" branch via the bare `else` below (1.4) -- fail fast instead.
@@ -69,7 +111,7 @@ def get_llm(tier: str = "complex"):
                 max_retries=0
             )
         else:
-            from langchain_openai import ChatOpenAI
+            ChatOpenAI = _chat_openai_class()
             if tier == "complex":
                 model = os.environ.get("LLM_MODEL_COMPLEX", "glm-5.2-fp8")
                 base_url = os.environ.get("LLM_BASE_URL_COMPLEX", "http://localhost:8000/v1")

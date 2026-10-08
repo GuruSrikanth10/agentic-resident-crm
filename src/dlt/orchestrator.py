@@ -90,6 +90,109 @@ def is_approved(feedback: str) -> bool:
     return is_reviewer_approved(feedback)
 
 
+#: Where a DLT Reviewer verdict sends the case, and how a trace says so. The
+#: lane never escalates: out of reviews, it synthesises what it has.
+REVIEW_NEXT_STEPS = {"approved": "synthesize", "exhausted": "synthesize without approval",
+                     "retry": "investigate again"}
+
+
+def max_reviews() -> int:
+    """DLT_MAX_INVESTIGATION_RETRIES: Reviewer verdicts a case gets before
+    its findings are synthesised unapproved."""
+    return int(os.environ.get("DLT_MAX_INVESTIGATION_RETRIES", "3"))
+
+
+def review_decision(feedback: str, reviews: int) -> str:
+    """"approved", "exhausted" (rejected, and out of reviews) or "retry",
+    after `reviews` reviews the last of which returned `feedback`. The graph's
+    routing and the trace's account of it, from one rule."""
+    if is_approved(feedback):
+        return "approved"
+    if reviews >= max_reviews():
+        return "exhausted"
+    return "retry"
+
+
+def _untraced_evidence(update) -> dict:
+    """A node's state update as its trace observation shows it: tool results
+    are tool observations of their own, so not repeated here."""
+    return {key: value for key, value in (update or {}).items() if key != "tool_evidence"}
+
+
+def _attempt_started(state) -> dict:
+    """What the `investigate` observation opens with: which attempt, and for
+    a retry the Reviewer verdict it answers (the node's own retry rule)."""
+    feedback = state.get("reviewer_feedback") or ""
+    retry = bool(feedback) and not is_approved(feedback)
+    attempt = (state.get("retry_count") or 0) + 1
+    opening = {"attempt": attempt, "retry": retry}
+    if retry:
+        opening["reviewer_feedback"] = feedback
+    return {"input": opening, "metadata": {"attempt": attempt}}
+
+
+def _review_started(state) -> dict:
+    review = (state.get("retry_count") or 0) + 1
+    return {"input": {"review": review, "of": max_reviews()},
+            "metadata": {"review": review}}
+
+
+def _review_ended(update) -> dict:
+    """The `review` observation's verdict, number and next step; a rejection
+    is a WARNING and every verdict is scored (`review_verdict`)."""
+    feedback = update.get("reviewer_feedback") or ""
+    reviews = update.get("retry_count") or 0
+    decision = review_decision(feedback, reviews)
+    verdict = "APPROVED" if decision == "approved" else "REJECTED"
+    fields: dict = {
+        "output": {"verdict": verdict, "review": reviews, "of": max_reviews(),
+                   "next": REVIEW_NEXT_STEPS[decision], **_untraced_evidence(update)},
+        "scores": {"review_verdict": (verdict, "CATEGORICAL")},
+    }
+    if verdict == "REJECTED":
+        fields["level"] = "WARNING"
+        fields["status_message"] = (f"REJECTED in review {reviews} of {max_reviews()}; "
+                                    f"next: {REVIEW_NEXT_STEPS[decision]}")
+    return fields
+
+
+def review_summary(result) -> dict:
+    """`reviews`, `reviewer_rejections` and `review_outcome` -- `approved`,
+    `approved_after_rejection` or `synthesized_unapproved` -- from the DLT
+    graph's final state."""
+    result = result if isinstance(result, dict) else {}
+    reviews = int(result.get("retry_count") or 0)
+    if reviews == 0:
+        return {"reviews": 0, "reviewer_rejections": 0, "review_outcome": "not_reviewed"}
+    approved = is_approved(result.get("reviewer_feedback") or "")
+    rejections = reviews - 1 if approved else reviews
+    if not approved:
+        outcome = "synthesized_unapproved"
+    else:
+        outcome = "approved_after_rejection" if rejections else "approved"
+    return {"reviews": reviews, "reviewer_rejections": rejections, "review_outcome": outcome}
+
+
+def _record_outcome(trace, result) -> None:
+    """Close the case's trace: the finding, the review counts as trace scores,
+    and a WARNING when the finding was never approved or failed the contract."""
+    summary = review_summary(result)
+    fields: dict = {"output": {"finding": result.get("finding"),
+                               "parse_error": result.get("parse_error"), **summary}}
+    if result.get("parse_error"):
+        fields["level"] = "WARNING"
+        fields["status_message"] = "The finding failed the contract after a repair"
+    elif summary["review_outcome"] == "synthesized_unapproved":
+        fields["level"] = "WARNING"
+        fields["status_message"] = (f"Synthesized without approval after "
+                                    f"{summary['reviewer_rejections']} rejected reviews")
+    trace.update(**fields)
+    trace.score("reviews", summary["reviews"], "NUMERIC", whole_trace=True)
+    trace.score("reviewer_rejections", summary["reviewer_rejections"], "NUMERIC",
+                whole_trace=True)
+    trace.score("review_outcome", summary["review_outcome"], "CATEGORICAL", whole_trace=True)
+
+
 def _evidence_block(state: DltGraphState) -> str:
     """The context both the Investigator and the Reviewer see."""
     failure = state.get("failure") or {}
@@ -420,11 +523,10 @@ def _build_dlt_agent():
     def check_approval(state: DltGraphState):
         feedback = state.get("reviewer_feedback", "")
         retries = state.get("retry_count", 0)
-        limit = int(os.environ.get("DLT_MAX_INVESTIGATION_RETRIES", "3"))
 
-        if is_approved(feedback):
-            return "approved"
-        if retries >= limit:
+        # The same rule the review's trace observation reports (`_review_ended`).
+        decision = review_decision(feedback, retries)
+        if decision == "exhausted":
             # Synthesise the best available findings rather than dropping the
             # case: an unreviewed narrative with a capped confidence is more
             # useful than nothing. The synthesis node records that it was
@@ -434,7 +536,7 @@ def _build_dlt_agent():
                 "DLT reviewer never approved; synthesising anyway",
                 retries=retries)
             return "approved"
-        return "retry"
+        return decision
 
     def synthesis_node(state: DltGraphState):
         log = logger.bind(case_id=state.get("case_id"))
@@ -495,11 +597,18 @@ def _build_dlt_agent():
                         f"Reply again with ONLY the JSON object.")),
                 ]})
 
-        repaired = invoke_repair()
-        metrics.record_llm_usage("dlt_synthesis_repair", repaired)
-        finding, error = parse_finding(repaired["messages"][-1].content)
-        if finding is not None:
-            return {"finding": stamped(finding), "parse_error": None}
+        # The contract rejecting the reply shows in the trace as a step of its
+        # own around the repair: WARNING when it passes, ERROR when it does not.
+        with tracing.step("repair-synthesis", input={"contract_error": error}) as repair:
+            repaired = invoke_repair()
+            metrics.record_llm_usage("dlt_synthesis_repair", repaired)
+            finding, error = parse_finding(repaired["messages"][-1].content)
+            if finding is not None:
+                repair.update(output={"valid": True}, level="WARNING",
+                              status_message="Synthesis reply failed the contract; repaired")
+                return {"finding": stamped(finding), "parse_error": None}
+            repair.update(output={"valid": False, "contract_error": error}, level="ERROR",
+                          status_message="Still invalid after a repair")
 
         log.error("DLT synthesis failed the contract after repair", error=error)
         return {"finding": None, "parse_error": error}
@@ -520,17 +629,19 @@ def _build_dlt_agent():
             return node(state)
         return run
 
-    def traced(name, node, as_type: tracing.ObservationType = "span"):
-        """`node`, recorded as an observation in the case's trace. Tool
-        results are tool observations of their own, so not repeated here."""
-        return tracing.node(name, node, as_type=as_type, output=lambda update: {
-            key: value for key, value in (update or {}).items() if key != "tool_evidence"})
+    def traced(name, node, as_type: tracing.ObservationType = "span", start=None, end=None):
+        """`node`, recorded as an observation in the case's trace: by default
+        its state update, less the tool results (`_untraced_evidence`)."""
+        return tracing.node(name, node, as_type=as_type, start=start,
+                            end=end or (lambda update: {"output": _untraced_evidence(update)}))
 
     # Cancellation is checked before the node's span opens, as in the
     # rejection graph: an abandoned run starts no node and records none.
     graph = StateGraph(DltGraphState)
-    graph.add_node("investigate", stoppable(traced("investigate", investigator_node)))
-    graph.add_node("review", stoppable(traced("review", reviewer_node, "evaluator")))
+    graph.add_node("investigate", stoppable(traced("investigate", investigator_node,
+                                                   start=_attempt_started)))
+    graph.add_node("review", stoppable(traced("review", reviewer_node, "evaluator",
+                                              start=_review_started, end=_review_ended)))
     graph.add_node("synthesise", stoppable(traced("synthesize", synthesis_node)))
 
     graph.add_edge(START, "investigate")
@@ -613,9 +724,13 @@ def investigate(ref_id: str, failure: dict, corroboration: Corroboration,
             "logs": logs,
             "retry_count": 0,
         })
-        trace.update(output={"finding": result.get("finding"),
-                             "parse_error": result.get("parse_error"),
-                             "reviews": result.get("retry_count")})
+        try:
+            _record_outcome(trace, result)
+        except Exception as e:
+            # The analysis is done; describing it must not undo that.
+            logger.bind(case_id=ref_id).warning(
+                "Could not record the case's outcome in its trace",
+                error=f"{type(e).__name__}: {e}")
 
     finding = result.get("finding")
     if finding is None:
