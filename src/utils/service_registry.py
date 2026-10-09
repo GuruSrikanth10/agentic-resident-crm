@@ -661,8 +661,6 @@ def _read_pack_texts(directory: Path, errors: list) -> dict:
     reason-code documentation passes: generic -- no packet identifier, date
     or long digit run -- and free of instruction-shaped text.
     """
-    from src.utils.runbook_validator import INJECTION_MARKERS, validate_generic_text
-
     name = directory.name
     texts = {}
     for filename in PACK_TEXT_FILES:
@@ -676,14 +674,42 @@ def _read_pack_texts(directory: Path, errors: list) -> dict:
             errors.append(f"{label} could not be read: {error}")
             continue
         texts[filename] = text
-        for violation in validate_generic_text(text, []):
-            errors.append(f"{label}: {violation}")
-        lowered = text.lower()
-        for marker in INJECTION_MARKERS:
-            if marker in lowered:
-                errors.append(f"{label}: contains instruction-shaped text: "
-                              f"{marker!r}")
+        errors.extend(_text_errors(label, text))
 
+    errors.extend(_pack_shape_errors(name, texts))
+    return texts
+
+
+def check_pack_texts(name: str, texts: dict) -> list:
+    """Every error the registry would report for pack `name` holding `texts`
+    ({file name: text}): the same checks, messages and order as reading them
+    from its directory. For text that does not come from the directory --
+    the pack's prompts fetched from Langfuse (prompt_store) -- which must not
+    reach a system prompt without passing what a file has to pass."""
+    errors = []
+    for filename in PACK_TEXT_FILES:
+        if filename in texts:
+            errors.extend(_text_errors(f"{name}/{filename}", texts[filename]))
+    errors.extend(_pack_shape_errors(name, texts))
+    return errors
+
+
+def _text_errors(label: str, text: str) -> list:
+    """One pack text's checks: generic -- no packet identifier, date or long
+    digit run -- and free of instruction-shaped text."""
+    from src.utils.runbook_validator import INJECTION_MARKERS, validate_generic_text
+
+    errors = [f"{label}: {violation}" for violation in validate_generic_text(text, [])]
+    lowered = text.lower()
+    for marker in INJECTION_MARKERS:
+        if marker in lowered:
+            errors.append(f"{label}: contains instruction-shaped text: {marker!r}")
+    return errors
+
+
+def _pack_shape_errors(name: str, texts: dict) -> list:
+    """The checks across a pack's texts: a policy, and the sizes."""
+    errors = []
     if not texts.get(POLICY_FILE, "").strip():
         errors.append(f"{name}/{POLICY_FILE} is missing or empty; every pack "
                       f"needs one.")
@@ -701,7 +727,7 @@ def _read_pack_texts(directory: Path, errors: list) -> dict:
             errors.append(f"{name}: the pack text composed for the {role} is "
                           f"{size} characters, over {ENV_PACK_MAX_CHARS} "
                           f"({limit}).")
-    return texts
+    return errors
 
 
 # ======================================================================

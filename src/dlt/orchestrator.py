@@ -41,7 +41,7 @@ from src.core.agent_factory import build_agent
 from src.dlt.corroborate import Corroboration
 from src.tools import mcp_client
 from src.models.dlt_synthesis import DltFinding
-from src.utils import metrics, tracing
+from src.utils import metrics, prompt_store, tracing
 from src.utils.llm_utils import get_llm
 from src.utils.logging_config import get_logger
 from src.utils.resilience import llm_breaker, retry_transient
@@ -52,6 +52,10 @@ _agent = None
 
 #: The tool catalog `_agent` was built from; see agent_orchestrator's.
 _agent_catalog = None
+
+#: The prompts `_agent` was built from (`prompt_store.revision()`); see
+#: agent_orchestrator's. A new Langfuse version rebuilds the graph.
+_agent_prompts = None
 
 #: Guards the lazy build. `/analyze-dlt` is a sync endpoint dispatched on
 #: Starlette's threadpool, so two concurrent DLT cases can already reach the
@@ -304,33 +308,49 @@ def _write_harness_case_files(case_dir, state: DltGraphState) -> None:
 
 
 def get_dlt_agent():
-    """Build (and cache) the DLT analysis graph."""
+    """Build (and cache) the DLT analysis graph -- rebuilt when the tool
+    catalog is stale or, under PROMPT_SOURCE=langfuse, when a prompt version
+    changed (`prompt_store.refresh`, which raises PromptUnavailable when the
+    prompts can no longer be had: the case then fails)."""
     global _agent
-    if _agent is not None and not mcp_client.is_stale(_agent_catalog):
+    prompt_store.refresh()
+    prompts = prompt_store.revision()
+    if (_agent is not None and not mcp_client.is_stale(_agent_catalog)
+            and _agent_prompts == prompts):
         return _agent
 
     with _agent_lock:
-        if _agent is not None and not mcp_client.is_stale(_agent_catalog):
+        if (_agent is not None and not mcp_client.is_stale(_agent_catalog)
+                and _agent_prompts == prompt_store.revision()):
             return _agent
-        return _build_dlt_agent()
+        # Every prompt the build reads is from one snapshot.
+        with prompt_store.pinned():
+            return _build_dlt_agent()
 
 
 def _build_dlt_agent():
     """Construct the graph. Caller must hold `_agent_lock`."""
-    global _agent, _agent_catalog
+    global _agent, _agent_catalog, _agent_prompts
 
     logger.info("Building the DLT agent graph")
     _agent_catalog = mcp_client.current_catalog()
+    # The snapshot the build reads (get_dlt_agent pins it): published beside
+    # the graph, and remembered with it for the runs of it (`investigate`).
+    built_from = prompt_store.revision()
+    snapshot = prompt_store.current()
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     prompts_dir = os.path.join(base_dir, "prompts")
+    prompt_files = {"dlt_investigator": "DltInvestigatorAgent.md",
+                    "dlt_reviewer": "DltReviewerAgent.md",
+                    "dlt_synthesis": "DltSynthesisAgent.md"}
 
-    def load_prompt(filename: str) -> str:
-        with open(os.path.join(prompts_dir, filename), "r", encoding="utf-8") as handle:
-            return handle.read()
-
-    prompts = {"dlt_investigator": load_prompt("DltInvestigatorAgent.md"),
-               "dlt_reviewer": load_prompt("DltReviewerAgent.md"),
-               "dlt_synthesis": load_prompt("DltSynthesisAgent.md")}
+    # Through prompt_store: the files, or under PROMPT_SOURCE=langfuse the
+    # Langfuse versions -- with the version of each, to link the generations
+    # of the agents built from it in a trace.
+    prompts = {role: prompt_store.text(os.path.join(prompts_dir, filename))
+               for role, filename in prompt_files.items()}
+    prompt_links = {role: prompt_store.link(os.path.join(prompts_dir, filename))
+                    for role, filename in prompt_files.items()}
 
     # Deep agents, each with the MCP tools its role gets -- none by default
     # (see the module docstring). The system prompts are fixed when an agent
@@ -435,7 +455,7 @@ def _build_dlt_agent():
                                             case_id=state.get("case_id")):
                 result = tracing.invoke(agent_for("dlt_investigator", state.get("service_pack")), {"messages": [
                     HumanMessage(content=prompt),
-                ]})
+                ]}, prompt=prompt_links["dlt_investigator"])
             return result, calls
 
         res, calls = invoke()
@@ -511,7 +531,7 @@ def _build_dlt_agent():
             with mcp_client.call_context(role="dlt_reviewer", case_id=state.get("case_id")):
                 return tracing.invoke(agent_for("dlt_reviewer", state.get("service_pack")), {"messages": [
                     HumanMessage(content=prompt),
-                ]})
+                ]}, prompt=prompt_links["dlt_reviewer"])
 
         res = invoke()
         metrics.record_llm_usage("dlt_reviewer", res)
@@ -570,7 +590,7 @@ def _build_dlt_agent():
             with mcp_client.call_context(role="dlt_synthesis", case_id=state.get("case_id")):
                 return tracing.invoke(agent_for("dlt_synthesis", state.get("service_pack")), {"messages": [
                     HumanMessage(content=prompt),
-                ]})
+                ]}, prompt=prompt_links["dlt_synthesis"])
 
         res = invoke()
         metrics.record_llm_usage("dlt_synthesis", res)
@@ -595,7 +615,7 @@ def _build_dlt_agent():
                         f"Your previous reply did not satisfy the contract: {error}\n\n"
                         f"Previous reply:\n{raw}\n\n"
                         f"Reply again with ONLY the JSON object.")),
-                ]})
+                ]}, prompt=prompt_links["dlt_synthesis"])
 
         # The contract rejecting the reply shows in the trace as a step of its
         # own around the repair: WARNING when it passes, ERROR when it does not.
@@ -651,6 +671,8 @@ def _build_dlt_agent():
     graph.add_edge("synthesise", END)
 
     _agent = graph.compile()
+    _agent_prompts = built_from
+    prompt_store.remember(_agent, snapshot)
     return _agent
 
 
@@ -712,7 +734,11 @@ def investigate(ref_id: str, failure: dict, corroboration: Corroboration,
     }
     # One Langfuse trace per run when tracing is on (utils/tracing). This
     # runs on the analysis pool's worker, which is where it has to open.
-    with tracing.run("analyze-dlt", **_trace_attributes(
+    #
+    # Every prompt the run reads -- a harness template, a service context --
+    # is from the snapshot the graph was built from (prompt_store.pinned_to),
+    # even if newer versions are put in use while it runs.
+    with prompt_store.pinned_to(agent), tracing.run("analyze-dlt", **_trace_attributes(
             ref_id, failure, corroborated, service_resolution, service_pack)) as trace:
         result = agent.invoke({
             "case_id": ref_id,
@@ -740,6 +766,7 @@ def investigate(ref_id: str, failure: dict, corroboration: Corroboration,
 
 def reset_agent_cache() -> None:
     """Drop the cached graph. For tests."""
-    global _agent, _agent_catalog
+    global _agent, _agent_catalog, _agent_prompts
     _agent = None
     _agent_catalog = None
+    _agent_prompts = None

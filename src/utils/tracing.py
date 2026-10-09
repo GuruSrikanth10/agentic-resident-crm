@@ -251,6 +251,21 @@ def _get_client():
     return _client
 
 
+def langfuse_client():
+    """The process's Langfuse client for what needs Langfuse whether or not
+    traces are recorded: the prompts under PROMPT_SOURCE=langfuse
+    (prompt_store). The same client tracing uses -- one per process --
+    built on first use. Unlike tracing, which runs untraced when the client
+    cannot start, this raises: a caller that needs prompts must fail."""
+    global _client
+    if _client is not None:
+        return _client
+    with _client_lock:
+        if _client is None:
+            _client = _build_client()
+    return _client
+
+
 def _string_metadata(metadata: Optional[dict]) -> dict:
     """Propagated metadata is string to string, each value at most 200
     characters: anything else would be dropped by the SDK with a warning."""
@@ -471,10 +486,15 @@ def _callback_handler():
     return _handler_class(public_key=os.environ.get("LANGFUSE_PUBLIC_KEY"))
 
 
-def invoke(runnable, request):
+def invoke(runnable, request, prompt: Optional[dict] = None):
     """`runnable.invoke(request)`, with the Langfuse handler as its callback
     inside a trace. Outside one the call is made exactly as before tracing
-    existed -- no config argument at all."""
+    existed -- no config argument at all.
+
+    `prompt` -- {"name", "version"} of the Langfuse prompt the runnable was
+    built from (prompt_store.link) -- links every generation of the call to
+    that prompt version, so Langfuse can compare results by version. None
+    when the prompts are the files'."""
     if not _current.get().active:
         return runnable.invoke(request)
     try:
@@ -483,7 +503,17 @@ def invoke(runnable, request):
         logger.warning("Could not create the Langfuse callback handler",
                        error=f"{type(e).__name__}: {e}")
         return runnable.invoke(request)
-    return runnable.invoke(request, config={"callbacks": [handler]})
+    config = {"callbacks": [handler]}
+    with contextlib.ExitStack() as stack:
+        if prompt:
+            try:
+                from langfuse import propagate_attributes
+
+                stack.enter_context(propagate_attributes(prompt=prompt))
+            except Exception as e:
+                logger.warning("Could not link the prompt to the trace",
+                               prompt=prompt, error=f"{type(e).__name__}: {e}")
+        return runnable.invoke(request, config=config)
 
 
 def flush() -> None:

@@ -103,9 +103,35 @@ def validate_service_registry() -> None:
                         gate_mode=service_registry.gate_mode())
 
 
+def validate_prompt_source() -> None:
+    """Under PROMPT_SOURCE=langfuse, refuse to boot unless every prompt can be
+    fetched from Langfuse and passes its checks (prompt_store.activate).
+
+    The service must not run on prompts it was not configured to use, so
+    there is no falling back to the files: a Langfuse that cannot be reached,
+    a prompt that was never uploaded or a text that fails the pack checks
+    stops the API here, with every failing prompt named. A no-op for
+    PROMPT_SOURCE=files.
+    """
+    from src.utils import prompt_store
+
+    try:
+        prompt_store.activate()
+    except Exception as error:
+        _docs_logger().error("Prompt source error", detail=str(error))
+        print(f"Prompt source error: {error}", file=sys.stderr)
+        sys.exit(1)
+    if prompt_store.source() == prompt_store.LANGFUSE:
+        _docs_logger().info("Prompts loaded from Langfuse", label=prompt_store.label(),
+                            prompts=len(prompt_store.catalog()),
+                            revision=prompt_store.revision())
+
+
 validate_config()
 validate_reason_code_docs()
 validate_service_registry()
+# After the registry, whose packs decide which pack prompts there are.
+validate_prompt_source()
 
 
 def _install_draining_signal_handlers():

@@ -724,6 +724,7 @@ agentic-resident-crm/
 │   ├── manual_payload_demo.py      # Manual demo: parse a real rejection payload, print extracts
 │   ├── test_end_to_end.py          # End-to-end contract test (audit G22a, N4)
 │   ├── test_tracing.py             # Langfuse tracing: off is invisible; on, what is exported
+│   ├── test_prompt_store.py        # PROMPT_SOURCE: files as before; langfuse only, versions, upload
 │   ├── test_breaker_concurrency.py # Breakers that do not serialise calls; the model-call limit
 │   ├── test_rerun_and_shutdown.py  # Reruns start fresh; shutdown packets are redelivered; verdicts
 │   ├── test_fetch_analyze_split.py # Fetch/analyze consumer split (two topics, two consumers)
@@ -914,6 +915,7 @@ agentic-resident-crm/
 │   │   │                           #       parking verdicts, update checker, JSON_EXTRACT fields
 │   │   ├── approve_replays.py      # CLI: approve queued packet replays
 │   │   ├── promote_rules.py        # CLI: promote + git-commit learned rules
+│   │   ├── upload_prompts.py       # CLI: compare/publish the prompt files to Langfuse (section 3.14)
 │   │   ├── record_outcome.py       # CLI: attach a ground-truth verdict to a completed investigation
 │   │   ├── check_reason_code_docs.py # CLI: validate the reason-code document store (CI gate)
 │   │   ├── check_drift.py          # CLI: rules.csv schema drift detector
@@ -988,6 +990,7 @@ agentic-resident-crm/
 │       ├── kafka_producer.py       # Single shared KafkaProducer for DLQ + analysis + DLT queues
 │       ├── opencode_runner.py      # opencode subprocess harness: shared serve, per-task run
 │       ├── prompt_loader.py        # Harness prompt template loader ({{var}} substitution, pluggable backend)
+│       ├── prompt_store.py         # Where prompt text comes from: the files or Langfuse (section 3.14)
 │       ├── case_cleanup.py         # Local casebook dir cleanup: immediate on terminal + background reaper
 │       └── outcomes.py             # Resolution outcome recording (ground-truth verdict storage)
 ├── docs_cache/                     # Generated: DROA documentation corpus pulled from S3 for the
@@ -1011,6 +1014,7 @@ The system manages all operational feature flags, LLM credentials, MySQL databas
 - **Template:** `.env.example` is the annotated reference: it carries every setting an operator is expected to tune, with the reasoning behind each default. It is a starting point, not an exhaustive dump of every variable the code reads -- a handful of internal tunables (retry budgets, renderer selection, pipeline line bounds) exist only in code with working defaults.
 - **Database Modes:** Set `USE_MOCK_DB=true` to parse rules locally from a CSV, or `USE_MOCK_DB=false` to dynamically query the live MySQL `rules` table via SQLAlchemy/PyMySQL.
 - **Agent tools and the process database:** Every agent is a deep agent, and every agent -- deep agents and the opencode harness alike -- reaches its tools only through MCP servers (section 3.5.1). `AGENT_MCP_SERVERS` lists them; unset, it is the bundled server, which the API runs as a supervised child whenever `AGENT_MCP_SERVE` (default `auto`: when some bundled toolset is on) says so, on `AGENT_MCP_HOST`/`AGENT_MCP_PORT` (127.0.0.1:8765). Moving to an organisation-hosted server is a change to `AGENT_MCP_SERVERS` (with `${NAME}` references for tokens) and `AGENT_MCP_SERVE=false`, not to any agent. The rejection lane's tools are scoped by the packet's service as well as by role (section 3.2.3, "Tools per service"); `AGENT_TOOLS_COMMON` names undeclared tools from other servers to treat as tools for every service. The process DB toolset reads enu-biometric's own `uidprocessv2_2` -- a second MySQL datasource with its own engine and its own `process_db_breaker`, used by the tool server process -- and is off unless `PROCESS_DB_ENABLED=true`. It is the `process` key of the tools' shared read-only database layer (`agent_tools/_database.py`); any other database a toolset reads is its own key, with `AGENT_DB_<KEY>_*` settings, pool and breaker. `validate_config()` fails the boot if a database is on without its `..._HOST`/`USERNAME`/`PASSWORD`, if a tool module fails to import, if an `AGENT_MCP_*` setting is malformed, or if an `AGENT_TOOLS_<ROLE>` variable names an unknown role; the tool names a selection lists are checked against the servers' listings when the first agent is built, and the tools' service scopes against the registry by `main_api.validate_service_registry()`. Per-run limits are `AGENT_MAX_TOOL_CALLS` and `AGENT_MAX_MODEL_CALLS`.
+- **Prompt source:** `PROMPT_SOURCE=files` (the default) reads every agent prompt from its file; `PROMPT_SOURCE=langfuse` reads them from Langfuse Prompt Management only -- the version labelled `LANGFUSE_PROMPT_LABEL`, refreshed every `LANGFUSE_PROMPT_CACHE_TTL_SECONDS` -- and the API refuses to boot without them (section 3.14).
 - **Security:** The actual `.env` file is excluded via `.gitignore` to prevent credential leakage.
 - **Credentials the process holds:** the LLM provider key, MySQL, Elasticsearch, a Kubernetes kubeconfig (or an in-cluster ServiceAccount), `OIS_API_KEY` for the replay endpoint, and -- when the replay precheck is configured -- `BITBUCKET_TOKEN`. The last is **read-only and scoped to the repositories named in `DLT_REPO_MAP`**: `src/dlt/bitbucket.py` has no code path that writes, and leaving `BITBUCKET_BASE_URL` empty disables every source lookup outright.
 - **Feature flags are layered, not global.** Several capabilities are gated by two or three independent switches rather than one, so "let the system nominate an action" and "let the action actually happen" are always separate decisions -- `DLT_AUTO_REPLAY_ENABLED` vs `ENABLE_AUTO_REPLAY`, and `DLT_CODE_CHECK_ENABLED` vs `DLT_CODE_CHECK_GATES_REPLAY` vs `DLT_CODE_CHECK_PARK_ENABLED` (section 4.4.1).
@@ -2579,6 +2583,122 @@ reasoning, every rejection, retry and escalation with its scores (through the
 real route and the real DLT lane), and that no Aadhaar number, mobile number or
 resident name is exported while the eventId is.
 
+### 3.14 Prompt source (`PROMPT_SOURCE`, `src/utils/prompt_store.py`)
+
+`PROMPT_SOURCE` says where every agent's prompt text comes from:
+
+- `files` (the default): each prompt file in the repository, read as it always
+  was. Every composed system prompt, DLT prompt, rendered harness template and
+  prompt fingerprint is byte-identical to the code before `prompt_store`
+  existed.
+- `langfuse`: Langfuse Prompt Management, and only Langfuse. Each prompt is the
+  version that carries `LANGFUSE_PROMPT_LABEL` (`production`). Nothing falls
+  back to the files: a prompt that cannot be had fails what needs it.
+
+**Which prompts.** The repository still decides which prompts exist; only
+their text moves. Every prompt file is one Langfuse text prompt, named after
+its path (`prompt_store.catalog`):
+
+| File | Langfuse prompt |
+|---|---|
+| `src/prompts/InvestigatorAgent.md` (every `src/prompts/*.md`) | `agents/investigator-agent` |
+| `src/prompts/harness/DltReviewer.md` | `harness/dlt-reviewer` |
+| `src/prompts/harness/rules/dlt.md` | `harness/rules/dlt` |
+| `src/service_packs/<pack>/policy.md` (and `investigator`, `reviewer`, `synthesis`, `learned_rules`, `dlt`) | `packs/<pack>/policy`, ... |
+
+Nineteen today; `python -m src.tools.upload_prompts --list` prints them. Not
+prompts: `AGENTS.md` (opencode reads it from disk), each pack's `service.json`
+(its configuration) and `pending_rules.jsonl`.
+
+**Boot.** `config_validator` requires `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`
+and `LANGFUSE_BASE_URL` (without a URL the SDK would reach Langfuse Cloud);
+tracing itself may stay off. `main_api.validate_prompt_source`, after the
+registry, fetches every prompt and checks it; any failure stops the API with
+exit status 1, naming every failing prompt. The consumers never read a prompt
+and do not check.
+
+**The checks** (`prompt_store.check_texts`, which the upload tool runs too):
+every prompt present and not empty; every harness `{{> include}}` names a
+harness prompt; and a pack's text passes exactly what a pack file passes
+(`service_registry.check_pack_texts`: no packet identifiers, no
+instruction-shaped text, the size limits). Fetched text that fails them is never
+used.
+
+**New versions.** `get_agent` and `get_dlt_agent` call `prompt_store.refresh()`
+for every packet. The SDK keeps each fetched version for
+`LANGFUSE_PROMPT_CACHE_TTL_SECONDS` (60) and then refreshes it in the
+background while serving the cached one, so a refresh is a cache lookup. When a
+version has changed, the new set is checked and put in use whole, and the graph
+is rebuilt (an agent's system prompt is fixed when it is built). A released
+edit therefore reaches the packets that start once the cached version has
+expired and been refreshed: within the TTL, plus the one packet whose lookup
+started the refresh. A TTL of 0 asks Langfuse for every prompt on every packet,
+so a packet then fails whenever Langfuse cannot be reached. Failure modes:
+
+- A new version that fails the checks: `refresh` raises `PromptUnavailable`,
+  and every packet fails until the label points at a good version again. The
+  old version is not used instead: the service runs only on the prompts it
+  is labelled to use.
+- A prompt deleted, or its label removed: the SDK evicts it, and packets fail
+  the same way.
+- Langfuse unreachable after boot: the SDK keeps serving the versions it last
+  fetched (they are still Langfuse's), and logs an error for each failed
+  background refresh. Never the files.
+
+**One snapshot per run.** The prompts in use are one snapshot, `{name: text}`
+with each name's version, replaced whole. A graph is built from one snapshot
+(`prompt_store.pinned`) and remembers it (`prompt_store.remember`). A run of
+it -- `traced_investigation` from the route, `dlt/orchestrator.investigate` --
+reads every prompt from that snapshot (`prompt_store.pinned_to`): an agent the
+graph builds on first use, a harness template, a service context, the trace's
+and the casebook's fingerprint. The pin is a context variable, so it reaches
+the threads LangGraph runs nodes and tools on. A packet that is running when a
+new version is released finishes on the versions it started on, and records
+those, never half of one and half of the other.
+
+**Traces and fingerprints.** Every model call is linked to the version of the
+prompt its agent was built from (`tracing.invoke(..., prompt={"name",
+"version"})`, via `propagate_attributes`), so Langfuse's prompt page shows
+latency, cost and scores per version. The prompt fingerprint (section 3.8)
+hashes the Langfuse text in use, and also the pack's Langfuse texts
+(`service_pack_prompts`), so a casebook names the prompts that produced it in
+either mode.
+
+**Uploading** (`src/tools/upload_prompts.py`), from a machine that reaches
+Langfuse, with the three variables set (the repository's `.env` is read):
+
+```bash
+python -m src.tools.upload_prompts --list     # each file's prompt name; no network
+python -m src.tools.upload_prompts            # compare with Langfuse; changes nothing
+python -m src.tools.upload_prompts --apply    # publish what differs, labelled production
+```
+
+The texts are checked first, and nothing is uploaded if any fails. `--apply`
+creates a new version only of each prompt whose labelled version differs
+(trailing whitespace is not a difference), with the commit message `Uploaded
+from <path> at <git commit>`, then reads every prompt back and compares. Run
+twice, it creates nothing. Exit status: 0 when everything matches; 1 when
+differences were found without `--apply`; 2 when a check, the connection or an
+upload failed. `--label` publishes under another label (for example `staging`,
+for a deployment with `LANGFUSE_PROMPT_LABEL=staging`).
+
+**Working with it.**
+
+- Edit in the Langfuse UI and save a new version with the `production` label:
+  new packets get it within the TTL. To roll back, move the label to an
+  earlier version.
+- Edit a file in the repository: run `upload_prompts --apply`. A file the
+  repository changed and nobody uploaded is not used.
+- `promote_rules` writes learned rules to the `learned_rules.md` files; under
+  `langfuse` it prints the `upload_prompts --apply` to run next.
+- A new prompt file (a new pack, say) must be uploaded before a `langfuse`
+  deployment of that code starts: its boot fails without it.
+- To go back to the files: `PROMPT_SOURCE=files` and a restart.
+
+`tests/test_prompt_store.py` runs the store, both graphs, the real route and
+the upload tool against an in-memory Langfuse with the prompt API's shape
+(versions, labels, a 404 for a missing prompt).
+
 ---
 
 ## 4. How to Run Locally
@@ -2690,6 +2810,11 @@ python3 -m src.tools.mcp_client prompt investigator --service enu-biometric [--o
 python3 -m src.tools.mcp_client call bio_get_packet_stage_summary '{"refid": "<refId>"}'   # as an agent calls it
 python3 -m src.tools.agent_tools list       # the registered tools, in-process
 python3 -m src.tools.agent_tools call bio_get_packet_stage_summary '{"refid": "<refId>"}'  # in-process, no server
+
+# Prompts in Langfuse (section 3.14)
+python3 -m src.tools.upload_prompts --list   # each prompt file's Langfuse name (no network)
+python3 -m src.tools.upload_prompts          # compare with Langfuse; changes nothing
+python3 -m src.tools.upload_prompts --apply  # publish what differs, labelled production
 
 # Self-learning & rules
 python3 -m src.tools.promote_rules          # review + git-commit staged learning rules

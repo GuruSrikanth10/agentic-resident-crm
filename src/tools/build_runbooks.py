@@ -6,7 +6,7 @@ import datetime
 from langchain_core.messages import SystemMessage, HumanMessage
 from src.utils.llm_utils import get_llm
 from src.utils.runbook_validator import validate_generic_text
-from src.utils import reason_code_docs, service_registry, tracing
+from src.utils import prompt_store, reason_code_docs, service_registry, tracing
 from src.utils.runbook_store import (
     BINDING_DB_RULE,
     BINDING_REASON_CODE_DOC,
@@ -163,8 +163,10 @@ def main():
                          error=f"{type(e).__name__}: {e}")
             continue
 
-    with open(PROMPT_PATH, "r", encoding="utf-8") as f:
-        system_prompt = f.read()
+    # The file, or under PROMPT_SOURCE=langfuse the Langfuse version -- which
+    # this run then fails without, like the API (prompt_store).
+    system_prompt = prompt_store.text(PROMPT_PATH)
+    prompt_link = prompt_store.link(PROMPT_PATH)
 
     # Built on first use, not up front. `get_llm` resolves provider
     # credentials and raises without them, so constructing it unconditionally
@@ -224,7 +226,7 @@ def main():
                     tags=["lane:runbooks", f"service:{service}"],
                     metadata={"service": service, "reason_code": reason_code,
                               "enrolment_type": etype}) as trace:
-                response = tracing.invoke(llm_client(), messages)
+                response = tracing.invoke(llm_client(), messages, prompt=prompt_link)
                 trace.update(output=response.content)
             text = response.content
             

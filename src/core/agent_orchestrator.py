@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import hashlib
 import contextvars
 import functools
 import threading
@@ -9,7 +10,7 @@ from typing import Any, Optional, TypedDict
 from langgraph.graph import StateGraph, START, END
 from langchain_core.messages import HumanMessage
 
-from src.utils import metrics, reason_code_docs, service_registry, tracing
+from src.utils import metrics, prompt_store, reason_code_docs, service_registry, tracing
 from src.core import prompt_composer, rejection_context, run_control
 from src.core.run_control import RunCancelled
 from src.log_pipeline import scope as log_scope
@@ -672,7 +673,7 @@ def _record_outcome(trace, result) -> None:
 
 def traced_investigation(invoke, payload: dict, resolution: dict, pack: str,
                          pilot: bool, resumed: bool = False,
-                         trace_ref: Optional[dict] = None):
+                         trace_ref: Optional[dict] = None, graph=None):
     """`invoke()` -- one run of the graph -- recorded as an `analyze-rejection`
     trace when tracing is on (utils/tracing). Call it on the thread the graph
     runs on: the trace is carried in context variables, which a thread pool
@@ -680,7 +681,20 @@ def traced_investigation(invoke, payload: dict, resolution: dict, pack: str,
 
     `trace_ref`, when given, receives the trace's id under `trace_id` as soon
     as the trace opens (and only if it is sampled), so the route can score
-    the packet's final status on it -- including when it stops waiting."""
+    the packet's final status on it -- including when it stops waiting.
+
+    `graph` is the graph `invoke` runs. Every prompt the run reads -- an agent
+    built on first use, a harness template, a service context, the trace's
+    fingerprint -- is from the snapshot it was built from
+    (prompt_store.pinned_to), so a packet running when newer versions are put
+    in use finishes on the versions it started on."""
+    with prompt_store.pinned_to(graph):
+        return _traced_investigation(invoke, payload, resolution, pack, pilot,
+                                     resumed, trace_ref)
+
+
+def _traced_investigation(invoke, payload: dict, resolution: dict, pack: str,
+                          pilot: bool, resumed: bool, trace_ref: Optional[dict]):
     if not tracing.enabled():
         return invoke()
     event_id = str(payload.get("eventId") or "unknown")
@@ -775,6 +789,13 @@ _agent = None
 #: packets that met it their tools, not every packet until a restart.
 _agent_catalog = None
 
+#: The prompts `_agent` was built from (`prompt_store.revision()`). Under
+#: PROMPT_SOURCE=langfuse a version published in Langfuse moves it, and
+#: `get_agent` rebuilds the graph -- the agents' system prompts are fixed when
+#: they are built -- so the next packet runs on the new version and the ones
+#: already running finish on the old. Always `files` otherwise.
+_agent_prompts = None
+
 #: Guards the lazy build below. Two concurrent first-callers each built a full
 #: graph -- two LLM clients, four react agents, and two `get_checkpointer()`
 #: calls, the second of which opens another connection and re-runs setup()'s
@@ -816,6 +837,32 @@ PROMPT_FILES = (
 )
 
 
+def _prompt_bytes(path: str) -> bytes:
+    """A prompt file's content as the fingerprint hashes it: the file's
+    bytes, or under PROMPT_SOURCE=langfuse the Langfuse version in use -- the
+    text the agents are actually given. A missing prompt is itself a
+    meaningful configuration, so its absence is recorded rather than skipped,
+    where it would collide with a present one."""
+    if prompt_store.source() == prompt_store.LANGFUSE and prompt_store.is_prompt(path):
+        return prompt_store.text(path).encode("utf-8")
+    try:
+        with open(path, "rb") as f:
+            return f.read()
+    except OSError:
+        return b""
+
+
+def _texts_digest(texts: dict) -> str:
+    """A digest of {name: text}, sorted and length-prefixed."""
+    digest = hashlib.sha256()
+    for name, text in sorted(texts.items()):
+        encoded = text.encode("utf-8")
+        digest.update(name.encode("utf-8"))
+        digest.update(str(len(encoded)).encode("utf-8"))
+        digest.update(encoded)
+    return "sha256:" + digest.hexdigest()
+
+
 def compute_prompt_fingerprint(base_dir: str, pack: Optional[str] = None,
                                pilot: bool = False) -> str:
     """SHA256 over the agent system prompts, harness templates and rules,
@@ -840,13 +887,7 @@ def compute_prompt_fingerprint(base_dir: str, pack: Optional[str] = None,
     paths.append(os.path.join(os.path.dirname(base_dir), "AGENTS.md"))
 
     for path in sorted(paths):
-        try:
-            with open(path, "rb") as f:
-                body = f.read()
-        except OSError:
-            # A missing prompt is itself a meaningful configuration, so record
-            # its absence rather than skipping it and colliding with present.
-            body = b""
+        body = _prompt_bytes(path)
         digest.update(os.path.basename(path).encode("utf-8"))
         digest.update(str(len(body)).encode("utf-8"))
         digest.update(body)
@@ -864,6 +905,11 @@ def compute_prompt_fingerprint(base_dir: str, pack: Optional[str] = None,
         # A pack that is not in the registry is hashed as missing rather than
         # skipped, so it can never share a fingerprint with no pack at all.
         extras.append(("service_pack", f"{pack}\t{found.sha256 if found else 'missing'}"))
+        if found is not None and prompt_store.source() == prompt_store.LANGFUSE:
+            # The pack's digest covers service.json and its files; under
+            # PROMPT_SOURCE=langfuse the text its agents read is Langfuse's.
+            extras.append(("service_pack_prompts",
+                           _texts_digest(prompt_composer.pack_texts_in_use(found))))
     if pilot:
         extras.append(("pilot", prompt_composer.PILOT_SYNTHESIS_SECTION))
     extras += [("agent_tools", mcp_client.fingerprint_material(pack)),
@@ -878,42 +924,63 @@ def compute_prompt_fingerprint(base_dir: str, pack: Optional[str] = None,
 
 
 def prompt_fingerprint(pack: Optional[str] = None,
-                       pilot: Optional[bool] = None) -> str:
+                       pilot: Optional[bool] = None, graph=None) -> str:
     """The fingerprint of the prompts `pack`'s agents are built with -- the
     pre-registry pack's when none is named. `pilot` defaults to whether the
     pack is a pilot service's now. Computed on first use and kept until the
-    graph is rebuilt."""
+    graph is rebuilt.
+
+    `graph` is the graph the packet ran on: under PROMPT_SOURCE=langfuse its
+    prompts are the versions it was built from (prompt_store.pinned_to), which
+    for a packet that was running when newer ones were put in use are not the
+    newest. Without one, the prompts read here."""
     pack = pack or service_registry.PRE_REGISTRY_PACK
     if pilot is None:
         pilot = service_registry.is_pilot(pack)
-    key = f"{pack}+pilot" if pilot else pack
-    found = _prompt_fingerprints.get(key)
-    if found is None:
-        found = compute_prompt_fingerprint(os.path.dirname(os.path.dirname(__file__)),
-                                           pack, pilot=pilot)
-        _prompt_fingerprints[key] = found
+    with prompt_store.pinned_to(graph):
+        # Per revision: the graphs built from two can be running at once.
+        key = (prompt_store.revision(), f"{pack}+pilot" if pilot else pack)
+        found = _prompt_fingerprints.get(key)
+        if found is None:
+            found = compute_prompt_fingerprint(
+                os.path.dirname(os.path.dirname(__file__)), pack, pilot=pilot)
+            _prompt_fingerprints[key] = found
     return found
 
 
 def get_agent():
     global _agent
 
+    # Put any newly published prompt versions in use first (a no-op unless
+    # PROMPT_SOURCE=langfuse). Raises PromptUnavailable when the prompts can
+    # no longer be had from Langfuse or a new version fails its checks: the
+    # packet then fails rather than run on prompts it was not meant to use.
+    prompt_store.refresh()
+    prompts = prompt_store.revision()
+
     # Fast path without the lock: a built graph is only ever replaced, never
     # mutated, and an unsynchronised read of a published reference is safe.
-    if _agent is not None and not mcp_client.is_stale(_agent_catalog):
+    if (_agent is not None and not mcp_client.is_stale(_agent_catalog)
+            and _agent_prompts == prompts):
         logger.info("Returning the cached agent graph")
         return _agent
 
     with _agent_lock:
         # Re-check: another thread may have built it while we waited.
-        if _agent is not None and not mcp_client.is_stale(_agent_catalog):
+        if (_agent is not None and not mcp_client.is_stale(_agent_catalog)
+                and _agent_prompts == prompt_store.revision()):
             return _agent
-        return _build_agent()
+        if _agent is not None and _agent_prompts != prompt_store.revision():
+            logger.info("Rebuilding the agent graph for new prompt versions",
+                        built_from=_agent_prompts, now=prompt_store.revision())
+        # Every prompt the build reads is from one snapshot.
+        with prompt_store.pinned():
+            return _build_agent()
 
 
 def _build_agent():
     """Construct the graph. Caller must hold `_agent_lock`."""
-    global _agent, _prompt_fingerprints, _agent_catalog
+    global _agent, _prompt_fingerprints, _agent_catalog, _agent_prompts
 
     logger.info("Building the agent graph")
     # Fetched before anything reads it, so the fingerprints and every agent
@@ -925,6 +992,13 @@ def _build_agent():
     # that graph -- built without the tools the new catalog had just listed --
     # to every packet that arrived during the rebuild (2026-09-29, 18:28:33).
     catalog = mcp_client.current_catalog()
+    # Which prompts it is built from (prompt_store): the snapshot `get_agent`
+    # pins for the build, published only beside the graph, like the catalog --
+    # a version put in use during the build makes the next packet rebuild --
+    # and remembered with it, for the agents built later on first use and for
+    # the runs of it (`traced_investigation`, `prompt_fingerprint`).
+    prompts = prompt_store.revision()
+    prompt_snapshot = prompt_store.current()
     base_dir = os.path.dirname(os.path.dirname(__file__))
     # The packs whose agents are built now rather than on first use: every
     # enabled service's, and the pre-registry pack in record mode.
@@ -948,9 +1022,9 @@ def _build_agent():
     # The LogFilter is the one agent with no service pack. It strips log lines
     # not belonging to a target event id -- a mechanical text operation with
     # no use for business policy, which it has never been given (G24).
-    with open(os.path.join(base_dir, "prompts", "LogFilterAgent.md"), "r",
-              encoding="utf-8") as f:
-        log_filter_prompt = f.read()
+    log_filter_path = os.path.join(base_dir, "prompts", "LogFilterAgent.md")
+    log_filter_prompt = prompt_store.text(log_filter_path)
+    log_filter_link = prompt_store.link(log_filter_path)
 
     def fetch_logs_node(state: GraphState):
         payload = state.get("payload", {})
@@ -1155,8 +1229,14 @@ def _build_agent():
         return build_agent("reviewer", simple_llm, system_prompt,
                            tools=[add_learning_rule], pack=pack)
 
+    # The Langfuse prompt version each agent was built from, kept beside it
+    # (`link_for`): a generation is linked to the version its agent carries,
+    # not to whichever version is newest when it runs.
+    links: dict = {}
+
     def agent_for(role: str, pack: str, pilot: bool = False):
-        """The `role` agent built from `pack`, built on first use and kept."""
+        """The `role` agent built from `pack`, built on first use and kept --
+        from the graph's prompts, whatever is in use by then."""
         pilot = pilot and role == "synthesis"
         key = (role, pack, pilot)
         agent = pool.get(key)
@@ -1164,9 +1244,17 @@ def _build_agent():
             with pool_lock:
                 agent = pool.get(key)
                 if agent is None:
-                    agent = _new_agent(role, pack, pilot)
+                    with prompt_store.pinned(prompt_snapshot):
+                        agent = _new_agent(role, pack, pilot)
+                        links[key] = prompt_store.link(
+                            prompt_composer.role_prompt_path(role))
                     pool[key] = agent
         return agent
+
+    def link_for(role: str, pack: str, pilot: bool = False):
+        """{"name", "version"} of the role prompt `agent_for(role, pack,
+        pilot)` was built from, or None (prompt_store.link)."""
+        return links.get((role, pack, pilot and role == "synthesis"))
 
     for pack in prebuilt_packs:
         agent_for("investigator", pack)
@@ -1289,7 +1377,7 @@ def _build_agent():
             with mcp_client.call_context(role="log_filter", event_id=event_id):
                 return tracing.invoke(log_filter_agent, {"messages": [
                     HumanMessage(content=prompt)
-                ]})
+                ]}, prompt=log_filter_link)
             
         res = _counted("log_filter", invoke_filter, _service_of(state))
         filtered_logs = res["messages"][-1].content
@@ -1537,7 +1625,7 @@ def _build_agent():
                     mcp_client.call_context(role="investigator", event_id=event_id):
                 result = tracing.invoke(agent_for("investigator", pack), {"messages": [
                     HumanMessage(content=prompt)
-                ]})
+                ]}, prompt=link_for("investigator", pack))
             return result, calls
 
         res, calls = _counted("investigator", invoke_investigator, service)
@@ -1678,7 +1766,7 @@ def _build_agent():
             with mcp_client.call_context(role="reviewer", event_id=event_id):
                 return tracing.invoke(agent_for("reviewer", pack), {"messages": [
                     HumanMessage(content=prompt)
-                ]})
+                ]}, prompt=link_for("reviewer", pack))
 
         res = _counted("reviewer", invoke_reviewer, service)
         metrics.record_llm_usage("reviewer", res)
@@ -1763,7 +1851,7 @@ def _build_agent():
             with mcp_client.call_context(role="synthesis", event_id=event_id):
                 return tracing.invoke(agent_for("synthesis", pack, pilot), {"messages": [
                     HumanMessage(content=prompt)
-                ]})
+                ]}, prompt=link_for("synthesis", pack, pilot))
 
         res = _counted("synthesis", invoke_synthesis, service)
         metrics.record_llm_usage("synthesis", res)
@@ -1795,7 +1883,7 @@ def _build_agent():
                 with mcp_client.call_context(role="synthesis", event_id=event_id):
                     return tracing.invoke(agent_for("synthesis", pack, pilot), {"messages": [
                         HumanMessage(content=repair_prompt)
-                    ]})
+                    ]}, prompt=link_for("synthesis", pack, pilot))
 
             # The contract rejecting Synthesis's reply is a rejection too, and
             # shows in the trace as one: a step holding the repair call, a
@@ -1947,6 +2035,8 @@ def _build_agent():
     # Backend is selectable so two API replicas can share checkpoints (4.7).
     _agent = workflow.compile(checkpointer=get_checkpointer())
     _agent_catalog = catalog
+    _agent_prompts = prompts
+    prompt_store.remember(_agent, prompt_snapshot)
     
     logger.info("Agent graph constructed")
     return _agent

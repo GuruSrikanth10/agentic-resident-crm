@@ -26,14 +26,16 @@ tools in scope for the same pack -- and the operating note, as it always has.
 
 Services' vocabularies contradict each other -- enu-biometric's "demo" is the
 face modality, and must not be read as demographic -- so no prompt ever
-carries two packs. Nothing here reads a model or the network: the text is
-decided by the pack a packet was placed in, and nothing else.
+carries two packs. Nothing here reads a model: the text is decided by the
+pack a packet was placed in, and nothing else. Every text is read through
+`prompt_store` -- the files, or under PROMPT_SOURCE=langfuse the Langfuse
+versions in use -- so the composition is the same whichever it is.
 
     python3 -m src.core.prompt_composer investigator --pack enu-biometric
 """
 from typing import Optional
 
-from src.utils import paths, service_registry
+from src.utils import paths, prompt_store, service_registry
 
 #: The generic prompt of each role that has a pack section.
 ROLE_PROMPTS = {"investigator": "InvestigatorAgent.md",
@@ -67,14 +69,28 @@ def _prompts_dir():
     return paths.REPO_ROOT / "src" / "prompts"
 
 
+def role_prompt_path(role: str):
+    """The file of `role`'s generic prompt -- also how its Langfuse prompt is
+    found (prompt_store)."""
+    return _prompts_dir() / ROLE_PROMPTS[role]
+
+
 def generic_prompt(role: str) -> str:
-    with open(_prompts_dir() / ROLE_PROMPTS[role], "r", encoding="utf-8") as handle:
-        return handle.read()
+    return prompt_store.text(role_prompt_path(role))
 
 
 def _generic_learned_rules() -> str:
     path = _prompts_dir() / GENERIC_LEARNED_RULES
-    return path.read_text(encoding="utf-8") if path.is_file() else ""
+    return prompt_store.text(path) if path.is_file() else ""
+
+
+def pack_texts_in_use(found) -> dict:
+    """The pack's prompt text in use, {file name: text}: what the registry
+    read from its files, or under PROMPT_SOURCE=langfuse the Langfuse
+    versions -- which passed the same checks (prompt_store.check_texts)."""
+    if prompt_store.source() == prompt_store.LANGFUSE:
+        return prompt_store.pack_texts(found.name)
+    return found.texts
 
 
 def _require_pack(name: str):
@@ -92,21 +108,22 @@ def service_context(role: str, pack_name: str, lead: Optional[str] = None) -> st
     Investigator, learned rules. `lead` opens the context section -- the
     harness uses it to say which service the packet was placed in."""
     found = _require_pack(pack_name)
+    texts = pack_texts_in_use(found)
     title = f"{found.display_name} [{found.name}]"
 
     context = [f"### SERVICE CONTEXT -- {title}"]
     if lead:
         context.append(lead.strip())
-    context.append((found.texts.get(service_registry.ROLE_FILES[role], "").strip()
+    context.append((texts.get(service_registry.ROLE_FILES[role], "").strip()
                     or NO_ROLE_INSTRUCTIONS))
     sections = ["\n\n".join(context),
                 f"### SERVICE POLICY -- {title}\n"
-                f"{found.texts[service_registry.POLICY_FILE].strip()}"]
+                f"{texts[service_registry.POLICY_FILE].strip()}"]
 
     if role == "investigator":
         learned = [text.strip() for text in (
             _generic_learned_rules(),
-            found.texts.get(service_registry.LEARNED_RULES_FILE, ""))
+            texts.get(service_registry.LEARNED_RULES_FILE, ""))
             if text.strip()]
         if learned:
             sections.append("### LEARNED RULES\n" + "\n".join(learned))
@@ -254,7 +271,7 @@ def dlt_service_context(pack_name: Optional[str], lead: Optional[str] = None) ->
     if not pack_name:
         return ""
     found = _require_pack(pack_name)
-    text = found.texts.get(service_registry.DLT_FILE, "").strip()
+    text = pack_texts_in_use(found).get(service_registry.DLT_FILE, "").strip()
     parts = [part for part in ((lead or "").strip(), text) if part]
     if not parts:
         return ""

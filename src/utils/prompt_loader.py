@@ -10,11 +10,15 @@ need escaping.  A regex finds ``{{name}}`` and substitutes the value.
 
 Design notes
 ------------
-* ``render()`` reads from disk on every call so edits take effect without a
-  restart (the system prompts in ``agent_orchestrator.py`` are read once at
-  build time; harness prompts are per-case and benefit from live reload).
-* The backend is intentionally pluggable: a future Langfuse integration
-  replaces only the ``_load_text`` function -- callers stay unchanged.
+* ``render()`` reads on every call so edits take effect without a restart
+  (the system prompts in ``agent_orchestrator.py`` are read once at build
+  time; harness prompts are per-case and benefit from live reload).
+* Templates and includes are read through ``prompt_store``: the files, or
+  under ``PROMPT_SOURCE=langfuse`` the Langfuse versions -- for a running
+  packet, the ones its graph was built from -- never the files: the pluggable
+  backend this loader was written for. An include is
+  still resolved and confined as a path under the harness directory, and its
+  file is the prompt it names.
 * ``{{> rules/dlt}}`` inlines ``harness/rules/dlt.md``. This is how a template
   gets flow-specific agent rules. The root ``AGENTS.md`` cannot carry them:
   opencode loads it into *every* session whatever the task, so a
@@ -24,6 +28,8 @@ Design notes
 """
 import os
 import re
+
+from src.utils import prompt_store
 
 _PLACEHOLDER = re.compile(r"\{\{(\w+)\}\}")
 #: Matches every `{{> ...}}` directive, valid or not, so that a malformed one
@@ -39,9 +45,7 @@ _HARNESS_DIR = os.path.join(_BASE_DIR, "prompts", "harness")
 
 def _load_text(name: str) -> str:
     """Read the raw template text for *name* (without extension)."""
-    path = os.path.join(_HARNESS_DIR, f"{name}.md")
-    with open(path, "r", encoding="utf-8") as fh:
-        return fh.read()
+    return prompt_store.text(os.path.join(_HARNESS_DIR, f"{name}.md"))
 
 
 def _include(name: str) -> str:
@@ -58,8 +62,7 @@ def _include(name: str) -> str:
     root = os.path.realpath(_HARNESS_DIR)
     if os.path.commonpath([path, root]) != root:
         raise ValueError(f"Include '{name}' resolves outside the harness directory")
-    with open(path, "r", encoding="utf-8") as fh:
-        return fh.read().rstrip("\n")
+    return prompt_store.text(path).rstrip("\n")
 
 
 def render(name: str, **variables: str) -> str:

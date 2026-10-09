@@ -56,6 +56,33 @@ def _dlt_topic_errors() -> list:
             for topic in topics if topic == value.strip()]
 
 
+def _prompt_source_errors() -> list:
+    """Validation errors for PROMPT_SOURCE (src/utils/prompt_store.py). Pure,
+    so it is testable without the process exit `validate_config` ends in.
+
+    Under `langfuse` the Langfuse keys must be set, and so must the server:
+    without LANGFUSE_BASE_URL the SDK falls back to Langfuse Cloud, which a
+    deployment that reads its prompts from a self-hosted Langfuse must never
+    reach. Whether the prompts are actually there is checked when the API
+    boots (main_api.validate_prompt_source).
+    """
+    from src.utils import prompt_store
+
+    try:
+        source = prompt_store.source()
+    except ValueError as error:
+        return [str(error)]
+    if source != prompt_store.LANGFUSE:
+        return []
+    errors = [f"PROMPT_SOURCE=langfuse requires {name} to be set."
+              for name in ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY")
+              if not os.environ.get(name)]
+    if not (os.environ.get("LANGFUSE_BASE_URL") or os.environ.get("LANGFUSE_HOST")):
+        errors.append("PROMPT_SOURCE=langfuse requires LANGFUSE_BASE_URL: the "
+                      "self-hosted Langfuse the prompts are fetched from.")
+    return errors
+
+
 def validate_config():
     """Fail-fast startup check to ensure required configurations and permissions are valid."""
     errors = []
@@ -63,6 +90,9 @@ def validate_config():
     # 1. The API key the *selected* LLM provider actually reads is set.
     if "pytest" not in sys.modules:
         errors.extend(_collect_llm_key_errors())
+
+    # Where the agents' prompts come from, and what that needs.
+    errors.extend(_prompt_source_errors())
 
     # 2. KAFKA_CONSUMER_BROKERS list is non-empty
     kafka_brokers_env = os.environ.get("KAFKA_CONSUMER_BROKERS", "localhost:9092")

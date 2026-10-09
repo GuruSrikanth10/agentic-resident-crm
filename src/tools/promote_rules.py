@@ -204,8 +204,24 @@ def promote_rules(auto_commit: bool = False):
                 f.writelines(remaining_lines)
 
         print(f"\nFinished. Promoted {promoted_count} rules.")
+        if promoted_count and _prompts_from_langfuse():
+            # The rules went to the learned_rules.md files; a service reading
+            # its prompts from Langfuse does not read those files.
+            print("PROMPT_SOURCE=langfuse: the service reads its prompts from "
+                  "Langfuse, not these files. Publish the updated learned rules "
+                  "where Langfuse is reachable:\n"
+                  "    python -m src.tools.upload_prompts --apply")
     finally:
         promo_lock.release()
+
+
+def _prompts_from_langfuse() -> bool:
+    from src.utils import prompt_store
+
+    try:
+        return prompt_store.source() == prompt_store.LANGFUSE
+    except ValueError:
+        return False
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(

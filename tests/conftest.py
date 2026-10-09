@@ -171,6 +171,11 @@ ISOLATED_ENV_VARS = (
     "LANGFUSE_HOST",
     "LANGFUSE_TRACING_ENABLED",
     "LANGFUSE_SAMPLE_RATE",
+    # Where the agents' prompts come from (utils/prompt_store). `langfuse`
+    # would have every test fetch its prompts from a real project, and fail
+    # without one; the label picks which version.
+    "PROMPT_SOURCE",
+    "LANGFUSE_PROMPT_LABEL",
     # Consumer role: resolved at import time, so a stray value here would
     # point kafkaConsumer at the wrong topic for the whole session.
     "CONSUMER_ROLE",

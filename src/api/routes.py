@@ -1049,7 +1049,8 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
         # on it here, whichever way the run ends.
         invoke_call = functools.partial(
             traced_investigation, invoke_call, signal_dict, service_resolution,
-            service_pack, pilot, resumed=has_active_checkpoint, trace_ref=trace_ref)
+            service_pack, pilot, resumed=has_active_checkpoint, trace_ref=trace_ref,
+            graph=agent)
         run = _agent_invoke_executor.submit(run_control.run_in_scope, cancel, invoke_call)
         try:
             result = await asyncio.wait_for(asyncio.wrap_future(run),
@@ -1298,7 +1299,8 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
     if used_pilot:
         casebook_data["pilot"] = True
     casebook_data["resolution"]["provenance"] = {
-        "prompt_fingerprint": prompt_fingerprint(used_pack, pilot=used_pilot),
+        "prompt_fingerprint": prompt_fingerprint(used_pack, pilot=used_pilot,
+                                                 graph=agent),
         "service_pack": {"service": used_pack,
                          "sha256": used_pack_spec.sha256 if used_pack_spec else None},
         "reason_code_doc": reason_code_docs.provenance(
