@@ -1,7 +1,6 @@
 import os
 import json
 import re
-import hashlib
 import contextvars
 import functools
 import threading
@@ -610,10 +609,15 @@ def _trace_attributes(payload: dict, resolution: dict, pack: str, pilot: bool,
 
     The input is what identifies the packet and its failure, which is what a
     reader of the trace list needs -- not the payload, which the investigator's
-    own input carries. The version is the pack's prompt fingerprint, so a
-    change in the agents' scores can be put down to a prompt change (G23)."""
+    own input carries. The version says which prompts the agents were given,
+    so a change in their scores can be put down to a prompt change (G23):
+    under PROMPT_SOURCE=langfuse the agent prompts' versions, with every
+    prompt's version in the metadata (`prompt_versions`, read from the
+    graph's snapshot the run is pinned to); under files the pack's prompt
+    fingerprint."""
     from src.utils.opencode_runner import lane_enabled
 
+    versions = prompt_versions(pack)
     event_id = str(payload.get("eventId") or "unknown")
     meta = payload.get("packetMetaData") or {}
     service = str(resolution.get("service") or "unknown")
@@ -631,8 +635,10 @@ def _trace_attributes(payload: dict, resolution: dict, pack: str, pilot: bool,
         "tags": ["lane:rejection", f"service:{service}", *(["pilot"] if pilot else [])],
         "metadata": {**facts, "resolved_by": resolution.get("source"),
                      "runbook_mode": os.environ.get("RUNBOOK_MODE", "off").lower(),
-                     "harness": lane_enabled("rejection")},
-        "version": prompt_fingerprint(pack, pilot),
+                     "harness": lane_enabled("rejection"),
+                     **tracing.prompt_metadata(versions)},
+        "version": (tracing.prompt_version_summary(versions) if versions is not None
+                    else prompt_fingerprint(pack, pilot)),
     }
 
 
@@ -837,30 +843,47 @@ PROMPT_FILES = (
 )
 
 
-def _prompt_bytes(path: str) -> bytes:
-    """A prompt file's content as the fingerprint hashes it: the file's
-    bytes, or under PROMPT_SOURCE=langfuse the Langfuse version in use -- the
-    text the agents are actually given. A missing prompt is itself a
-    meaningful configuration, so its absence is recorded rather than skipped,
-    where it would collide with a present one."""
-    if prompt_store.source() == prompt_store.LANGFUSE and prompt_store.is_prompt(path):
-        return prompt_store.text(path).encode("utf-8")
-    try:
-        with open(path, "rb") as f:
-            return f.read()
-    except OSError:
-        return b""
+#: The prompts a rejection packet's agents are given, for its prompt versions
+#: (`prompt_versions`): each role's generic prompt and the learned rules that
+#: hold for every service; the harness templates and their rules when the
+#: lane runs on the opencode harness; and the pack's texts but its DLT one.
+REJECTION_PROMPT_FILES = (
+    "InvestigatorAgent.md",
+    "ReviewerAgent.md",
+    "SynthesisAgent.md",
+    "LogFilterAgent.md",
+    prompt_composer.GENERIC_LEARNED_RULES,
+)
+REJECTION_HARNESS_FILES = (
+    "harness/RejectionInvestigator.md",
+    "harness/RejectionReviewer.md",
+    "harness/rules/rejection.md",
+)
+REJECTION_PACK_FILES = (service_registry.POLICY_FILE,
+                        *service_registry.ROLE_FILES.values(),
+                        service_registry.LEARNED_RULES_FILE)
 
 
-def _texts_digest(texts: dict) -> str:
-    """A digest of {name: text}, sorted and length-prefixed."""
-    digest = hashlib.sha256()
-    for name, text in sorted(texts.items()):
-        encoded = text.encode("utf-8")
-        digest.update(name.encode("utf-8"))
-        digest.update(str(len(encoded)).encode("utf-8"))
-        digest.update(encoded)
-    return "sha256:" + digest.hexdigest()
+def prompt_versions(pack: Optional[str] = None, graph=None) -> Optional[dict]:
+    """{Langfuse prompt name: version} of every prompt `pack`'s rejection
+    agents are given (prompt_store.versions) -- each one can be opened in
+    Langfuse at that version. None under PROMPT_SOURCE=files.
+
+    `graph` is the graph the packet ran on, whose versions are the ones it
+    was built from (prompt_store.pinned_to). Without one, the versions read
+    here."""
+    from src.utils.opencode_runner import lane_enabled
+
+    pack = pack or service_registry.PRE_REGISTRY_PACK
+    prompts_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "prompts")
+    files = REJECTION_PROMPT_FILES
+    if lane_enabled("rejection"):
+        files += REJECTION_HARNESS_FILES
+    paths = [os.path.join(prompts_dir, name) for name in files]
+    paths += [os.path.join(service_registry.packs_dir(), pack, name)
+              for name in REJECTION_PACK_FILES]
+    with prompt_store.pinned_to(graph):
+        return prompt_store.versions(paths)
 
 
 def compute_prompt_fingerprint(base_dir: str, pack: Optional[str] = None,
@@ -887,7 +910,13 @@ def compute_prompt_fingerprint(base_dir: str, pack: Optional[str] = None,
     paths.append(os.path.join(os.path.dirname(base_dir), "AGENTS.md"))
 
     for path in sorted(paths):
-        body = _prompt_bytes(path)
+        try:
+            with open(path, "rb") as f:
+                body = f.read()
+        except OSError:
+            # A missing prompt is itself a meaningful configuration, so record
+            # its absence rather than skipping it and colliding with present.
+            body = b""
         digest.update(os.path.basename(path).encode("utf-8"))
         digest.update(str(len(body)).encode("utf-8"))
         digest.update(body)
@@ -905,11 +934,6 @@ def compute_prompt_fingerprint(base_dir: str, pack: Optional[str] = None,
         # A pack that is not in the registry is hashed as missing rather than
         # skipped, so it can never share a fingerprint with no pack at all.
         extras.append(("service_pack", f"{pack}\t{found.sha256 if found else 'missing'}"))
-        if found is not None and prompt_store.source() == prompt_store.LANGFUSE:
-            # The pack's digest covers service.json and its files; under
-            # PROMPT_SOURCE=langfuse the text its agents read is Langfuse's.
-            extras.append(("service_pack_prompts",
-                           _texts_digest(prompt_composer.pack_texts_in_use(found))))
     if pilot:
         extras.append(("pilot", prompt_composer.PILOT_SYNTHESIS_SECTION))
     extras += [("agent_tools", mcp_client.fingerprint_material(pack)),
@@ -924,27 +948,31 @@ def compute_prompt_fingerprint(base_dir: str, pack: Optional[str] = None,
 
 
 def prompt_fingerprint(pack: Optional[str] = None,
-                       pilot: Optional[bool] = None, graph=None) -> str:
-    """The fingerprint of the prompts `pack`'s agents are built with -- the
-    pre-registry pack's when none is named. `pilot` defaults to whether the
-    pack is a pilot service's now. Computed on first use and kept until the
-    graph is rebuilt.
+                       pilot: Optional[bool] = None, graph=None):
+    """What identifies the prompts `pack`'s agents are built with -- the
+    pre-registry pack's when none is named -- as a casebook records it.
 
-    `graph` is the graph the packet ran on: under PROMPT_SOURCE=langfuse its
-    prompts are the versions it was built from (prompt_store.pinned_to), which
-    for a packet that was running when newer ones were put in use are not the
-    newest. Without one, the prompts read here."""
+    Under PROMPT_SOURCE=langfuse, their Langfuse versions, {name: version}
+    (`prompt_versions`): Langfuse keeps every version, so the version is all
+    a reader needs to see the text. `graph` is the graph the packet ran on,
+    whose versions are the ones it was built from -- for a packet that was
+    running when newer ones were put in use, not the newest.
+
+    Under PROMPT_SOURCE=files, which have no versions, the hash
+    `compute_prompt_fingerprint`. `pilot` defaults to whether the pack is a
+    pilot service's now. Computed on first use and kept until the graph is
+    rebuilt."""
     pack = pack or service_registry.PRE_REGISTRY_PACK
+    if prompt_store.source() == prompt_store.LANGFUSE:
+        return prompt_versions(pack, graph=graph)
     if pilot is None:
         pilot = service_registry.is_pilot(pack)
-    with prompt_store.pinned_to(graph):
-        # Per revision: the graphs built from two can be running at once.
-        key = (prompt_store.revision(), f"{pack}+pilot" if pilot else pack)
-        found = _prompt_fingerprints.get(key)
-        if found is None:
-            found = compute_prompt_fingerprint(
-                os.path.dirname(os.path.dirname(__file__)), pack, pilot=pilot)
-            _prompt_fingerprints[key] = found
+    key = f"{pack}+pilot" if pilot else pack
+    found = _prompt_fingerprints.get(key)
+    if found is None:
+        found = compute_prompt_fingerprint(os.path.dirname(os.path.dirname(__file__)),
+                                           pack, pilot=pilot)
+        _prompt_fingerprints[key] = found
     return found
 
 

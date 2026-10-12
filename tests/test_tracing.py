@@ -375,6 +375,20 @@ def test_a_failed_run_is_an_error_and_an_abandoned_one_a_warning(exported):
     assert abandoned.attributes["langfuse.observation.level"] == "WARNING"
 
 
+def test_a_trace_carries_its_prompt_versions(exported):
+    versions = {"agents/investigator-agent": 4, "packs/enu-biometric/policy": 12}
+    with tracing.run("analyze-rejection", session_id=EVENT_ID,
+                     metadata={"event_id": EVENT_ID, **tracing.prompt_metadata(versions)},
+                     version=tracing.prompt_version_summary(versions)):
+        pass
+
+    (root,) = _named(exported(), "analyze-rejection")
+    assert root.attributes["langfuse.version"] == "investigator-agent:4"
+    # Kept by the masking, which drops trace metadata no trace of ours set.
+    assert root.attributes["langfuse.trace.metadata.prompt:agents/investigator-agent"] == "4"
+    assert root.attributes["langfuse.trace.metadata.prompt:packs/enu-biometric/policy"] == "12"
+
+
 #: An opencode task's stream: two model calls around two tool calls, one of
 #: which arrives twice -- as the real stream can repeat a completed part.
 _STREAM = [

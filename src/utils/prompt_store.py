@@ -46,6 +46,7 @@ import os
 import re
 import threading
 import weakref
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Optional
@@ -61,6 +62,12 @@ SOURCES = (FILES, LANGFUSE)
 
 DEFAULT_LABEL = "production"
 DEFAULT_CACHE_TTL_SECONDS = 60
+
+#: How many prompts are fetched at once (`_fetch_snapshot`). Langfuse has no
+#: batch read, so a fetch that has to reach it -- at boot, or with a TTL of 0
+#: -- is one request per prompt; one after another, they add up every
+#: request's latency, and against an unresponsive Langfuse every timeout.
+_FETCH_WORKERS = 8
 
 #: The prompt files, by where they live.
 PROMPTS_DIR = paths.REPO_ROOT / "src" / "prompts"
@@ -263,12 +270,28 @@ def _client():
     return tracing.langfuse_client()
 
 
+def _fetch_one(client, entry: PromptFile, wanted_label: str, ttl: int) -> tuple:
+    """(text, version, None) of `entry`'s labelled version, or (None, None,
+    why it cannot be used)."""
+    try:
+        prompt = client.get_prompt(entry.name, label=wanted_label, type="text",
+                                   cache_ttl_seconds=ttl)
+    except Exception as e:
+        return None, None, f"{entry.name} (label {wanted_label!r}): {type(e).__name__}: {e}"
+    text = getattr(prompt, "prompt", None)
+    if getattr(prompt, "is_fallback", False) or not isinstance(text, str):
+        return None, None, f"{entry.name}: not a text prompt from Langfuse"
+    return text, int(getattr(prompt, "version", 0) or 0), None
+
+
 def _fetch_snapshot() -> _Snapshot:
     """Every catalogued prompt's labelled version, unchecked (`_checked`).
     Raises PromptUnavailable naming every prompt that failed, not just the
-    first. Served from the SDK's cache when it is fresh, so it is called
-    outside `_snapshot_lock`: a fetch that has to reach Langfuse must not make
-    every other packet wait behind it."""
+    first, in catalog order. Served from the SDK's cache when it is fresh, so
+    it is called outside `_snapshot_lock`: a fetch that has to reach Langfuse
+    must not make every other packet wait behind it. The prompts are fetched
+    `_FETCH_WORKERS` at a time, so one that has to reach Langfuse takes about
+    as long as its slowest request, not the sum of them."""
     try:
         client = _client()
     except Exception as e:
@@ -276,19 +299,18 @@ def _fetch_snapshot() -> _Snapshot:
                                 f"{type(e).__name__}: {e}") from e
     texts, versions, failures = {}, {}, []
     wanted_label, ttl = label(), cache_ttl_seconds()
-    for entry in catalog():
-        try:
-            prompt = client.get_prompt(entry.name, label=wanted_label, type="text",
-                                       cache_ttl_seconds=ttl)
-        except Exception as e:
-            failures.append(f"{entry.name} (label {wanted_label!r}): {type(e).__name__}: {e}")
-            continue
-        text = getattr(prompt, "prompt", None)
-        if getattr(prompt, "is_fallback", False) or not isinstance(text, str):
-            failures.append(f"{entry.name}: not a text prompt from Langfuse")
+    entries = catalog()
+    with ThreadPoolExecutor(max_workers=max(1, min(_FETCH_WORKERS, len(entries))),
+                            thread_name_prefix="prompt-fetch") as pool:
+        # `map` yields in the catalog's order, whichever finishes first.
+        results = list(pool.map(
+            lambda entry: _fetch_one(client, entry, wanted_label, ttl), entries))
+    for entry, (text, version, failure) in zip(entries, results):
+        if failure is not None:
+            failures.append(failure)
             continue
         texts[entry.name] = text
-        versions[entry.name] = int(getattr(prompt, "version", 0) or 0)
+        versions[entry.name] = version
     if failures:
         raise PromptUnavailable("Prompts could not be fetched from Langfuse "
                                 "(PROMPT_SOURCE=langfuse): " + "; ".join(failures))
@@ -466,6 +488,21 @@ def link(path) -> Optional[dict]:
         return None
     version = _snapshot().versions.get(entry.name)
     return {"name": entry.name, "version": version} if version is not None else None
+
+
+def versions(paths) -> Optional[Dict[str, int]]:
+    """{Langfuse prompt name: version} of each catalogued prompt file among
+    `paths`, read here (`pinned`, else the one in use), in catalog order --
+    what a casebook and a trace record of the prompts a run was given. A path
+    that is no prompt (AGENTS.md, a pack file the repository does not have)
+    is left out. None when the prompts are the files', which have no Langfuse
+    version."""
+    if source() != LANGFUSE:
+        return None
+    wanted = {Path(path).resolve() for path in paths}
+    snapshot = _snapshot()
+    return {entry.name: snapshot.versions[entry.name]
+            for entry in catalog() if entry.path in wanted}
 
 
 def reset() -> None:

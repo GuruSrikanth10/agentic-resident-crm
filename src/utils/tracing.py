@@ -266,6 +266,31 @@ def langfuse_client():
     return _client
 
 
+#: The trace metadata key of a prompt's version: `prompt:<Langfuse name>`.
+PROMPT_METADATA_PREFIX = "prompt:"
+
+
+def prompt_metadata(versions: Optional[dict]) -> dict:
+    """Trace metadata naming the Langfuse version of every prompt a run was
+    given (prompt_store.versions), one key per prompt --
+    `prompt:packs/enu-biometric/policy` -> "5" -- so traces can be filtered
+    by any prompt's version. Empty when the prompts are the files'."""
+    return {f"{PROMPT_METADATA_PREFIX}{name}": str(version)
+            for name, version in (versions or {}).items()}
+
+
+def prompt_version_summary(versions: Optional[dict]) -> Optional[str]:
+    """A trace's `version` under PROMPT_SOURCE=langfuse: the agents' own
+    prompts and their versions -- `investigator-agent:4 reviewer-agent:2
+    ...`. Every prompt a run was given would not fit the field's 200
+    characters; the rest are in `prompt_metadata`. None when the prompts are
+    the files'."""
+    summary = " ".join(f"{name.removeprefix('agents/')}:{version}"
+                       for name, version in (versions or {}).items()
+                       if name.startswith("agents/"))
+    return summary or None
+
+
 def _string_metadata(metadata: Optional[dict]) -> dict:
     """Propagated metadata is string to string, each value at most 200
     characters: anything else would be dropped by the SDK with a warning."""

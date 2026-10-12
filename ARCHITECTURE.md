@@ -1522,7 +1522,9 @@ The enu-biometric labels are unchanged.
 
 **Fingerprints and provenance.** `prompt_fingerprint(pack)` is per pack. The
 casebook records it, and `resolution.provenance.service_pack` (the pack and
-its digest), for the pack the graph actually used.
+its digest), for the pack the graph actually used. Under
+`PROMPT_SOURCE=langfuse` it is the prompts' Langfuse versions instead of a
+hash (section 3.14).
 
 **Learned rules.** A proposed rule records the packet's service and pack
 (`pending_rules.jsonl` gains `service`, `service_pack`). `promote_rules.py`
@@ -2659,10 +2661,32 @@ those, never half of one and half of the other.
 **Traces and fingerprints.** Every model call is linked to the version of the
 prompt its agent was built from (`tracing.invoke(..., prompt={"name",
 "version"})`, via `propagate_attributes`), so Langfuse's prompt page shows
-latency, cost and scores per version. The prompt fingerprint (section 3.8)
-hashes the Langfuse text in use, and also the pack's Langfuse texts
-(`service_pack_prompts`), so a casebook names the prompts that produced it in
-either mode.
+latency, cost and scores per version.
+
+The casebook and the trace name the prompts a packet ran on by their Langfuse
+versions rather than a hash, since Langfuse keeps every version
+(`prompt_versions` in each lane, read from the graph's snapshot): every prompt
+the lane gives that pack's agents -- the generic prompts, the generic learned
+rules, the harness templates and rules when the lane runs on the harness, and
+the pack's texts (all but `dlt.md` for the rejection lane; only `dlt.md` for
+the DLT lane).
+
+- Casebook: `resolution.provenance.prompt_fingerprint` is `{prompt name:
+  version}`, e.g. `{"agents/investigator-agent": 4, ...,
+  "packs/enu-biometric/policy": 5}`.
+- Trace: one metadata key per prompt, `prompt:<name>` -> `"<version>"`, so
+  traces filter by any prompt's version
+  (`prompt:packs/enu-biometric/policy = 5`). The trace's `version` -- at most
+  200 characters, which every prompt would not fit -- is the agents' own
+  prompts, `investigator-agent:4 log-filter-agent:1 reviewer-agent:2
+  synthesis-agent:3`. The DLT trace gets both too.
+
+The versions cover the Langfuse prompts only. What the section 3.8 hash also
+covered -- the tools each role is served, `AGENTS.md`, the operating note, the
+pilot section -- no longer moves this field; `provenance.service_pack.sha256`
+still identifies the pack, and `pilot` is recorded beside it. Under `files`
+the fingerprint is the section 3.8 hash, as before, and the trace's `version`
+is that hash.
 
 **Uploading** (`src/tools/upload_prompts.py`), from a machine that reaches
 Langfuse, with the three variables set (the repository's `.env` is read):

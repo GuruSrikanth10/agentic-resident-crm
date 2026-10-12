@@ -10,6 +10,7 @@ here with its prompt API's shape: versions, labels, and a 404 that carries
 """
 import asyncio
 import json
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -264,6 +265,40 @@ def test_an_unreachable_langfuse_stops_the_boot(langfuse):
         prompt_store.activate()
 
 
+def test_the_prompts_are_fetched_concurrently(langfuse, monkeypatch):
+    langfuse.upload_repository()
+    real = langfuse.get_prompt
+    # The first two fetches wait for each other: fetched one after another,
+    # the first waits alone and the barrier breaks.
+    barrier = threading.Barrier(2, timeout=5)
+    lock, started = threading.Lock(), []
+
+    def get_prompt(name, **kwargs):
+        with lock:
+            started.append(name)
+            first_two = len(started) <= 2
+        if first_two:
+            barrier.wait()
+        return real(name, **kwargs)
+
+    monkeypatch.setattr(langfuse, "get_prompt", get_prompt)
+    prompt_store.activate()
+    assert not barrier.broken
+    assert sorted(started) == sorted(entry.name for entry in prompt_store.catalog())
+
+
+def test_every_failing_prompt_is_named_in_catalog_order(langfuse):
+    langfuse.upload_repository()
+    names = [entry.name for entry in prompt_store.catalog()]
+    first, last = names[0], names[-1]
+    del langfuse.prompts[first], langfuse.prompts[last]
+    with pytest.raises(PromptUnavailable) as raised:
+        prompt_store.activate()
+    message = str(raised.value)
+    assert first in message and last in message
+    assert message.index(first) < message.index(last)
+
+
 def test_the_api_refuses_to_boot_without_its_prompts(main_api, capsys):
     module, _langfuse = main_api
     with pytest.raises(SystemExit) as exit_info:
@@ -402,18 +437,71 @@ def test_the_dlt_agents_are_rebuilt_on_a_new_version(langfuse, monkeypatch):
         "DLT Reviewer v2."
 
 
-def test_the_fingerprint_follows_the_langfuse_text(langfuse):
-    import os
+def test_the_fingerprint_is_the_versions_of_the_prompts_the_agents_are_given(
+        langfuse, monkeypatch):
+    import src.core.agent_orchestrator as orch
 
-    from src.core.agent_orchestrator import compute_prompt_fingerprint
-
-    base = os.path.join(Path(__file__).resolve().parent.parent, "src")
+    monkeypatch.setenv("USE_OPENCODE_HARNESS_REJECTION", "false")
     langfuse.upload_repository()
     prompt_store.activate()
-    before = compute_prompt_fingerprint(base, "enu-biometric")
+    versions = orch.prompt_fingerprint("enu-biometric")
+    assert versions["agents/investigator-agent"] == 1
+    assert versions["packs/enu-biometric/policy"] == 1
+    # Only what the rejection lane gives this pack's agents.
+    assert not [name for name in versions if "dlt" in name or "runbook" in name
+                or name.startswith(("harness/", "packs/_default/"))]
+
     langfuse.publish(_name(POLICY), "A different policy.")
     prompt_store.refresh()
-    assert compute_prompt_fingerprint(base, "enu-biometric") != before
+    assert orch.prompt_fingerprint("enu-biometric")["packs/enu-biometric/policy"] == 2
+
+    # On the harness, the lane's templates and rules are given to them too.
+    monkeypatch.setenv("USE_OPENCODE_HARNESS_REJECTION", "true")
+    assert {"harness/rejection-investigator", "harness/rejection-reviewer",
+            "harness/rules/rejection"} <= set(orch.prompt_fingerprint("enu-biometric"))
+
+
+def test_the_trace_carries_the_prompt_versions(langfuse, monkeypatch):
+    import src.core.agent_orchestrator as orch
+    from src.dlt import orchestrator as dlt
+
+    monkeypatch.setenv("USE_OPENCODE_HARNESS_REJECTION", "false")
+    monkeypatch.setenv("USE_OPENCODE_HARNESS_DLT", "false")
+    langfuse.upload_repository()
+    langfuse.publish(_name(INVESTIGATOR), "Investigator v2.")
+    prompt_store.activate()
+
+    attributes = orch._trace_attributes({"eventId": "e1"}, {}, "enu-biometric", False, False)
+    # The agents' own prompts in the version; every prompt in the metadata.
+    assert attributes["version"] == ("investigator-agent:2 log-filter-agent:1 "
+                                     "reviewer-agent:1 synthesis-agent:1")
+    assert attributes["metadata"]["prompt:agents/investigator-agent"] == "2"
+    assert attributes["metadata"]["prompt:packs/enu-biometric/policy"] == "1"
+    assert {key for key in attributes["metadata"] if key.startswith("prompt:")} == \
+        {f"prompt:{name}" for name in orch.prompt_versions("enu-biometric") or {}}
+
+    attributes = dlt._trace_attributes("case-1", {}, {}, None, "enu-biometric")
+    assert attributes["version"] == ("dlt-investigator-agent:1 dlt-reviewer-agent:1 "
+                                     "dlt-synthesis-agent:1")
+    assert "prompt:agents/investigator-agent" not in attributes["metadata"]
+    monkeypatch.setenv("USE_OPENCODE_HARNESS_DLT", "true")
+    attributes = dlt._trace_attributes("case-1", {}, {}, None, "enu-biometric")
+    assert attributes["metadata"]["prompt:harness/rules/dlt"] == "1"
+
+
+def test_under_the_files_the_trace_and_the_casebook_keep_the_fingerprint(store):
+    import src.core.agent_orchestrator as orch
+    from src.dlt import orchestrator as dlt
+
+    assert orch.prompt_versions("enu-biometric") is None
+    attributes = orch._trace_attributes({"eventId": "e1"}, {}, "enu-biometric", False, False)
+    assert attributes["version"].startswith("sha256:")
+    assert attributes["version"] == orch.prompt_fingerprint("enu-biometric", False)
+    assert not [key for key in attributes["metadata"] if key.startswith("prompt:")]
+
+    attributes = dlt._trace_attributes("case-1", {}, {}, None, "enu-biometric")
+    assert attributes["version"] is None
+    assert not [key for key in attributes["metadata"] if key.startswith("prompt:")]
 
 
 # ======================================================================
@@ -484,17 +572,21 @@ def test_a_packet_running_across_a_new_version_records_the_one_it_ran_on(
     assert after != before
     assert orch.prompt_fingerprint("enu-biometric") == after
 
-    # The trace's version, taken inside the run.
+    # The trace's versions, taken inside the run.
     seen = {}
 
     def invoke():
-        seen["version"] = orch.prompt_fingerprint("enu-biometric")
+        seen["versions"] = orch.prompt_fingerprint("enu-biometric")
+        seen["trace"] = orch._trace_attributes(
+            {"eventId": "e1"}, {}, "enu-biometric", False, False
+        )["metadata"]["prompt:packs/enu-biometric/policy"]
         seen["policy"] = prompt_store.text(POLICY)
         return {}
 
     orch.traced_investigation(invoke, {"eventId": "e1"}, {}, "enu-biometric",
                               False, graph=old_graph)
-    assert seen == {"version": before,
+    assert seen == {"versions": before,
+                    "trace": str(before["packs/enu-biometric/policy"]),
                     "policy": POLICY.read_text(encoding="utf-8")}
 
 

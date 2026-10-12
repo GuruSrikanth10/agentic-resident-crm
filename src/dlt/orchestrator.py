@@ -41,7 +41,7 @@ from src.core.agent_factory import build_agent
 from src.dlt.corroborate import Corroboration
 from src.tools import mcp_client
 from src.models.dlt_synthesis import DltFinding
-from src.utils import metrics, prompt_store, tracing
+from src.utils import metrics, prompt_store, service_registry, tracing
 from src.utils.llm_utils import get_llm
 from src.utils.logging_config import get_logger
 from src.utils.resilience import llm_breaker, retry_transient
@@ -63,6 +63,19 @@ _agent_prompts = None
 _agent_lock = threading.Lock()
 
 MAX_EVIDENCE_CHARS = int(os.environ.get("DLT_MAX_EVIDENCE_CHARS", "40000"))
+
+_PROMPTS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "prompts")
+
+#: Each agent's generic prompt, by role.
+PROMPT_FILES = {"dlt_investigator": "DltInvestigatorAgent.md",
+                "dlt_reviewer": "DltReviewerAgent.md",
+                "dlt_synthesis": "DltSynthesisAgent.md"}
+
+#: The harness templates and their rules, given to the agents when the lane
+#: runs on the opencode harness.
+HARNESS_FILES = ("harness/DltInvestigator.md", "harness/DltReviewer.md",
+                 "harness/rules/dlt.md")
 
 
 class DltGraphState(TypedDict, total=False):
@@ -338,19 +351,14 @@ def _build_dlt_agent():
     # the graph, and remembered with it for the runs of it (`investigate`).
     built_from = prompt_store.revision()
     snapshot = prompt_store.current()
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    prompts_dir = os.path.join(base_dir, "prompts")
-    prompt_files = {"dlt_investigator": "DltInvestigatorAgent.md",
-                    "dlt_reviewer": "DltReviewerAgent.md",
-                    "dlt_synthesis": "DltSynthesisAgent.md"}
 
     # Through prompt_store: the files, or under PROMPT_SOURCE=langfuse the
     # Langfuse versions -- with the version of each, to link the generations
     # of the agents built from it in a trace.
-    prompts = {role: prompt_store.text(os.path.join(prompts_dir, filename))
-               for role, filename in prompt_files.items()}
-    prompt_links = {role: prompt_store.link(os.path.join(prompts_dir, filename))
-                    for role, filename in prompt_files.items()}
+    prompts = {role: prompt_store.text(os.path.join(_PROMPTS_DIR, filename))
+               for role, filename in PROMPT_FILES.items()}
+    prompt_links = {role: prompt_store.link(os.path.join(_PROMPTS_DIR, filename))
+                    for role, filename in PROMPT_FILES.items()}
 
     # Deep agents, each with the MCP tools its role gets -- none by default
     # (see the module docstring). The system prompts are fixed when an agent
@@ -689,12 +697,33 @@ def parse_finding(text: str):
         return None, f"{type(e).__name__}: {e}"
 
 
+def prompt_versions(service_pack: Optional[str]) -> Optional[dict]:
+    """{Langfuse prompt name: version} of every prompt a DLT case's agents
+    are given (prompt_store.versions): the generic prompts, the harness's when
+    the lane runs on it, and the pack's DLT text -- read here, which for a run
+    is its graph's snapshot (`investigate` pins it). None under
+    PROMPT_SOURCE=files."""
+    from src.utils.opencode_runner import lane_enabled
+
+    files = tuple(PROMPT_FILES.values())
+    if lane_enabled("dlt"):
+        files += HARNESS_FILES
+    paths = [os.path.join(_PROMPTS_DIR, name) for name in files]
+    if service_pack:
+        paths.append(os.path.join(service_registry.packs_dir(), service_pack,
+                                  service_registry.DLT_FILE))
+    return prompt_store.versions(paths)
+
+
 def _trace_attributes(case_id: str, failure: dict, corroboration: dict,
                       service_resolution: Optional[dict],
                       service_pack: Optional[str]) -> dict:
     """The `analyze-dlt` trace's input, session and attributes: the declared
     failure a reader scans the trace list by. The stack trace and the logs are
-    in the investigator's own input."""
+    in the investigator's own input. Under PROMPT_SOURCE=langfuse the version
+    is the agent prompts' versions, and every prompt's version is in the
+    metadata (`prompt_versions`)."""
+    versions = prompt_versions(service_pack)
     service = (service_resolution or {}).get("service") or "unknown"
     facts = {
         "case_id": case_id,
@@ -711,7 +740,9 @@ def _trace_attributes(case_id: str, failure: dict, corroboration: dict,
                   "corroboration": corroboration.get("verdict")},
         "session_id": case_id,
         "tags": ["lane:dlt", f"service:{service}"],
-        "metadata": {**facts, "corroboration": corroboration.get("verdict")},
+        "metadata": {**facts, "corroboration": corroboration.get("verdict"),
+                     **tracing.prompt_metadata(versions)},
+        "version": tracing.prompt_version_summary(versions),
     }
 
 
