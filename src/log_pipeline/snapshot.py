@@ -72,8 +72,13 @@ def exists(event_id: str) -> bool:
 
 
 def save(event_id: str, records: list, gaps: Optional[list] = None,
-         source: str = "kubernetes") -> bool:
+         source: str = "kubernetes", spans: Optional[list] = None) -> bool:
     """Persist a snapshot. Returns True when written.
+
+    `spans` -- how far back each pod's logs reached (`gaps.PodSpan`) -- are
+    kept so a reuse judges coverage exactly as the capture did, rather than
+    trusting gaps that were judged against whatever window the capture had
+    (`gaps.rejudge_for_anchor`).
 
     Goes through CasebookStorage, which writes atomically on both backends
     (`.tmp` + `os.replace` under a lock locally, an atomic PutObject on S3).
@@ -93,7 +98,7 @@ def save(event_id: str, records: list, gaps: Optional[list] = None,
         )
         storage.save_artifact(event_id, RECORDS_FILENAME, body)
 
-        meta = {
+        meta: dict = {
             "event_id": event_id,
             "source": source,
             "captured_at": datetime.now(timezone.utc).isoformat(),
@@ -103,6 +108,8 @@ def save(event_id: str, records: list, gaps: Optional[list] = None,
                 for g in (gaps or [])
             ],
         }
+        if spans is not None:
+            meta["coverage"] = {"pods": [span.to_dict() for span in spans]}
         storage.save(event_id, meta, filename=META_FILENAME)
 
         logger.info("Log snapshot saved", event_id=event_id,
@@ -158,4 +165,25 @@ def load(event_id: str) -> Optional[tuple]:
         # live fetch instead.
         logger.warning("Unusable log snapshot; ignoring", event_id=event_id,
                        error=f"{type(e).__name__}: {e}")
+        return None
+
+
+def load_spans(event_id: str) -> Optional[list]:
+    """The pods' spans a snapshot kept (`save`), or None for one captured
+    before spans were kept -- its gaps are then all there is to go on.
+
+    Never raises, for the reason `load` does not.
+    """
+    from src.log_pipeline.sources.k8s.gaps import PodSpan
+
+    try:
+        meta = get_casebook_storage().load(event_id, filename=META_FILENAME)
+        coverage = (meta or {}).get("coverage")
+        if not isinstance(coverage, dict) or not isinstance(coverage.get("pods"), list):
+            return None
+        spans = [PodSpan.from_dict(entry) for entry in coverage["pods"]]
+        return [span for span in spans if span is not None]
+    except Exception as e:
+        logger.warning("Unreadable snapshot coverage; judging from its gaps",
+                       event_id=event_id, error=f"{type(e).__name__}: {e}")
         return None

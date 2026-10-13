@@ -94,6 +94,12 @@ approvable** finding. Do not reject it for lacking a definitive cause when
 the evidence genuinely did not support one. Prefer an honest non-answer over
 a confident fabrication.
 
+A line beginning `LOG COVERAGE:` is not an evidence gap. It says from when the
+packet's logs are complete, through to its rejection. Do not reject an
+investigation for not qualifying its findings because of it. Do reject one
+that concludes an earlier substage did not run, or how it ended, only because
+its lines are absent from a trace that this line says starts later.
+
 ### WHEN TO APPROVE
 
 Approve when the investigation is *sound*, not when it is perfect. All of
@@ -160,6 +166,7 @@ To understand a rejection, you must first understand what a successful packet lo
 - **Success Criteria:** The 1:N result must contain **only the historical biometrics of the resident's own parent Aadhaar**. If every match returned belongs to the parent, the update succeeds.
 - **Rule:** The result must not be empty (the resident's own historical biometrics must come back), and it must NOT contain any candidate from a different parent.
 - **Why?** A genuine owner's biometrics will de-duplicate against their own earlier records and against no one else's. If the result contains a *different* person's Aadhaar, it is rejected as a biometric mix-up or fraud; if it contains nothing, the new biometrics could not be tied to the parent.
+- **The resident's own record stays in the result.** The service drops a candidate for sharing the applicant's UID only on a first-time biometric update (MBU). On a standard update the resident's own parent record stays in the candidate set and is classified like any other candidate (True Duplicate, False Positive, Anomalous or Cannot Determine), and the rule's counts and flags, such as `allCandidatesAnomalous`, include it. Other filters can still drop it (an ignored, false-positive, rejected or cancelled candidate), so describe it as filtered out only when a log line or a tool result shows that.
 - **Reactivation (enrolment type `Z`)** follows exactly the same criteria as a standard biometric update.
 
 ### C. MANDATORY BIOMETRIC UPDATE (MBU)

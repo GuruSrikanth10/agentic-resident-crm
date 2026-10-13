@@ -9,7 +9,7 @@
   "rule_fingerprint": "sha256:1dc2ffacbe0bb677994c353352b58a3fdcb9a8fed8326de493c58ee2dd6bd23b",
   "resolution": {
     "rejection_description": "Rejected on a standard biometric update because every de-duplication candidate came back anomalous, meaning some modalities matched and others did not, with no candidate confirmed as a duplicate on face.",
-    "synthesis": "The resident submitted a biometric update, which must authenticate cleanly against their own parent Aadhaar. Every candidate matched only partially, so the system could not confirm that the person updating the record is its owner and rejected the packet. A new packet with a careful, complete capture of fingerprint, iris and face is needed for the authentication to succeed.",
+    "synthesis": "The resident submitted a biometric update, whose 1:N de-duplication result must contain only clean matches to the historical biometrics of their own parent Aadhaar. Every candidate matched only partially, so the system could not confirm that the person updating the record is its owner and rejected the packet. A new packet with a careful, complete capture of fingerprint, iris and face is needed for the de-duplication to match the parent cleanly.",
     "action": "RESIDENT_PACKET_RESUBMIT",
     "resident_action": "NEW_PACKET"
   },

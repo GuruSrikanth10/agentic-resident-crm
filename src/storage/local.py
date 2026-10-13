@@ -1,6 +1,5 @@
 import os
 import json
-import time
 from pathlib import Path
 from typing import Optional
 from filelock import FileLock
@@ -11,6 +10,7 @@ from src.storage.base import (
     TERMINAL_STATUSES,
 )
 from src.utils.paths import LOCAL_CASESHEETS_DIR
+from src.utils.timestamps import utc_now
 
 class LocalFilesystemCasebookStorage(CasebookStorage):
     def __init__(self, base_dir: str = None):
@@ -62,7 +62,7 @@ class LocalFilesystemCasebookStorage(CasebookStorage):
         # Stamp the last_updated timestamp on every save
         if isinstance(casebook, dict):
             meta = casebook.setdefault("casebook_metadata", {})
-            meta["last_updated"] = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+            meta["last_updated"] = utc_now()
 
         with FileLock(str(lock_path), timeout=10):
             with open(tmp_path, "w", encoding="utf-8") as f:

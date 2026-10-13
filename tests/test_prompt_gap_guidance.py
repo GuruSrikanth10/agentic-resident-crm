@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from src.log_pipeline.sources.k8s.gaps import BANNER_HEADER
+from src.log_pipeline.sources.k8s.gaps import BANNER_HEADER, COVERAGE_PREFIX
 from src.log_pipeline.types import GapType
 
 PROMPTS = Path(__file__).resolve().parent.parent / "src" / "prompts"
@@ -33,6 +33,18 @@ def test_investigator_quotes_the_exact_banner_the_code_emits():
         "InvestigatorAgent.md does not contain the banner emitted by "
         "gaps.render_banner(); the agent would never recognise it."
     )
+
+
+@pytest.mark.parametrize("prompt,name", [
+    (INVESTIGATOR, "InvestigatorAgent.md"),
+    (REVIEWER, "ReviewerAgent.md"),
+], ids=["investigator", "reviewer"])
+def test_prompt_explains_the_coverage_line_the_code_emits(prompt, name):
+    """A rejected packet's trace opens with this line instead of a banner. An
+    agent not told what it means would read the earlier substages it says are
+    missing as a gap -- the misreading it exists to prevent."""
+    assert COVERAGE_PREFIX in prompt, f"{name} does not explain {COVERAGE_PREFIX!r}"
+    assert "not an evidence gap" in prompt.lower().replace("*", "")
 
 
 @pytest.mark.parametrize("gap_type", list(GapType))

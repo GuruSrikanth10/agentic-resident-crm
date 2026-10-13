@@ -9,7 +9,7 @@
   "rule_fingerprint": "sha256:1a267bdbf55cf5aa04cba921a45c8b07d399bd9e2355aec769dace88a7f231ae",
   "resolution": {
     "rejection_description": "Rejected on a standard biometric update because at least one candidate from the resident's own parent Aadhaar could not be determined either way, and the parent's candidates were not all confirmed true duplicates.",
-    "synthesis": "The resident submitted a biometric update, which must authenticate against every historical iteration of their own parent Aadhaar. One of those iterations produced an inconclusive comparison, so ownership of the record could not be confirmed and the packet was rejected. A new packet with a complete, good-quality biometric capture is needed to make the authentication decisive.",
+    "synthesis": "The resident submitted a biometric update, whose 1:N de-duplication result must match every historical iteration of their own parent Aadhaar completely. One of those iterations produced an inconclusive comparison, so ownership of the record could not be confirmed and the packet was rejected. A new packet with a complete, good-quality biometric capture is needed to make the match against the parent decisive.",
     "action": "RESIDENT_PACKET_RESUBMIT",
     "resident_action": "NEW_PACKET"
   },

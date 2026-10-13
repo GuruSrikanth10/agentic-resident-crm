@@ -11,6 +11,7 @@ Flow:
 """
 import os
 import threading
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from src.log_pipeline import redaction
@@ -78,6 +79,46 @@ def _default_window() -> TimeWindow:
         return TimeWindow.default()
 
 
+DEFAULT_REJECTION_LEAD_SECONDS = 300
+
+
+def _rejection_lead_seconds() -> int:
+    try:
+        return max(0, int(os.environ.get("REJECTION_LOG_LEAD_SECONDS",
+                                         str(DEFAULT_REJECTION_LEAD_SECONDS))))
+    except ValueError:
+        return DEFAULT_REJECTION_LEAD_SECONDS
+
+
+def rejection_window(rejected_at: Optional[datetime],
+                     now: Optional[datetime] = None) -> TimeWindow:
+    """The window for a rejected packet's logs, anchored on its rejection.
+
+    Read as far back as K8S_DEFAULT_SINCE_HOURS, as before -- further when
+    the rejection is older than that, so the read at least asks for it -- but
+    judged complete once every pod's logs reach `cover_from`: the rejection
+    less REJECTION_LOG_LEAD_SECONDS. The packet is fetched the moment it is
+    rejected, so the substage that rejected it is what the trace must hold.
+    Its earlier substages may have run minutes or hours before, beyond what
+    the kubelet keeps, and are reported as coverage rather than as a gap
+    (`gaps.coverage_note`).
+
+    The DLT lane anchors its window the same way, on when the last attempt
+    failed (`dlt/window.py`). With no rejection time, the window is the
+    default one, judged as before.
+    """
+    window = _default_window()
+    if rejected_at is None:
+        return window
+    if rejected_at.tzinfo is None:
+        rejected_at = rejected_at.replace(tzinfo=timezone.utc)
+    cover_from = rejected_at - timedelta(seconds=_rejection_lead_seconds())
+    now = now or datetime.now(timezone.utc)
+    reach_hours = (now - cover_from).total_seconds() / 3600.0
+    return TimeWindow(hours=max(window.hours, reach_hours),
+                      anchor=rejected_at, cover_from=cover_from)
+
+
 def reduce_logs(event_id: str, extra_identifiers: tuple = (),
                 storage_key: Optional[str] = None,
                 window: Optional[TimeWindow] = None,
@@ -142,6 +183,9 @@ def reduce_logs(event_id: str, extra_identifiers: tuple = (),
     )
 
     gap_banner = k8s_gaps.render_banner(fetch_result.gaps)
+    # What the trace covers, where that is not a gap (FetchResult.notes):
+    # after any banner and ahead of the trace, on every output path below.
+    gap_banner = "\n".join(part for part in (gap_banner, *fetch_result.notes) if part)
 
     if not raw_logs:
         empty = f"No logs found for ID: {event_id}"

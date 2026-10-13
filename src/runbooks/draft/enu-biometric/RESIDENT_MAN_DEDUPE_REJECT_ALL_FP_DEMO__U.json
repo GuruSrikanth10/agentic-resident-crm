@@ -9,7 +9,7 @@
   "rule_fingerprint": "sha256:7c968e2f2183f77dfcd3bdc48d6c70df117eb40da44afd8abd548a84b7342089",
   "resolution": {
     "rejection_description": "Rejected on a standard biometric update when every de-duplication candidate matched on face but was adjudicated a false positive, and none of those false positives came from the resident's own parent Aadhaar.",
-    "synthesis": "The resident submitted a biometric update, which must authenticate against their own parent Aadhaar. The candidate set consisted entirely of face-matching records from other parents that were all discounted as false positives, so the update was blocked by matches carrying no real duplicate. Once those false-positive candidates are settled the packet can be replayed without resident involvement.",
+    "synthesis": "The resident submitted a biometric update, whose 1:N de-duplication result must contain only the historical biometrics of their own parent Aadhaar. The candidate set consisted entirely of face-matching records from other parents that were all discounted as false positives, so the update was blocked by matches carrying no real duplicate. Once those false-positive candidates are settled the packet can be replayed without resident involvement.",
     "action": "REPLAY",
     "resident_action": "PENDING"
   },

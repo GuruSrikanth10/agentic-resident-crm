@@ -129,6 +129,12 @@ class FetchResult:
     diagnostics: FetchDiagnostics
     gaps: list[EvidenceGap] = field(default_factory=list)
     ok: bool = True
+    #: Lines said ahead of the trace that are NOT gaps: what the trace covers
+    #: (`gaps.coverage_note`), stated so that earlier lines the pods no longer
+    #: hold are not read as steps that never happened. Rendered after the
+    #: banner but never inside it, so a note caps no confidence and triggers
+    #: none of the prompts' gap rules.
+    notes: list[str] = field(default_factory=list)
 
     @property
     def is_empty(self) -> bool:
@@ -167,6 +173,17 @@ class TimeWindow:
     #: Upper bound on record timestamps. None means "up to now", which is
     #: every existing caller and exactly today's behaviour.
     until: Optional[datetime] = None
+    #: When the packet was rejected, on the rejection lane's window
+    #: (`pipeline.rejection_window`); None on every other caller's.
+    anchor: Optional[datetime] = None
+    #: How far back the trace must reach to count as complete, when that is
+    #: not the window's start: the rejection less REJECTION_LOG_LEAD_SECONDS.
+    #: `hours` is how far back to READ and is deliberately generous; the
+    #: kubelet API serves only each container's current log file, so the
+    #: look-back is never fully served and judging gaps against it reported
+    #: rotation on every rejection. What the evidence must REACH is the
+    #: substage that rejected the packet.
+    cover_from: Optional[datetime] = None
 
     @property
     def seconds(self) -> int:
@@ -174,6 +191,13 @@ class TimeWindow:
 
     def start_time(self, now: Optional[datetime] = None) -> datetime:
         return (now or datetime.now(timezone.utc)) - timedelta(hours=self.hours)
+
+    def coverage_start(self, now: Optional[datetime] = None) -> datetime:
+        """The earliest moment the trace must reach for gap detection: the
+        window's start, unless the window says otherwise (`cover_from`)."""
+        if self.cover_from is not None:
+            return self.cover_from
+        return self.start_time(now)
 
     def excludes(self, timestamp: Optional[str]) -> bool:
         """Is this record newer than the window's upper bound?

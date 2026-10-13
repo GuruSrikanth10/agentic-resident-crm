@@ -8,8 +8,8 @@
   "version": 1,
   "rule_fingerprint": "sha256:d9fd2a3554f025ea3c9f1890ed3ed9040a0f171f5d2fa3bd928711a66a5ac3a0",
   "resolution": {
-    "rejection_description": "Rejected on a standard biometric update because de-duplication returned no candidates at all, leaving the packet with nothing to authenticate against.",
-    "synthesis": "The resident submitted a biometric update, which must authenticate one to one against their own parent Aadhaar rather than merely be unique. The capture matched no record whatsoever, including the resident's own parent, so ownership of the Aadhaar being updated could not be established and the packet was rejected. A new packet with a complete, good-quality biometric capture is required.",
+    "rejection_description": "Rejected on a standard biometric update because de-duplication returned no candidates at all, leaving nothing to tie the new biometrics to the parent Aadhaar.",
+    "synthesis": "The resident submitted a biometric update, which unlike a new enrolment must not come back unique: its 1:N de-duplication result must contain the historical biometrics of their own parent Aadhaar. The capture matched no record whatsoever, including the resident's own parent, so ownership of the Aadhaar being updated could not be established and the packet was rejected. A new packet with a complete, good-quality biometric capture is required.",
     "action": "RESIDENT_PACKET_RESUBMIT",
     "resident_action": "NEW_PACKET"
   },

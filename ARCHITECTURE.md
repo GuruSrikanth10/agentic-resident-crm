@@ -396,6 +396,9 @@ flowchart TD
 > read the logs". Every gap above is rendered into a banner placed **before** the
 > trace, and `apply_confidence_policy` caps confidence at
 > `SYNTHESIS_GAP_CONFIDENCE_CEILING` (0.6) whenever that banner is present.
+> A rejected packet's rotation and pod-replacement gaps are judged against its
+> rejection rather than the look-back; when every pod reaches it, a `LOG COVERAGE:`
+> line that is not a gap says from when the trace is complete (ARCHITECTURE.md 3.10).
 >
 > The same split bounds a resolution no log line corroborated at all:
 > `SYNTHESIS_LOGS_UNAVAILABLE_CEILING` (0.75) when we never looked (fetching
@@ -2222,10 +2225,11 @@ directory behind.
 
 To ensure zero hallucinations, `routes.py` deterministically extracts static metadata directly from the Kafka payload. All keys are `snake_case`. The output is a hierarchical JSON block formatted for downstream systems:
 
-- **casebook_metadata** (`created_at`, `last_updated` -- UTC, written on every save)
-- **packet_metadata** (`srn`, `sid`, `ref_id`, `source`, `packet_type`, `is_mbu`, `update_type`, `is_child`, `created_at`, `uploaded_at`)
-- **packet_status** (`status`, `service`, `sub_service`, `last_updated`, `is_in_process`, `rejection_data`)
+- **casebook_metadata** (`created_at`, `last_updated` -- UTC with its zone, e.g. `2026-10-12T09:49:59Z`, written on every save)
+- **packet_metadata** (`srn`, `sid`, `ref_id`, `source`, `packet_type`, `is_mbu`, `update_type`, `is_child`, `created_at`, `rejected_at`). `created_at` is the payload's `sidDate` -- when the packet was created at the centre -- in the producers' local time with its offset (`PACKET_LOCAL_UTC_OFFSET`, `+05:30`). `rejected_at` is the payload's `eventTimestamp`, stamped when the rejection was published; schema 1.2 called it `uploaded_at`, which it never was.
+- **packet_status** (`status`, `service`, `sub_service`, `last_updated`, `is_in_process`, `rejection_data`). `rejection_data.rejection_logs` holds `path` (the log artifact), `gaps` (the evidence-gap banner, or `null`) and `coverage` (the `LOG COVERAGE:` line saying from when the trace is complete, or `null`; section 3.10).
 - **resolution** (`source`, `synthesis`, `action`, `resident_action`, `confidence`, `abstained` -- `source` is `"agent"` for LLM-generated or `"runbook:<id>@v<version>"` for runbook-served results)
+  - `resolution.confidence_policy`: present only when a confidence ceiling or the abstention threshold changed the model's answer -- `{"model_confidence", "detail"}`, the number the model gave and why it was changed. Without it a capped `0.6` cannot be told from a model that said `0.6`.
   - `resolution.provenance.prompt_fingerprint`: the SHA256 over every agent system prompt, **every harness template in `src/prompts/harness/` and the `rules/` files they inline**, the generic `learned_rules.md`, the root `AGENTS.md`, **the service pack the agents were built from** (its `service.json` and every text file, by digest), and the tool configuration (`compute_prompt_fingerprint`). It is per pack, so an edit to one service's pack moves only that service's fingerprint. This is what lets an accuracy movement be attributed to a prompt change rather than merely correlated with one.
   - `resolution.provenance.service_pack`: `{"service", "sha256"}` -- the pack the agents were built from, and its digest. Usually the packet's own service; see section 3.2.3 for when it is not.
   - `resolution.provenance.reason_code_doc`: which documentation this packet was reasoned from -- the outcome, the requested and matched enrolment types, the source refs, and the SHA256 of the exact rendered text the model was shown. The text itself is **never** written to a casebook or a log line: it is large, identical for every packet with this reason code, and the digest already identifies the version. It is recorded per packet rather than folded into `prompt_fingerprint` so that a document edit and a prompt edit stay distinguishable. For a packet a runbook answered it is the documentation the runbook was checked against, resolved before the runbook decision (section 3.2.3, Phase 5); it was `null` for such a packet before then.
@@ -2234,7 +2238,7 @@ To ensure zero hallucinations, `routes.py` deterministically extracts static met
   - `resolution.shadow`: present only in `RUNBOOK_MODE=shadow`, carrying what the runbook would have decided.
   - On a contract breach the status is `FAILED_SYNTHESIS_PARSE` and `resolution` additionally carries `parse_error` and a 2000-char `raw_output`, with `action` set explicitly to `MANUAL_REVIEW` rather than left null.
 - **resolution_outcome** (optional; written by `POST /outcome/{event_id}`, not by the pipeline) -- the operator's ground-truth verdict (`CORRECT`/`INCORRECT`/`PARTIAL`), which is what `accuracy_report` scores against.
-- **schema_version** (injected by the storage layer, currently `"1.2"`; `CASEBOOK_SCHEMA_VERSION` in `src/storage/base.py`). `1.1` -> `1.2` added the optional `resolution_outcome` block and is purely additive: a 1.1 casebook is a valid 1.2 casebook with no outcome recorded yet. The DLT casebook versions independently, at `"1.4"` (section 4.4 point 9).
+- **schema_version** (injected by the storage layer, currently `"1.3"`; `CASEBOOK_SCHEMA_VERSION` in `src/storage/base.py`). `1.1` -> `1.2` added the optional `resolution_outcome` block and is purely additive: a 1.1 casebook is a valid 1.2 casebook with no outcome recorded yet. `1.2` -> `1.3` is not additive: `packet_metadata.uploaded_at` became `rejected_at`, every timestamp names its zone (they were UTC and IST side by side with neither marked), and `rejection_logs.coverage` and `resolution.confidence_policy` were added. The DLT casebook versions independently, at `"1.4"` (section 4.4 point 9).
 
 `packet_metadata.is_mbu` and `is_child` are emitted as `null` because the
 mapping is not derivable from the payload alone. `update_type` carries the raw
@@ -2277,6 +2281,14 @@ The `KubernetesLogSource` (`sources/k8s/source.py`) ties together five internal 
    - **Truncation**: The pod list exceeded `K8S_MAX_PODS`.
 
    Gaps are rendered as a banner (`--- EVIDENCE GAPS (the trace below is INCOMPLETE) ---`) prepended to the text handed to the LLM, so the Investigator and Reviewer know to qualify their findings.
+
+   **A rejected packet is judged against its rejection, not the look-back.** The kubelet API serves only each container's current log file -- 15-32 minutes on the enu-biometric pods -- so a look-back of `K8S_DEFAULT_SINCE_HOURS` (48 in the office) is never fully served, and judged against it every rejection reported `LOG_ROTATION`: every trace was called INCOMPLETE and every casebook was capped at 0.6, although the packet is fetched the moment it is rejected and the substage that rejected it was fully in view. The rejection lane therefore anchors its window on the payload's `eventTimestamp` (`pipeline.rejection_window`): it still reads as far back as the look-back, but a pod is short only if its logs begin after the rejection less `REJECTION_LOG_LEAD_SECONDS` (300), judged pod by pod rather than by the quietest pod's oldest line (`gaps.detect_anchored_gaps`). A pod that is short -- the consumer lagged, or a pod was replaced inside that span -- is a real gap and keeps the banner and the ceiling. When every pod reaches it, the trace instead opens with one line that is not a gap:
+
+   ```
+   LOG COVERAGE: this packet's logs are complete from <time> through its rejection at <time>. Lines it logged before <time> may be missing: the pods no longer hold them all.
+   ```
+
+   A packet's earlier substages can run hours before the one that rejects it, so they are reported as coverage. The Investigator and Reviewer prompts say what the line means: it is no reason to qualify a finding, and no evidence that an earlier substage did not run. A reused snapshot is re-judged against the anchor the same way (`gaps.rejudge_for_anchor`); the snapshot keeps each pod's span for that. The DLT lane is unchanged: its window starts at its own anchor, and it is still judged by the aggregate.
 
 #### PII Redaction (`src/log_pipeline/redaction.py`)
 Log lines may carry Aadhaar numbers, VIDs, mobile numbers, or email addresses. Redaction runs in `pipeline.reduce_logs` -- the one seam **every** source passes through, so Elasticsearch is covered too -- after identifier filtering and before any persistence. The Kubernetes source additionally redacts before writing its own snapshot, which is a separate, earlier persistence point; redaction is idempotent, so the second pass is a no-op:

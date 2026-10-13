@@ -4,7 +4,12 @@ from typing import Protocol, Optional
 #: 1.1 -> 1.2 adds the optional `resolution_outcome` block (section 4.1), which
 #: records whether a resolution was actually correct. It is additive: a 1.1
 #: casebook is a valid 1.2 casebook with no outcome recorded yet.
-CASEBOOK_SCHEMA_VERSION = "1.2"
+#: 1.2 -> 1.3 is NOT additive. `packet_metadata.uploaded_at` is renamed
+#: `rejected_at`, which is what it always held (the payload's eventTimestamp,
+#: stamped when the rejection was published); every timestamp names its zone
+#: (`utils/timestamps`); and `rejection_logs.coverage` and the optional
+#: `resolution.confidence_policy` are added.
+CASEBOOK_SCHEMA_VERSION = "1.3"
 
 #: Verdicts an operator can attach to a resolution.
 OUTCOME_VERDICTS = ("CORRECT", "INCORRECT", "PARTIAL")

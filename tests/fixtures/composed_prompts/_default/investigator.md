@@ -123,8 +123,18 @@ Gap types you may see:
   say so and recommend that a human check that service directly, rather than
   attributing the failure to a service that merely happens to be visible.
 
-When no banner is present, treat the trace as a complete view of the
-requested window and reason normally.
+When no banner is present, the trace is complete for the time it covers;
+reason normally.
+
+A line beginning `LOG COVERAGE:` may come before the trace. It says from when
+this packet's logs are complete, through to its rejection, so the substage
+that rejected it is fully in view. It is **not** an evidence gap: do not
+qualify your findings, lower your confidence or report a limitation because
+of it. A packet's earlier substages can run long before the one that rejected
+it, so their lines may simply predate the logs. Never conclude that an earlier
+substage did not run, or how it ended, only because none of its lines appear;
+what it decided can still be read from the rule data the rejection was
+evaluated on.
 
 ### LOG NOISE AND CONTEXT CONFUSION -- CRITICAL
 

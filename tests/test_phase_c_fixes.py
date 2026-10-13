@@ -235,18 +235,20 @@ def test_fetch_logs_node_passes_identifiers_through(monkeypatch):
 
     seen = {}
 
-    def fake_reduce(event_id, extra_identifiers=(), service=None):
+    def fake_reduce(event_id, extra_identifiers=(), service=None, window=None):
         seen["event_id"] = event_id
         seen["extra"] = tuple(extra_identifiers)
         seen["service"] = service
+        seen["window"] = window
         return "logs"
 
     monkeypatch.setattr("src.log_pipeline.pipeline.reduce_logs", fake_reduce)
     tool_registry.fetch_logs_for("evt-1", extra_identifiers=("ref-9",),
                                  service="enu-biometric")
 
+    # No window given: reduce_logs falls back to its default look-back.
     assert seen == {"event_id": "evt-1", "extra": ("ref-9",),
-                    "service": "enu-biometric"}
+                    "service": "enu-biometric", "window": None}
 
 
 # ======================================================================

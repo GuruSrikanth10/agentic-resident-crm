@@ -14,6 +14,7 @@ import pytest
 
 from s3_fakes import FakeS3, S3Error, install
 from src.storage import s3 as s3_module
+from src.storage.base import CASEBOOK_SCHEMA_VERSION
 
 
 def _store(monkeypatch, fake):
@@ -131,7 +132,8 @@ def test_a_corrupt_document_is_rebuilt_under_its_etag(monkeypatch):
     store = _store(monkeypatch, fake)
     fake._store("p/casebook_k/doc.json", b"{not json")
 
-    assert store.update_json("k", "doc.json", bump) == {"n": 1, "schema_version": "1.2"}
+    assert store.update_json("k", "doc.json", bump) == \
+        {"n": 1, "schema_version": CASEBOOK_SCHEMA_VERSION}
 
 
 def test_a_corrupt_document_still_loses_to_a_concurrent_writer(monkeypatch):

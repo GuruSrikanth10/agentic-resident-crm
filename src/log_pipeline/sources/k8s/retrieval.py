@@ -25,7 +25,7 @@ from concurrent.futures import (
     as_completed,
 )
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Iterator, Optional
 
 from src.log_pipeline.sources.k8s import client as k8s_client_module
@@ -82,6 +82,11 @@ class RetrievalOutcome:
     # was a bare class attribute: absent from __init__/__repr__/__eq__, and a
     # constructor keyword away from a TypeError.
     earliest_pod_start: Optional[datetime] = None
+    #: Each target's own oldest line, by `PodTarget.target_key`. The aggregate
+    #: above is the quietest pod's, which says nothing about the busy pod that
+    #: may have handled the packet; a window anchored on a rejection is judged
+    #: pod by pod (`gaps.detect_anchored_gaps`).
+    oldest_line_by_target: dict = field(default_factory=dict)
     redaction_counts: dict = field(default_factory=dict)
 
 
@@ -361,12 +366,29 @@ def read_pod_logs(target: PodTarget, window: TimeWindow,
 
 
 def _older(current: Optional[str], candidate: Optional[str]) -> Optional[str]:
-    """Return whichever RFC3339 timestamp string sorts earlier."""
+    """Return whichever RFC3339 timestamp is the earlier instant.
+
+    Compared as instants, not as strings: kubelet stamps carry the node's own
+    offset, and string order is time order only while every node shares it --
+    `...T09:50:00Z` sorts before `...T14:52:33+05:30`, though it is the later
+    of the two. Falls back to string order when either will not parse.
+    """
     if candidate is None:
         return current
     if current is None:
         return candidate
-    return min(current, candidate)
+    current_at, candidate_at = _instant(current), _instant(candidate)
+    if current_at is None or candidate_at is None:
+        return min(current, candidate)
+    return candidate if candidate_at < current_at else current
+
+
+def _instant(timestamp: str) -> Optional[datetime]:
+    try:
+        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 def _merge_stats(into: ParseStats, other: ParseStats):
@@ -478,6 +500,8 @@ def read_all(targets: list, window: TimeWindow,
         outcome.oldest_line_timestamp = _older(
             outcome.oldest_line_timestamp, result.oldest_line_timestamp
         )
+        outcome.oldest_line_by_target[result.target.target_key] = \
+            result.oldest_line_timestamp
         started = result.target.start_time
         if started is not None and (
             outcome.earliest_pod_start is None or started < outcome.earliest_pod_start

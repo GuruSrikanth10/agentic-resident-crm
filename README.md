@@ -372,6 +372,9 @@ flowchart TD
 > read the logs". Every gap above is rendered into a banner placed **before** the
 > trace, and `apply_confidence_policy` caps confidence at
 > `SYNTHESIS_GAP_CONFIDENCE_CEILING` (0.6) whenever that banner is present.
+> A rejected packet's rotation and pod-replacement gaps are judged against its
+> rejection rather than the look-back; when every pod reaches it, a `LOG COVERAGE:`
+> line that is not a gap says from when the trace is complete (ARCHITECTURE.md 3.10).
 
 #### 1.3.3 LangGraph state machine
 

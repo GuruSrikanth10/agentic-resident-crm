@@ -30,7 +30,7 @@ from src.core.agent_orchestrator import (
 from src.core import run_control
 from src.core.run_control import RunCancelled
 from src.log_pipeline import scope as log_scope
-from src.utils import packet_claims, service_registry, tracing
+from src.utils import packet_claims, service_registry, timestamps, tracing
 from src.storage.factory import get_casebook_storage
 from src.utils.dlq_publisher import publish_to_dlq
 from src.utils.analysis_queue_publisher import publish_to_analysis_queue
@@ -1148,7 +1148,11 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
     # fetch_elastic_logs returns None (not an error-prefixed string) on
     # failure, so a plain falsiness check is sufficient and doesn't miss
     # failure modes with a different message prefix (1.6).
-    from src.log_pipeline.sources.k8s.gaps import BANNER_HEADER, BANNER_FOOTER
+    from src.log_pipeline.sources.k8s.gaps import (
+        BANNER_FOOTER,
+        BANNER_HEADER,
+        COVERAGE_PREFIX,
+    )
 
     raw_logs = result.get("logs")
     extracted_gaps = None
@@ -1158,8 +1162,16 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
         end_idx = raw_logs.find(BANNER_FOOTER) + len(BANNER_FOOTER)
         extracted_gaps = raw_logs[start_idx:end_idx]
 
+    # From when the trace is complete, where that is not a gap: what tells an
+    # operator why a casebook with no gaps still starts mid-journey.
+    extracted_coverage = next(
+        (line.strip() for line in (raw_logs or "").splitlines()
+         if line.startswith(COVERAGE_PREFIX)),
+        None,
+    )
+
     if not raw_logs or raw_logs == "Log fetching disabled.":
-        processed_logs = {"path": "No logs found", "gaps": None}
+        processed_logs = {"path": "No logs found", "gaps": None, "coverage": None}
     else:
         # Point at the artifact that already holds these bytes rather than
         # writing them again.
@@ -1176,7 +1188,8 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
         # The default covers a resumed checkpoint written before this field
         # existed, whose state carries `logs` but no `logs_artifact`.
         processed_logs = {"path": result.get("logs_artifact") or "fetched_logs.txt",
-                          "gaps": extracted_gaps}
+                          "gaps": extracted_gaps,
+                          "coverage": extracted_coverage}
         
     # Resolve the fields the casebook needs from the validated model. On a
     # parse failure the evidence is still persisted -- metadata, rejection
@@ -1188,7 +1201,7 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
             else exec_summary.get("packetStatus")
         )
         rejection_description = synthesis_result.rejection_description
-        resolution = {
+        resolution: dict = {
             "source": result.get("resolution_source", "agent"),
             "synthesis": synthesis_result.synthesis,
             "action": synthesis_result.action,
@@ -1200,6 +1213,12 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
             "confidence": synthesis_result.confidence,
             "abstained": synthesis_result.abstained,
         }
+        # What the model said before a confidence ceiling or the abstention
+        # threshold changed it. Without it a capped 0.6 is indistinguishable
+        # from a model that said 0.6, and the ceilings can never be judged
+        # against the outcomes they were meant to protect.
+        if result.get("confidence_policy"):
+            resolution["confidence_policy"] = result["confidence_policy"]
 
     else:
         packet_status = "FAILED_SYNTHESIS_PARSE"
@@ -1223,10 +1242,14 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
             "raw_output": final_message[:2000],
         }
 
+    # Every timestamp below names its zone (`utils/timestamps`): this
+    # system's own are UTC, the packet's are the producers' local time, and
+    # written side by side without zones a packet read as created hours after
+    # its own casebook.
     casebook_data: dict = {
         "casebook_metadata": {
-            "created_at": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
-            "last_updated": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
+            "created_at": timestamps.utc_now(),
+            "last_updated": timestamps.utc_now(),
         },
         "packet_metadata": {
             "srn": packet_meta.get("srn"),
@@ -1237,8 +1260,13 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
             "is_mbu": packet_meta.get("isMBU"),  # only the AUDIT contract carries it
             "update_type": packet_meta.get("enrolmentType"),  # B/D mapping not immediately available
             "is_child": None,  # Age determination not immediately available
-            "created_at": signal_dict.get("sidDate"),
-            "uploaded_at": signal_dict.get("eventTimestamp"),
+            # When the packet was created at the centre: the sid's own date,
+            # in the producers' local time.
+            "created_at": timestamps.zoned(signal_dict.get("sidDate")),
+            # When the rejection was published: the payload's eventTimestamp.
+            # Schema 1.2 called this `uploaded_at`, which it never was -- the
+            # packet is uploaded before any service processes it.
+            "rejected_at": timestamps.zoned(signal_dict.get("eventTimestamp")),
             # Which service the packet belongs to, and how that was decided
             # (MULTI_SERVICE_PLAN.md 5.8). `packet_status.service` below still
             # holds `flowMetaData.stage`, for the readers that expect it there.
@@ -1249,7 +1277,7 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
             "status": packet_status,
             "service": flow_meta.get("stage"),
             "sub_service": flow_meta.get("subStage"),
-            "last_updated": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
+            "last_updated": timestamps.utc_now(),
             "is_in_process": False if exec_summary.get("packetStatus") == "REJECTED" else None,
             "rejection_data": {
                 "rejection_code": rejection_code,

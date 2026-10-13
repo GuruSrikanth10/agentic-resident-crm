@@ -9,7 +9,7 @@
   "rule_fingerprint": "sha256:f2317fadb2becf1b9c820160c1b55213be80e67a33a5b0a2c1e39b0663df3cfb",
   "resolution": {
     "rejection_description": "Rejected on a standard biometric update because the face returned an anomalous match against the resident's own parent Aadhaar, while no false positive, undeterminable or non-face anomaly was recorded for that parent and its candidates were not all true duplicates.",
-    "synthesis": "The resident submitted a biometric update, which must authenticate against every historical iteration of their own parent Aadhaar. The face captured in this packet did not match the face held against that parent, so ownership of the record could not be confirmed and the packet was rejected. A new packet with a fresh face capture that follows the quality guidelines is required.",
+    "synthesis": "The resident submitted a biometric update, whose 1:N de-duplication result must match every historical iteration of their own parent Aadhaar completely. The face captured in this packet did not match the face held against that parent, so ownership of the record could not be confirmed and the packet was rejected. A new packet with a fresh face capture that follows the quality guidelines is required.",
     "action": "RESIDENT_PACKET_RESUBMIT",
     "resident_action": "NEW_PACKET_WITH_DIFFERENT_ARTIFACTS"
   },

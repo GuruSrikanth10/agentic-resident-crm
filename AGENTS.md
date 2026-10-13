@@ -111,6 +111,12 @@ If the log trace IS available but contains an `--- EVIDENCE GAPS ---` banner,
 absence of evidence is NOT evidence of absence. Qualify any finding that
 depends on the missing window, but continue reasoning from the code.
 
+A rejected packet's trace may instead open with a `LOG COVERAGE:` line. It is
+not an evidence gap: it says from when the packet's logs are complete, through
+its rejection, so the substage that rejected it is in view. Do not qualify
+findings because of it, and do not conclude that an earlier substage did not
+run only because its lines predate that time.
+
 ## Log noise
 
 Logs are from highly concurrent pods. If an ERROR line mentions a `refId`

@@ -72,6 +72,13 @@ REWRITTEN_DIRECT = {
         'JSON.': [
             '1. You MUST refer to the SERVICE POLICY section (appended below) to understand '
             'how to interpret the supplied "Database Rule Configuration" JSON.'],
+        # A trace without a banner was "a complete view of the requested
+        # window"; a rejection's trace starts where the pods' logs do, and the
+        # LOG COVERAGE line says from when.
+        "When no banner is present, treat the trace as a complete view of the": [
+            "When no banner is present, the trace is complete for the time it covers;",
+            "A line beginning `LOG COVERAGE:` may come before the trace. It says from when"],
+        "requested window and reason normally.": ["reason normally."],
     },
     "reviewer": {
         '**CRITICAL INSTRUCTION**: You must validate their findings against the **GLOBAL '
@@ -249,10 +256,31 @@ def test_the_generic_prompts_name_no_service_concept(path):
     assert sorted({m.group(0) for m in _SERVICE_TERMS.finditer(text)}) == []
 
 
+#: Lines the policy has gained since it moved into the pack, each a reviewed
+#: change of meaning. Everything else must still be the original, byte for byte.
+POLICY_ADDITIONS = [
+    # A Synthesis described the resident's own record as filtered out of a
+    # standard update's result; only a first-time update (MBU) does that.
+    "- **The resident's own record stays in the result.** The service drops a "
+    "candidate for sharing the applicant's UID only on a first-time biometric "
+    "update (MBU). On a standard update the resident's own parent record stays in "
+    "the candidate set and is classified like any other candidate (True Duplicate, "
+    "False Positive, Anomalous or Cannot Determine), and the rule's counts and "
+    "flags, such as `allCandidatesAnomalous`, include it. Other filters can still "
+    "drop it (an ignored, false-positive, rejected or cancelled candidate), so "
+    "describe it as filtered out only when a log line or a tool result shows that.",
+]
+
+
 def test_the_policy_file_left_the_repository_root():
     assert not (paths.REPO_ROOT / "agent_policy_context.md").exists()
-    assert (paths.REPO_ROOT / "src" / "service_packs" / BIO / "policy.md").read_text(
-        encoding="utf-8") == _before("agent_policy_context.md")
+    policy = (paths.REPO_ROOT / "src" / "service_packs" / BIO / "policy.md").read_text(
+        encoding="utf-8")
+    for line in POLICY_ADDITIONS:
+        assert line in policy.split("\n"), f"a listed addition is missing: {line!r}"
+    original = "\n".join(line for line in policy.split("\n")
+                         if line not in POLICY_ADDITIONS)
+    assert original == _before("agent_policy_context.md")
 
 
 # ======================================================================

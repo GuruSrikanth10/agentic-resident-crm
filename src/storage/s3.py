@@ -31,6 +31,7 @@ from src.storage.base import (
     TERMINAL_STATUSES,
 )
 from src.utils.logging_config import get_logger
+from src.utils.timestamps import utc_now
 
 logger = get_logger(__name__)
 
@@ -217,7 +218,7 @@ class S3CasebookStorage(CasebookStorage):
         # Stamp the last_updated timestamp on every save
         if isinstance(casebook, dict):
             meta = casebook.setdefault("casebook_metadata", {})
-            meta["last_updated"] = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+            meta["last_updated"] = utc_now()
 
         _get_client().put_object(
             Bucket=self.bucket,

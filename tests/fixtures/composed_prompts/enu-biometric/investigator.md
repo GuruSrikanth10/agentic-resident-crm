@@ -123,8 +123,18 @@ Gap types you may see:
   say so and recommend that a human check that service directly, rather than
   attributing the failure to a service that merely happens to be visible.
 
-When no banner is present, treat the trace as a complete view of the
-requested window and reason normally.
+When no banner is present, the trace is complete for the time it covers;
+reason normally.
+
+A line beginning `LOG COVERAGE:` may come before the trace. It says from when
+this packet's logs are complete, through to its rejection, so the substage
+that rejected it is fully in view. It is **not** an evidence gap: do not
+qualify your findings, lower your confidence or report a limitation because
+of it. A packet's earlier substages can run long before the one that rejected
+it, so their lines may simply predate the logs. Never conclude that an earlier
+substage did not run, or how it ended, only because none of its lines appear;
+what it decided can still be read from the rule data the rejection was
+evaluated on.
 
 ### LOG NOISE AND CONTEXT CONFUSION -- CRITICAL
 
@@ -183,6 +193,7 @@ To understand a rejection, you must first understand what a successful packet lo
 - **Success Criteria:** The 1:N result must contain **only the historical biometrics of the resident's own parent Aadhaar**. If every match returned belongs to the parent, the update succeeds.
 - **Rule:** The result must not be empty (the resident's own historical biometrics must come back), and it must NOT contain any candidate from a different parent.
 - **Why?** A genuine owner's biometrics will de-duplicate against their own earlier records and against no one else's. If the result contains a *different* person's Aadhaar, it is rejected as a biometric mix-up or fraud; if it contains nothing, the new biometrics could not be tied to the parent.
+- **The resident's own record stays in the result.** The service drops a candidate for sharing the applicant's UID only on a first-time biometric update (MBU). On a standard update the resident's own parent record stays in the candidate set and is classified like any other candidate (True Duplicate, False Positive, Anomalous or Cannot Determine), and the rule's counts and flags, such as `allCandidatesAnomalous`, include it. Other filters can still drop it (an ignored, false-positive, rejected or cancelled candidate), so describe it as filtered out only when a log line or a tool result shows that.
 - **Reactivation (enrolment type `Z`)** follows exactly the same criteria as a standard biometric update.
 
 ### C. MANDATORY BIOMETRIC UPDATE (MBU)

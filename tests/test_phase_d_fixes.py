@@ -388,5 +388,7 @@ def test_schema_version_is_bumped_for_the_outcome_block(tmp_path):
     storage = LocalFilesystemCasebookStorage(base_dir=str(tmp_path))
     storage.save("evt-1", {"packet_status": {"status": "COMPLETED"}})
 
-    assert CASEBOOK_SCHEMA_VERSION == "1.2"
-    assert storage.load("evt-1")["schema_version"] == "1.2"
+    # 1.2 added the outcome block; 1.3 renamed uploaded_at and zoned the
+    # timestamps, and still carries it.
+    assert CASEBOOK_SCHEMA_VERSION == "1.3"
+    assert storage.load("evt-1")["schema_version"] == "1.3"

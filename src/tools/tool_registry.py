@@ -16,6 +16,7 @@ from src.utils.env import get_bool_env, get_required_env
 from src.utils.resilience import retry_transient, db_breaker
 from src.utils.logging_config import get_logger
 from src.log_pipeline.sources.k8s.filtering import identifiers_from_payload
+from src.log_pipeline.types import TimeWindow
 from src.storage.factory import get_casebook_storage
 import pybreaker
 
@@ -404,7 +405,8 @@ def _lookup_rule_by_reason_code_impl(reason_code: str) -> str:
 
 @retry_transient
 def fetch_logs_for(event_id: str, extra_identifiers: tuple = (),
-                   service: Optional[str] = None) -> Optional[str]:
+                   service: Optional[str] = None,
+                   window: Optional[TimeWindow] = None) -> Optional[str]:
     """Fetch and reduce logs from Elastic using the 6-stage log reduction pipeline.
 
     Stages:
@@ -430,16 +432,18 @@ def fetch_logs_for(event_id: str, extra_identifiers: tuple = (),
     its own breaker, where the failure is attributable.
 
     `service` is the pack whose logs are searched (`reduce_logs`); None
-    searches the environment's lists.
+    searches the environment's lists. `window` is the look-back and what the
+    trace must cover (`pipeline.rejection_window`); None is the default.
     """
     log = logger.bind(event_id=event_id)
     log.info("Log fetch started", extra_identifiers=list(extra_identifiers or ()),
-             service=service)
+             service=service,
+             rejected_at=window.anchor.isoformat() if window and window.anchor else None)
 
     try:
         from src.log_pipeline.pipeline import reduce_logs
         return reduce_logs(event_id, extra_identifiers=extra_identifiers,
-                           service=service)
+                           service=service, window=window)
     except pybreaker.CircuitBreakerError:
         log.error("Elasticsearch circuit breaker is open; failing fast", breaker="es_breaker")
         return None
@@ -471,16 +475,25 @@ def fetch_and_persist_logs(event_id: str, payload: dict,
     `service` is the service whose logs are searched, from
     `scope.service_to_search` (MULTI_SERVICE_PLAN.md Phase 6); None searches
     the environment's lists, as every fetch did before.
+
+    The window is anchored on the packet's rejection -- its `eventTimestamp`,
+    stamped when the rejection was published -- so the trace is judged by
+    whether it holds the substage that rejected the packet, not by whether
+    the pods still hold K8S_DEFAULT_SINCE_HOURS of logs, which they never do.
     """
     if not get_bool_env("ENABLE_LOG_FETCHING", False):
         logs = "Log fetching disabled."
     else:
+        from src.log_pipeline.pipeline import rejection_window
+        from src.utils.timestamps import parse_producer_time
+
         extra_identifiers = tuple(
             value for value in identifiers_from_payload(payload)
             if value != event_id
         )
+        window = rejection_window(parse_producer_time((payload or {}).get("eventTimestamp")))
         logs = fetch_logs_for(event_id, extra_identifiers=extra_identifiers,
-                              service=service)
+                              service=service, window=window)
         if logs is None:
             return None
 

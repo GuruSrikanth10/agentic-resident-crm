@@ -9,7 +9,7 @@
   "rule_fingerprint": "sha256:9dfdff670e98bd3ef98bfec85430e69d0a38be4a77754cc1bef891edd9dd9f2f",
   "resolution": {
     "rejection_description": "Rejected on a standard biometric update because fingerprint or iris matched the resident's own parent Aadhaar only in part on at least one iteration, so not every candidate from that parent was a true duplicate.",
-    "synthesis": "The resident submitted a biometric update, which must authenticate against all historical iterations of their own parent Aadhaar. Some iterations matched completely while at least one matched only partially on fingerprint or iris, leaving the authentication incomplete and the packet rejected. A new packet with a careful, complete capture of every modality is needed.",
+    "synthesis": "The resident submitted a biometric update, whose 1:N de-duplication result must match every historical iteration of their own parent Aadhaar completely. Some iterations matched completely while at least one matched only partially on fingerprint or iris, leaving the match against the parent incomplete and the packet rejected. A new packet with a careful, complete capture of every modality is needed.",
     "action": "RESIDENT_PACKET_RESUBMIT",
     "resident_action": "NEW_PACKET"
   },

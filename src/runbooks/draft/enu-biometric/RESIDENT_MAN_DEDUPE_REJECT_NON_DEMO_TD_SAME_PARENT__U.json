@@ -9,7 +9,7 @@
   "rule_fingerprint": "sha256:a5012b2eed6ee8e336f4a3da38e09606a03b0873106bfb3ff9ea25421930f000",
   "resolution": {
     "rejection_description": "Rejected on a standard biometric update because fingerprint and iris matched the resident's own parent Aadhaar completely while the face did not match, making the candidate a non-face true duplicate rather than a full match.",
-    "synthesis": "The resident submitted a biometric update, which must authenticate against their own parent Aadhaar across all modalities. Fingerprint and iris confirmed the identity but the face failed to match the record held against that parent, so the packet could not be accepted. A new packet carrying a fresh, guideline-compliant face capture is required.",
+    "synthesis": "The resident submitted a biometric update, whose 1:N de-duplication result must match the historical biometrics of their own parent Aadhaar across all modalities. Fingerprint and iris confirmed the identity but the face failed to match the record held against that parent, so the packet could not be accepted. A new packet carrying a fresh, guideline-compliant face capture is required.",
     "action": "RESIDENT_PACKET_RESUBMIT",
     "resident_action": "NEW_PACKET_WITH_DIFFERENT_ARTIFACTS"
   },

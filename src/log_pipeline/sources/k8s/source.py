@@ -72,9 +72,18 @@ class KubernetesLogSource:
             cached = snapshot.load(ctx.event_id)
             if cached is not None:
                 records, cached_gaps = cached
+                notes = []
+                if window.anchor is not None:
+                    # Judged against this packet's rejection, as a live fetch
+                    # would be, not against the window the capture was taken
+                    # under.
+                    cached_gaps, notes = gaps.rejudge_for_anchor(
+                        cached_gaps, snapshot.load_spans(ctx.event_id), window)
+                    cached_gaps = gaps.dedupe_gaps(cached_gaps)
                 return FetchResult(
                     records=records,
                     gaps=cached_gaps,
+                    notes=notes,
                     diagnostics=FetchDiagnostics(
                         source=self.name,
                         records_returned=len(records),
@@ -113,13 +122,30 @@ class KubernetesLogSource:
 
         collected = list(found.gaps) + list(outcome.gaps)
 
-        rotation = gaps.detect_rotation_gap(
-            outcome.oldest_line_timestamp, window, outcome.earliest_pod_start
-        )
-        if rotation:
-            collected.append(rotation)
+        # How far back each discovered pod's logs reached. A pod whose read
+        # never finished has no oldest line, and the TRUNCATED gap above
+        # already says so.
+        spans = [
+            gaps.PodSpan(
+                pod_name=target.pod_name,
+                container=target.container,
+                oldest_line=outcome.oldest_line_by_target.get(target.target_key),
+                start_time=target.start_time,
+            )
+            for target in found.targets
+        ]
 
-        collected.extend(gaps.detect_pod_replaced_gaps(found.targets, window))
+        if window.anchor is not None:
+            # A rejected packet: judged pod by pod against its rejection.
+            collected.extend(gaps.detect_anchored_gaps(spans, window))
+        else:
+            rotation = gaps.detect_rotation_gap(
+                outcome.oldest_line_timestamp, window, outcome.earliest_pod_start
+            )
+            if rotation:
+                collected.append(rotation)
+
+            collected.extend(gaps.detect_pod_replaced_gaps(found.targets, window))
 
         degraded = gaps.detect_parse_degradation_gap(outcome.stats)
         if degraded:
@@ -127,6 +153,7 @@ class KubernetesLogSource:
 
         collected = gaps.dedupe_gaps(collected)
         gaps.log_gaps(collected, event_id=ctx.event_id)
+        note = gaps.coverage_note(spans, window, collected)
 
         # Every pod failing is a could-not-look, not a confirmed-absent.
         every_pod_failed = (
@@ -159,11 +186,12 @@ class KubernetesLogSource:
         # poison every later attempt with an empty result.
         if outcome.records:
             snapshot.save(ctx.event_id, outcome.records, gaps=collected,
-                          source=self.name)
+                          source=self.name, spans=spans)
 
         return FetchResult(
             records=outcome.records,
             gaps=collected,
+            notes=[note] if note else [],
             diagnostics=FetchDiagnostics(
                 source=self.name,
                 records_returned=len(outcome.records),

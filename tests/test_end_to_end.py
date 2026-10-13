@@ -153,6 +153,87 @@ def test_prompt_fingerprint_is_recorded(storage, monkeypatch):
 
 
 # ======================================================================
+# Schema 1.3: zones, the rejection time, and the model's own confidence
+# ======================================================================
+
+_RESUBMIT = json.dumps({
+    "rejection_description": "manual dedup rejected the packet",
+    "synthesis": "ask the resident to resubmit",
+    "action": "RESIDENT_PACKET_RESUBMIT",
+    "resident_action": "NEW_PACKET",
+    "confidence": 0.9,
+})
+
+
+def _run_resubmit(monkeypatch, event_id, payload):
+    with patch.object(orch, "build_agent",
+                      side_effect=lambda *a, **k: _stub_llm(_RESUBMIT)), \
+         patch.object(orch, "get_llm", side_effect=lambda tier: MagicMock()):
+        monkeypatch.setattr(orch, "is_reviewer_approved", lambda _f: True)
+        monkeypatch.delenv("SYNTHESIS_LOGS_UNAVAILABLE_CEILING", raising=False)
+        monkeypatch.delenv("PACKET_LOCAL_UTC_OFFSET", raising=False)
+        return _run(event_id, payload)
+
+
+def test_every_casebook_timestamp_names_its_zone(storage, monkeypatch):
+    """Schema 1.2 wrote the packet's IST sidDate and this system's UTC stamps
+    side by side with neither marked, so a packet read as created hours after
+    its own casebook; and it called the rejection's eventTimestamp
+    `uploaded_at`."""
+    payload = {**_payload("e2e-zones"), "sid": "0221051500158020261012121429",
+               "sidDate": "2026-10-12 12:14:29",
+               "eventTimestamp": "2026-10-12T09:43:45.016Z"}
+
+    _run_resubmit(monkeypatch, "e2e-zones", payload)
+
+    casebook = storage.load("e2e-zones")
+    metadata = casebook["packet_metadata"]
+    assert metadata["created_at"] == "2026-10-12T12:14:29+05:30"
+    assert metadata["rejected_at"] == "2026-10-12T09:43:45.016Z"
+    assert "uploaded_at" not in metadata
+    for stamp in (casebook["casebook_metadata"]["created_at"],
+                  casebook["casebook_metadata"]["last_updated"],
+                  casebook["packet_status"]["last_updated"]):
+        assert stamp.endswith("Z")
+    assert casebook["schema_version"] == "1.3"
+
+
+def test_the_models_own_confidence_is_kept_when_a_ceiling_lowers_it(storage, monkeypatch):
+    """Log fetching is off here, so the no-logs ceiling lowers 0.9 to 0.75.
+    The 0.9 used to reach only a log line, so a capped number could not be
+    told from a model that said it."""
+    _run_resubmit(monkeypatch, "e2e-ceiling", _payload("e2e-ceiling"))
+
+    resolution = storage.load("e2e-ceiling")["resolution"]
+    assert resolution["confidence"] == 0.75
+    assert resolution["confidence_policy"]["model_confidence"] == 0.9
+    assert "lowered from 0.9 to 0.75" in resolution["confidence_policy"]["detail"]
+
+
+def test_a_covered_trace_is_neither_capped_nor_called_incomplete(storage, monkeypatch):
+    """The office trace, as the fast consumer now persists it: a LOG COVERAGE
+    line where the LOG_ROTATION banner used to be."""
+    coverage = ("LOG COVERAGE: this packet's logs are complete from "
+                "2026-10-12T15:01:10+05:30 through its rejection at "
+                "2026-10-12T15:13:45+05:30. Lines it logged before "
+                "2026-10-12T15:01:10+05:30 may be missing: the pods no longer "
+                "hold them all.")
+    trace = (f"{coverage}\n\n--- Log Trace for ID: e2e-covered ---\n"
+             "[2026-10-12T15:13:38.5+05:30] [enu-biometric] [INFO] Received cross "
+             "match check response for Applicant RefID:e2e-covered\n"
+             "--- End of Trace (1 logs total) ---")
+    storage.save_artifact("e2e-covered", "fetched_logs.txt", trace)
+
+    _run_resubmit(monkeypatch, "e2e-covered", _payload("e2e-covered"))
+
+    casebook = storage.load("e2e-covered")
+    logs = casebook["packet_status"]["rejection_data"]["rejection_logs"]
+    assert logs == {"path": "fetched_logs.txt", "gaps": None, "coverage": coverage}
+    assert casebook["resolution"]["confidence"] == 0.9
+    assert "confidence_policy" not in casebook["resolution"]
+
+
+# ======================================================================
 # The contract
 # ======================================================================
 

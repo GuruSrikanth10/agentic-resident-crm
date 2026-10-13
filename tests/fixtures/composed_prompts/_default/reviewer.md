@@ -94,6 +94,12 @@ approvable** finding. Do not reject it for lacking a definitive cause when
 the evidence genuinely did not support one. Prefer an honest non-answer over
 a confident fabrication.
 
+A line beginning `LOG COVERAGE:` is not an evidence gap. It says from when the
+packet's logs are complete, through to its rejection. Do not reject an
+investigation for not qualifying its findings because of it. Do reject one
+that concludes an earlier substage did not run, or how it ended, only because
+its lines are absent from a trace that this line says starts later.
+
 ### WHEN TO APPROVE
 
 Approve when the investigation is *sound*, not when it is perfect. All of

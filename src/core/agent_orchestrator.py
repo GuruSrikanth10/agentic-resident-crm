@@ -753,6 +753,11 @@ class GraphState(TypedDict):
     #: and the outcome record, which is what turns shadow mode into evidence
     #: instead of log noise (G18).
     shadow_comparison: dict
+    #: The model's own confidence and why it was changed, when a confidence
+    #: ceiling or the abstention threshold changed it
+    #: (`apply_confidence_policy`); None when nothing did. Carried to the
+    #: casebook, where it was only ever a log line.
+    confidence_policy: dict
     #: The reason-code documentation this packet was reasoned from, in the
     #: shape `utils/reason_code_docs.lookup` returns. Looked up once, on the
     #: Investigator's first pass, and reused by every retry, by the Reviewer
@@ -1207,7 +1212,8 @@ def _build_agent():
             log.info("Runbook hit", runbook_id=runbook_id, version=version, mode=mode)
             _count("hit")
             return {"resolution_source": res_source, "synthesis": synthesis_json,
-                    "runbook_id": runbook_id, "reason_code_doc": doc_state}
+                    "runbook_id": runbook_id, "reason_code_doc": doc_state,
+                    "confidence_policy": None}
         except Exception as e:
             log.error("Runbook lookup failed; falling through to the agents",
                       error=f"{type(e).__name__}: {e}", exc_info=True)
@@ -1860,7 +1866,7 @@ def _build_agent():
             "resident_action": "PENDING"
         }
         # Dump to JSON so routes.py can parse it
-        return {"synthesis": json.dumps(escalation_result)}
+        return {"synthesis": json.dumps(escalation_result), "confidence_policy": None}
 
     def synthesis_node(state: GraphState):
         event_id = state.get("payload", {}).get("eventId", "unknown")
@@ -1931,6 +1937,7 @@ def _build_agent():
                                   status_message="Synthesis reply failed the contract; "
                                                  "repaired")
 
+        confidence_policy = None
         if parsed is None:
             # Two failures. Escalating is the only honest outcome: we have no
             # validated action, and inventing one would be worse than saying so.
@@ -1951,6 +1958,7 @@ def _build_agent():
             # A packet analysed with the `_default` pack had no service
             # policy applied, which caps its confidence (MULTI_SERVICE_PLAN.md
             # D5) the way incomplete logs do.
+            model_confidence = parsed.confidence
             parsed, abstained, reason = apply_confidence_policy(
                 parsed, logs=state.get("logs", ""),
                 default_pack=pack == service_registry.DEFAULT_PACK,
@@ -1958,6 +1966,8 @@ def _build_agent():
             if reason:
                 log.warning("Confidence policy applied", detail=reason,
                             abstained=abstained)
+                confidence_policy = {"model_confidence": model_confidence,
+                                     "detail": reason}
             if abstained:
                 metrics.LLM_CALLS.labels(node="synthesis", outcome="abstained",
                                          service=service).inc()
@@ -2016,6 +2026,9 @@ def _build_agent():
             "messages": res["messages"],
             "resolution_source": "agent",
             "shadow_comparison": shadow,
+            # Always set, None included, so a resumed run never carries an
+            # earlier run's.
+            "confidence_policy": confidence_policy,
         }
 
     def stoppable(node):
