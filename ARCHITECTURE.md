@@ -806,6 +806,7 @@ agentic-resident-crm/
 │   ├── test_opencode_mcp.py        # opencode harness: MCP config, role agents, harness tool evidence
 │   ├── test_agent_tool_evidence.py # Tool evidence through both lanes, the casebook and the fingerprint
 │   ├── test_process_db_tools.py    # The process DB tools against the three tables (SQLite); the database layer
+│   ├── test_request_tracker_tool.py # The request_tracker tool (SQLite): reading the row, lookup, privacy
 │   ├── test_service_tools.py       # Tools per service: the selection matrix, prefix rule, opencode agents, subagent
 │   ├── test_service_prompts.py     # Prompts per pack: content kept, neutrality, snapshots, pool
 │   ├── test_service_rules.py       # Rule source per pack: the rules table, the notes, the case files
@@ -909,7 +910,8 @@ agentic-resident-crm/
 │   │   │   ├── __init__.py         #   Registry: Toolset (roles, services), @agent_tool, discovery, scope checks
 │   │   │   ├── __main__.py         #   CLI: registered tools; call one in-process, without a server
 │   │   │   ├── _database.py        #   Read-only database layer: one engine and breaker per database key
-│   │   │   ├── common/             #   Tools for every service (services=("*",)); none yet
+│   │   │   ├── common/             #   Tools for every service (services=("*",))
+│   │   │   │   └── request_tracker.py #  RSMS request_tracker: a packet's current pipeline stage
 │   │   │   └── enu_biometric/      #   enu-biometric's tools, all named bio_* (section 3.2.3)
 │   │   │       ├── _process_db.py  #     The process_db toolset and the `process` database it reads
 │   │   │       ├── stage_tracker.py #    bio_stage_tracker: stage summary, timeline
@@ -2113,6 +2115,8 @@ The general-purpose subagent behind `task` is configured by the factory: it gets
 
 The stage summary applies the table's rules rather than returning rows: per writer (`created_by`, so canary rows stay apart), substage and attempt (`stage_resubmission_count`) it reports IN PROGRESS/COMPLETED times and the duration between them; a latest attempt that is IN PROGRESS with no COMPLETED row is listed in `open_substages`, an earlier one is `superseded_by_replay`, and `<NAME>_RESUBMISSION` request copies -- IN PROGRESS by design -- are listed apart and never counted as open. `bio_get_parking_status` derives `parked_now` by the service's rule (the APPLICANT map still has InProcess entries and the tracker has no `BIO_CANDIDATE_DEPARTING` COMPLETED row), matching `record_category` case-insensitively. The helper-record tools return the documented fields rather than the blob, tolerate the wrapper and key-casing variations the documentation leaves open, and report a record of unexpected shape as such instead of as empty. Guarantees, all in the shared database layer (`agent_tools/_database.py`, the `process` key): every connection runs `SET SESSION TRANSACTION READ ONLY` (and is refused if that fails -- the service's configured account can write) and `max_execution_time` (`PROCESS_DB_QUERY_TIMEOUT_MS`); every statement is fixed SQL filtered on the indexed `refid`, with JSON paths checked against a strict grammar before they reach the server; rows are capped at `PROCESS_DB_MAX_ROWS` and output at `PROCESS_DB_MAX_OUTPUT_CHARS` by dropping whole list entries so the JSON stays valid; values from the JSON blobs pass through the log pipeline's PII redaction with refIds (UUIDs) shielded and `uid` masked outright; and a disabled, refused or failed lookup returns a message saying nothing was read, never something that reads like an empty table -- which for the `*_DATA_NOT_FOUND` codes would itself be evidence.
 
+**Request tracker toolset (`request_tracker`, `agent_tools/common/`).** The first tool for every service (`services=("*",)`, so no prefix): `get_request_tracker_status` reads RSMS's `request_tracker` table, the pipeline-wide progress row every ENU stage service updates when it picks a packet up (`InProcess`) and when it finishes with it (`Completed`, with a reason code when it rejected the packet). It is offered to the `investigator` role of every pack, `_default` included, and to no DLT role, for the same reason as the process DB tools. The table lives in `uidprocessv2_2`, so the module declares the same `process` key -- one pool, one `process_db_breaker`, one `PROCESS_DB_ENABLED` switch -- with the same settings, which `declare` checks. One fixed `SELECT` by `refid` or, failing that, `sid` (both uniquely indexed). `sid` and `refid` are each unique, so the table holds one row per packet, overwritten at every stage report: it says where the packet is now, not where it has been. The tool applies the table's rules rather than returning the row: the status is matched however a writer spells it (`InProcess`, `IN_PROCESS`), Completed with a code in `stage_reject_reason_code` or `stage_reason_code` is a rejection at that stage (which column RSMS uses is not documented), `RejectInterceptor` means an earlier stage rejected it, the stage's position in enu-esb's routing order is given with the stages before it, and the time since `stage_status_date` is measured on the database server's clock. Most of the row is the resident's (name, mobile, email, PIN, GPS, HOF and introducer UIDs, payment and appointment details); none of it is selected, and the UID comes back only as `uid_assigned`.
+
 ### 3.6 Log Reduction Pipeline
 Fetched logs are heavily compressed to prevent LLM context window exhaustion and save tokens, using a map-reduce and clustering architecture (`src/log_pipeline/`). The stages are numbered as the design named them, which is why there is a 2.5: it was inserted between two existing stages and the numbers of the others are load-bearing in the code and the tests. `pipeline.reduce_logs` runs them in this order:
 - **Scope**: Each packet is fetched for one service -- its apps, its catalog, its vocabulary -- or, for a packet of the `_default` pack, not at all; a caller with no service keeps the environment's lists (section 3.2.3, "Logs and privacy per service").
@@ -3311,6 +3315,23 @@ first means group state is not accumulating.
 
 This section records where the running code diverges from the design intent above.
 It is maintained deliberately so the document stays a truthful source of truth.
+
+**Update 2026-10-13:** The first tool for every service, `get_request_tracker_status`
+(section 3.5.1, "Request tracker toolset"). What to know:
+
+1. **It rides on `PROCESS_DB_ENABLED`.** It reads `uidprocessv2_2` through the
+   `process` key, so it is served exactly when the bio_* tools are, and an
+   account granted SELECT on the three bio_* tables also needs SELECT on
+   `request_tracker`.
+2. **Unresolved packets get a tool for the first time.** Being for every
+   service, it reaches the `_default` pack's investigator, which got none
+   before; its opencode agent `crm_investigator__default` now allows it.
+3. **The prompt fingerprint moves once for every pack** on a deployment with
+   `PROCESS_DB_ENABLED=true`, since every pack's investigator has a new tool
+   and its guidance. Compare accuracy per period across this date.
+4. **There is no stage history.** The table keeps one row per packet, so the
+   tool cannot say which stages a packet passed, only which are before its
+   current one in the routing order; a stage can be skipped for a packet type.
 
 **Update 2026-10-06:** An end-to-end review of the DLT lane, and its fixes.
 `tests/test_dlt_review_fixes.py` pins each one. What to know:

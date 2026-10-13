@@ -221,8 +221,12 @@ def test_the_prefix_rule(estate, name, services, expected):
 
 def test_the_shipped_tools_pass_the_scope_checks():
     assert agent_tools.scope_problems() == ([], [])
-    assert all(entry.tool.name.startswith("bio_") and entry.toolset.services == (BIO,)
-               for entry in agent_tools.entries())
+    # enu-biometric's own tools carry its prefix; the rest are for every service.
+    for entry in agent_tools.entries():
+        if entry.tool.name.startswith("bio_"):
+            assert entry.toolset.services == (BIO,), entry.tool.name
+        else:
+            assert entry.toolset.services == ("*",), entry.tool.name
 
 
 def _register(toolset, name, module="probe.module"):
@@ -299,8 +303,13 @@ def test_an_undeclared_toolset_for_a_rejection_role_is_a_warning(estate, registr
 def test_subpackages_are_discovered(registry_snapshot):
     modules = {entry.module for entry in agent_tools.entries()}
     assert "src.tools.agent_tools.enu_biometric.stage_tracker" in modules
-    assert agent_tools._tool_modules(agent_tools.__path__, agent_tools.__name__)[:2] == [
-        "src.tools.agent_tools.common", "src.tools.agent_tools.enu_biometric"]
+    assert "src.tools.agent_tools.common.request_tracker" in modules
+    found = agent_tools._tool_modules(agent_tools.__path__, agent_tools.__name__)
+    # A subpackage is listed, then the modules inside it, then the next one.
+    assert found.index("src.tools.agent_tools.common") \
+        < found.index("src.tools.agent_tools.common.request_tracker") \
+        < found.index("src.tools.agent_tools.enu_biometric") \
+        < found.index("src.tools.agent_tools.enu_biometric.stage_tracker")
 
 
 @pytest.mark.parametrize("change, expected", [

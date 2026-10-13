@@ -8,5 +8,7 @@ read, or describe, anything one service alone has. A tool for one service
 belongs in that service's own package, `agent_tools/<service_slug>/`, even
 when the database it reads is shared.
 
-None ship yet.
+- `request_tracker.py`: RSMS's request_tracker in uidprocessv2_2 -- which
+  pipeline stage a packet is at, whether that stage rejected it, how long it
+  has been there.
 """

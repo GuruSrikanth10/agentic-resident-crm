@@ -31,6 +31,12 @@ PROCESS_DB_TOOLS = {
     "bio_get_helper_record_fields",
 }
 
+#: The tool for every service's packets, on the same switch.
+REQUEST_TRACKER_TOOLS = {"get_request_tracker_status"}
+
+#: What the server serves, and an enu-biometric investigator gets.
+SERVED_TOOLS = PROCESS_DB_TOOLS | REQUEST_TRACKER_TOOLS
+
 
 @pytest.fixture
 def stage_db(monkeypatch):
@@ -182,7 +188,7 @@ def test_a_server_bound_everywhere_is_reached_on_loopback(monkeypatch):
 def test_the_catalog_lists_the_served_tools_with_their_roles(served):
     catalog = mcp_client.current_catalog()
     assert catalog.complete
-    assert {tool.name for tool in catalog.tools} == PROCESS_DB_TOOLS
+    assert {tool.name for tool in catalog.tools} == SERVED_TOOLS
     summary = next(tool for tool in catalog.tools if tool.name == "bio_get_packet_stage_summary")
     assert summary.agents == ("investigator",)
     assert summary.services == (BIO,)
@@ -193,7 +199,7 @@ def test_the_catalog_lists_the_served_tools_with_their_roles(served):
 
 
 def test_only_the_investigator_gets_them_by_default(served):
-    assert {tool.name for tool in mcp_client.tools_for("investigator", BIO)} == PROCESS_DB_TOOLS
+    assert {tool.name for tool in mcp_client.tools_for("investigator", BIO)} == SERVED_TOOLS
     for role in agent_tools.SERVICE_ROLES:
         if role != "investigator":
             assert mcp_client.tools_for(role, BIO) == [], role
@@ -201,9 +207,15 @@ def test_only_the_investigator_gets_them_by_default(served):
         assert mcp_client.tools_for(role) == [], role
 
 
-def test_only_enu_biometric_packets_get_them(served):
-    """Scoped to enu-biometric: an unresolved packet's agents get none."""
-    assert mcp_client.tools_for("investigator", "_default") == []
+def test_only_enu_biometric_packets_get_the_bio_tools(served):
+    """The bio_ tools are scoped to enu-biometric: an unresolved packet's
+    agents get only the tool for every service."""
+    assert {tool.name for tool in mcp_client.tools_for("investigator", "_default")} == \
+        REQUEST_TRACKER_TOOLS
+    tracker = next(tool for tool in mcp_client.current_catalog().tools
+                   if tool.name == "get_request_tracker_status")
+    assert tracker.services == ("*",) and tracker.toolset == "request_tracker"
+    assert tracker.agents == ("investigator",) and tracker.read_only is True
 
 
 def test_a_tool_call_goes_over_mcp_and_is_recorded(served):
@@ -279,7 +291,7 @@ def test_the_same_tool_from_two_servers_is_taken_once(stage_db, tool_server, mon
     catalog = mcp_client.current_catalog()
     assert catalog.complete
     assert {tool.server.name for tool in catalog.tools} == {"a_tools"}
-    assert len(catalog.tools) == len(PROCESS_DB_TOOLS)
+    assert len(catalog.tools) == len(SERVED_TOOLS)
 
 
 # ======================================================================
@@ -410,8 +422,9 @@ def test_opencode_gets_the_servers_and_one_agent_per_harness_role_and_service(se
     assert investigator["mode"] == "primary"
     assert investigator["tools"]["agent_tools_*"] is False
     assert {name for name, allowed in investigator["tools"].items() if allowed} == {
-        f"agent_tools_{name}" for name in PROCESS_DB_TOOLS}
-    assert config["agent"]["crm_investigator__default"]["tools"] == {"agent_tools_*": False}
+        f"agent_tools_{name}" for name in SERVED_TOOLS}
+    assert config["agent"]["crm_investigator__default"]["tools"] == {
+        "agent_tools_*": False, "agent_tools_get_request_tracker_status": True}
     assert config["agent"]["crm_dlt_investigator"]["tools"] == {"agent_tools_*": False}
 
 
@@ -519,8 +532,8 @@ def test_a_new_registered_tool_is_served_and_offered_to_its_role(tool_server):
 def test_cli_lists_prompts_and_calls(served, capsys):
     assert mcp_client.main(["list"]) == 0
     listed = json.loads(capsys.readouterr().out)
-    assert set(listed["services"][BIO]["investigator"]) == PROCESS_DB_TOOLS
-    assert listed["services"]["_default"]["investigator"] == []
+    assert set(listed["services"][BIO]["investigator"]) == SERVED_TOOLS
+    assert listed["services"]["_default"]["investigator"] == sorted(REQUEST_TRACKER_TOOLS)
     assert listed["roles"] == {"dlt_investigator": [], "dlt_reviewer": [],
                                "dlt_synthesis": []}
     assert listed["failed"] == {}
@@ -616,7 +629,7 @@ def test_a_docs_listing_without_metadata_is_for_every_service_and_the_docs_roles
         assert tool.toolset == mcp_client.DOCS_TOOLSET
         assert tool.guidance == mcp_client.DOCS_GUIDANCE
     # The tools server's tools are catalogued as before.
-    assert {tool.name for tool in catalog.tools if not tool.is_docs} == PROCESS_DB_TOOLS
+    assert {tool.name for tool in catalog.tools if not tool.is_docs} == SERVED_TOOLS
 
 
 def test_a_docs_listing_may_name_its_toolset_and_guidance_but_not_its_audience(monkeypatch):
@@ -639,7 +652,7 @@ def test_the_prefix_rule_accepts_a_tool_for_every_service_without_a_prefix():
 
 def test_docs_tools_follow_every_tools_server_tool(both):
     assert _names(mcp_client.tools_for("investigator", BIO)) == \
-        sorted(PROCESS_DB_TOOLS) + sorted(DOCS_TOOLS)
+        sorted(SERVED_TOOLS) + sorted(DOCS_TOOLS)
     # Every role, every scope, including the unresolved pack.
     for role in agent_tools.SERVICE_ROLES:
         for service in (BIO, "_default"):
