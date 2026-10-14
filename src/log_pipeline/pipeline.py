@@ -28,7 +28,6 @@ from src.log_pipeline.reducer import (
 from src.log_pipeline.sources import chain as source_chain
 from src.log_pipeline.sources.k8s import gaps as k8s_gaps
 from src.log_pipeline.types import CONTEXT_LINE_MARKER, FetchContext, TimeWindow
-from src.storage.factory import get_casebook_storage
 from src.utils import metrics
 from src.utils.logging_config import get_logger
 
@@ -120,9 +119,7 @@ def rejection_window(rejected_at: Optional[datetime],
 
 
 def reduce_logs(event_id: str, extra_identifiers: tuple = (),
-                storage_key: Optional[str] = None,
                 window: Optional[TimeWindow] = None,
-                storage=None,
                 service: Optional[str] = None) -> str:
     """Run the full log reduction pipeline for an event_id.
 
@@ -131,12 +128,6 @@ def reduce_logs(event_id: str, extra_identifiers: tuple = (),
     redaction allowlists so they survive scrubbing. Wired to the payload in
     Phase C (F11); defaults to empty so callers that don't have them work
     unchanged.
-
-    `storage_key` separates *what we search for* from *where we persist*. The
-    rejection path uses one value for both, and passes neither. The DLT path
-    searches on `refId` -- the only identifier the service actually logs --
-    but persists under its own `case_id`, since one packet can be dead-lettered
-    at several stages and each occurrence is a distinct case (DLT_PLAN.md 5.5).
 
     `window` overrides the `K8S_DEFAULT_SINCE_HOURS` look-back. The DLT path
     derives its window from `retry_topic-backoff-timestamp` instead: in the
@@ -151,11 +142,12 @@ def reduce_logs(event_id: str, extra_identifiers: tuple = (),
     behaviour from before services had logs of their own. A name with no
     registered pack (`_default`) searches nothing.
 
-    Returns a formatted string suitable for LLM context injection.
-    Raw logs are also persisted to disk for audit.
+    Returns a formatted string suitable for LLM context injection. Nothing is
+    persisted here beyond the Kubernetes source's own snapshot, written during
+    the fetch: the production callers store the returned text themselves, as
+    `fetched_logs.txt`.
     """
     extra_identifiers = tuple(v for v in (extra_identifiers or ()) if v)
-    artifact_key = storage_key or event_id
     scope = log_scope.for_service(service)
     if not scope.searchable:
         logger.bind(event_id=event_id).info(
@@ -203,8 +195,8 @@ def reduce_logs(event_id: str, extra_identifiers: tuple = (),
     # covers Elasticsearch too. It previously ran only inside the Kubernetes
     # retrieval path, and since LOG_SOURCE's Kubernetes leg fails fast when no
     # cluster is configured, in practice most deployments wrote entirely
-    # unredacted resident data to raw_logs.txt, into the casebook's
-    # rejection_logs field, and on to S3 (F10).
+    # unredacted resident data to disk, into the casebook's rejection_logs
+    # field, and on to S3 (F10).
     #
     # The Kubernetes source still redacts internally before writing its own
     # snapshot -- that is a separate persistence point, reached before this
@@ -225,16 +217,14 @@ def reduce_logs(event_id: str, extra_identifiers: tuple = (),
         for label, count in redaction_counts.items():
             metrics.REDACTIONS.labels(pattern=label).inc(count)
 
-    # Persist raw logs to disk for audit
-    log_file_path = _save_raw_logs(artifact_key, raw_logs, storage=storage)
-
     # ------------------------------------------------------------------
-    # Stage 2.5: Noise floor -- AFTER the audit copy is on disk.
+    # Stage 2.5: Noise floor -- on the model's copy only.
     # ------------------------------------------------------------------
     # Framework DEBUG chatter and echoed SQL column lists are together ~66%
     # and ~39% of the bytes in a real trace and carry no packet-specific
-    # signal. Thinning them here rather than at fetch keeps raw_logs.txt the
-    # complete record while shrinking only the copy the model reads.
+    # signal. Thinning them here rather than at fetch leaves the Kubernetes
+    # snapshot (`raw_logs_k8s.jsonl`, saved during the fetch) the complete
+    # record while shrinking only the copy the model reads.
     #
     # If the floor would empty the trace, keep the original: handing the
     # agent nothing reads as "no logs existed", which is the one conclusion
@@ -278,7 +268,7 @@ def reduce_logs(event_id: str, extra_identifiers: tuple = (),
         window, _suppressed = collapse_error_window(branch_result["payload"])
         formatted = _with_banner(
             gap_banner,
-            _format_error_path(event_id, window, total_fetched, log_file_path),
+            _format_error_path(event_id, window, total_fetched),
         )
         return formatted
 
@@ -299,7 +289,7 @@ def reduce_logs(event_id: str, extra_identifiers: tuple = (),
     # ------------------------------------------------------------------
     formatted = _with_banner(
         gap_banner,
-        _format_normal_path(event_id, assembled, total_fetched, log_file_path),
+        _format_normal_path(event_id, assembled, total_fetched),
     )
     return formatted
 
@@ -357,7 +347,7 @@ def _noise_banner(report: dict, total_fetched: int) -> str:
     if dropped:
         parts.append(
             f"{dropped} of {total_fetched} lines below {report.get('min_level', 'INFO')} "
-            f"were omitted (LOG_MIN_LEVEL); raw_logs.txt holds the complete trace."
+            f"were omitted (LOG_MIN_LEVEL)."
         )
     collapsed = report.get("sql_collapsed", 0)
     if collapsed:
@@ -410,11 +400,11 @@ def _context_legend(logs: list) -> list:
 
 
 def _format_error_path(event_id: str, trimmed_logs: list[dict],
-                       total_fetched: int, log_file_path: str) -> str:
+                       total_fetched: int) -> str:
     """Format the ERROR/stuck branch output for the LLM."""
     lines = [
         f"--- ERROR DETECTED in log trace for ID: {event_id} ---",
-        f"Total raw logs: {total_fetched} (saved at {log_file_path})",
+        f"Total raw logs: {total_fetched}",
         f"Showing ERROR(s) + {len(trimmed_logs)} surrounding context lines:",
         *_context_legend(trimmed_logs),
         "",
@@ -433,7 +423,7 @@ def _format_error_path(event_id: str, trimmed_logs: list[dict],
 
 
 def _format_normal_path(event_id: str, assembled: dict,
-                        total_fetched: int, log_file_path: str) -> str:
+                        total_fetched: int) -> str:
     """Format the clustered + guardrail-processed output for the LLM."""
     clusters = assembled.get("clusters", [])
     decision_lines = assembled.get("decision_vocabulary_lines", [])
@@ -441,7 +431,7 @@ def _format_normal_path(event_id: str, assembled: dict,
 
     lines = [
         f"--- Reduced Log Analysis for ID: {event_id} ---",
-        f"Total raw logs: {total_fetched} (saved at {log_file_path})",
+        f"Total raw logs: {total_fetched}",
         f"Compressed into {len(clusters)} structural templates.",
         f"Rare templates (count < 5) and decision-vocabulary matches are kept in full.",
         "",
@@ -531,40 +521,18 @@ def _time_only(timestamp: str) -> str:
 # ======================================================================
 # Disk persistence
 # ======================================================================
-
-def _write_artifact(event_id: str, filename: str, content: str, storage=None) -> str:
-    """Persist one log artifact beside the casebook and return its locator.
-
-    `storage` lets a caller target a different root -- the DLT path writes into
-    `dlt_cases/` rather than beside the rejection casebooks (DLT_PLAN.md 7).
-    Defaults to the rejection store, so existing callers are unaffected.
-
-    Goes through CasebookStorage rather than writing to the local filesystem.
-    F22 consolidated the *path* derivation here but left the storage bypass in
-    place, so under CASEBOOK_STORAGE_BACKEND=s3 these artifacts still landed on
-    whichever pod ran the packet and died with it (G3). The casebook itself was
-    in S3, its evidence was not.
-    """
-    try:
-        target = storage or get_casebook_storage()
-        locator = target.save_artifact(event_id, filename, content)
-        logger.bind(event_id=event_id).info("Log artifact saved", filename=filename, path=locator)
-        return locator
-    except Exception as e:
-        logger.bind(event_id=event_id).error("Failed to save log artifact", filename=filename, error=f"{type(e).__name__}: {e}")
-        return "Failed to save"
-
-
-def _save_raw_logs(event_id: str, logs: list[dict], storage=None) -> str:
-    """Persist raw logs and return the artifact locator."""
-    body = "".join(
-        f"[{log['timestamp']}] [{_origin(log)}] "
-        f"[{log['level']}]{_context_tag(log)} {log['message']}\n"
-        for log in logs
-    )
-    return _write_artifact(event_id, "raw_logs.txt", body, storage=storage)
-
-
+# Nothing in this module writes an artifact any more.
+#
+# `_save_raw_logs` (with `_write_artifact`, which only it used) wrote
+# `raw_logs.txt`: every fetched record rendered as text, before the noise
+# floor. Nothing ever read it back. For the Kubernetes source it was a
+# line-for-line rendering of the snapshot that source had already saved
+# (`raw_logs_k8s.jsonl`), which remains the complete record; the
+# Elasticsearch path keeps no complete copy. It was also the only reason
+# `reduce_logs` took `storage` and `storage_key`. `raw_logs.txt` stays in
+# `prune_casesheets.LOG_ARTEFACTS` so cases written before its removal are
+# still cleaned up.
+#
 # `_save_reduced_logs` used to live here, called from every return path in
 # `reduce_logs` above. It was removed because the object it wrote was a
 # byte-for-byte duplicate that nothing ever read back.

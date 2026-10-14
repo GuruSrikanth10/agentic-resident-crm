@@ -235,9 +235,12 @@ def test_fetch_searches_on_ref_id_and_persists_under_the_storage_key(monkeypatch
     result = fetch_dlt_logs(message(ref_id="REF-99"))
 
     assert captured["search_id"] == "REF-99"
-    assert captured["storage_key"] == storage_key("REF-99", result["case_id"])
     assert captured["window"] is not None
-    assert captured["storage"] is case_storage.get_dlt_storage()
+    # `reduce_logs` persists nothing; the route stores what it returns.
+    assert "storage_key" not in captured and "storage" not in captured
+    stored = case_storage.get_dlt_storage().load_artifact(
+        storage_key("REF-99", result["case_id"]), FETCHED_LOGS_ARTIFACT)
+    assert stored == "--- reduced trace ---"
 
 
 def test_log_fetch_failure_degrades_rather_than_losing_the_case(monkeypatch):

@@ -596,13 +596,12 @@ def casebooks(tmp_path, monkeypatch):
     import src.api.routes as routes
     import src.core.agent_orchestrator as orch
     import src.core.checkpointer as checkpointer
-    import src.log_pipeline.pipeline as pipeline
     import src.tools.tool_registry as tool_registry
     from src.storage.local import LocalFilesystemCasebookStorage
     from src.utils import outcomes
 
     storage = LocalFilesystemCasebookStorage(base_dir=str(tmp_path / "store"))
-    for module in (routes, pipeline, orch, tool_registry, outcomes):
+    for module in (routes, orch, tool_registry, outcomes):
         monkeypatch.setattr(module, "get_casebook_storage", lambda: storage)
     monkeypatch.setenv("ENABLE_LOG_FETCHING", "false")
     monkeypatch.setenv("RUNBOOK_MODE", "off")

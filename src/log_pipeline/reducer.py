@@ -109,8 +109,9 @@ def collapse_sql(message: str) -> str:
 def apply_noise_floor(logs: list[dict]) -> tuple:
     """Drop sub-threshold lines and collapse SQL. Returns (kept, report).
 
-    Runs AFTER raw_logs.txt is persisted, so this thins only the copy the LLM
-    reads; the audit record keeps every line at full length.
+    Thins only the copy the LLM reads, and never in place: the caller's
+    records, and the Kubernetes snapshot (`raw_logs_k8s.jsonl`) saved during
+    the fetch, keep every line at full length.
 
     An unrecognised level is kept rather than dropped. `parse_line` defaults to
     INFO when it cannot find a level, but a source that emits something outside

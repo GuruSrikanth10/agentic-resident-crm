@@ -194,7 +194,7 @@ def test_the_omission_is_visible_in_the_formatted_output(monkeypatch):
     from src.log_pipeline.pipeline import _format_normal_path
 
     assembled = reducer.apply_evidence_guardrails([], _matching_lines(5000))
-    text = _format_normal_path("evt-1", assembled, 5000, "some/path")
+    text = _format_normal_path("evt-1", assembled, 5000)
 
     assert "4990 further decision-vocabulary lines omitted" in text
     assert "LOG_MAX_DECISION_LINES" in text

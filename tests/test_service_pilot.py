@@ -199,11 +199,9 @@ def test_the_pilot_moves_the_fingerprint_and_nothing_else_does(monkeypatch):
 def storage(tmp_path, monkeypatch):
     import src.api.routes as routes
     import src.core.checkpointer as checkpointer
-    import src.log_pipeline.pipeline as pipeline
 
     store = LocalFilesystemCasebookStorage(base_dir=str(tmp_path / "store"))
     monkeypatch.setattr(routes, "get_casebook_storage", lambda: store)
-    monkeypatch.setattr(pipeline, "get_casebook_storage", lambda: store)
     monkeypatch.setattr(orch, "get_casebook_storage", lambda: store)
     monkeypatch.setattr(tool_registry, "get_casebook_storage", lambda: store)
     monkeypatch.setattr(outcomes, "get_casebook_storage", lambda: store)

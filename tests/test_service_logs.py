@@ -456,7 +456,6 @@ def storage(tmp_path, monkeypatch):
 
     store = LocalFilesystemCasebookStorage(base_dir=str(tmp_path / "store"))
     monkeypatch.setattr(routes, "get_casebook_storage", lambda: store)
-    monkeypatch.setattr(pipeline, "get_casebook_storage", lambda: store)
     monkeypatch.setattr(orch, "get_casebook_storage", lambda: store)
     monkeypatch.setattr(tool_registry, "get_casebook_storage", lambda: store)
     monkeypatch.setattr("src.api.routes.publish_to_analysis_queue", lambda payload: None)
@@ -618,7 +617,7 @@ def test_key_redaction_runs_on_every_record_the_pipeline_persists(clean_redactio
 # ======================================================================
 
 def test_the_audit_counts_what_redaction_leaves(clean_redaction, tmp_path):
-    sample = tmp_path / "sample" / "raw_logs.txt"
+    sample = tmp_path / "sample" / "pod.log"
     sample.parent.mkdir()
     sample.write_text("\n".join([
         # Redacted, so nothing is left.

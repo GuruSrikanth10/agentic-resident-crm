@@ -398,12 +398,7 @@ def test_the_source_reports_coverage_rather_than_rotation(monkeypatch, tmp_path,
 # ======================================================================
 
 @pytest.fixture
-def fake_fetch(monkeypatch, tmp_path):
-    from src.storage.local import LocalFilesystemCasebookStorage
-
-    monkeypatch.setattr(pipeline, "get_casebook_storage",
-                        lambda: LocalFilesystemCasebookStorage(base_dir=str(tmp_path)))
-
+def fake_fetch(monkeypatch):
     def install(result):
         monkeypatch.setattr(pipeline.source_chain, "fetch_with_fallback",
                             lambda *args, **kwargs: result)

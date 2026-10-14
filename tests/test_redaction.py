@@ -185,7 +185,7 @@ def _fixture_pod(root, namespace, pod, lines):
 
 def test_retrieval_redacts_before_returning(monkeypatch, tmp_path):
     """The end-to-end guarantee: unredacted PII never leaves retrieval, so it
-    never reaches raw_logs.txt, the snapshot, or S3."""
+    never reaches the snapshot, the reduced trace, or S3."""
     _fixture_pod(tmp_path, "enu", "pod-a", [
         f"{KUBELET_TS} INFO evt-1 resident 123456789012 mobile 9876543210",
     ])

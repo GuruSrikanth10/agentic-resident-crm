@@ -458,11 +458,9 @@ flowchart TD
 ```mermaid
 flowchart TD
     classDef good fill:#14532d,stroke:#052e16,color:#ffffff
-    classDef store fill:#334155,stroke:#0f172a,color:#ffffff
 
     IN(["Selected evidence"]) --> RED2["Redact before ANY persistence"]
-    RED2 --> RAW["Save the complete trace.<br/>The audit copy."]
-    RAW --> NF["Noise floor: drop chatter,<br/>collapse verbose queries.<br/>Keep the original if it empties."]
+    RED2 --> NF["Noise floor: drop chatter,<br/>collapse verbose queries.<br/>Keep the original if it empties."]
     NF --> SIZE{"Fewer than 50 records?"}
     SIZE -->|Yes| DIRECT["Emit verbatim"]
     SIZE -->|No| BR{"Contains errors?"}
@@ -473,7 +471,6 @@ flowchart TD
     CLU --> CAPC["Trim the middle to a ceiling"]
     CAPC --> RDX["Save it. Gap banner FIRST<br/>if anything is missing."]
 
-    class RAW store
     class RDX good
 ```
 
@@ -754,8 +751,7 @@ never silent: every stage that removes something announces how much.
 | **Catalog** *(offline, per service)* | Samples historical traces of one service to classify recurring templates as boilerplate, informative, or decision-marker | Frequency across unrelated flows is the strongest available signal for "this line never distinguishes one outcome from another" — but only within one service's logs. A service with no catalog of its own has nothing filtered out |
 | **Retrieval** | Source-filtered query with stable pagination and a hard document cap | An unbounded query against a busy index is an outage waiting to happen |
 | **Redaction** | Removes identity numbers and contact details by their shape, and names, dates of birth, genders and addresses by the field they are logged under; allowlists correlation identifiers | Runs at the one point every source passes through, before *any* persistence — so it cannot be bypassed by adding a source. The same for every service, so a packet placed in the wrong service is still redacted in full. An audit counts what a service's sample logs still hold after it, and must find nothing before that service is switched on |
-| **Audit copy** | The complete trace is written to disk first | Everything downstream is lossy. The unmodified record has to exist somewhere. |
-| **Noise floor** | Drops framework chatter below a severity threshold; collapses verbose query echoes to a summary | Roughly half the lines and two-thirds of the bytes in a real trace. Applied only to the model's copy — never to the audit copy. If it would empty the trace, the original is kept. |
+| **Noise floor** | Drops framework chatter below a severity threshold; collapses verbose query echoes to a summary | Roughly half the lines and two-thirds of the bytes in a real trace. Applied only to the model's copy — the Kubernetes snapshot keeps every line. If it would empty the trace, the original is kept. |
 | **Branch on error** | If the trace contains errors: keep them plus 200 lines either side, and skip clustering entirely | A crash is a *sequence*. Replacing it with a cluster summary destroys exactly the ordering that explains it. |
 | **Clustering** | Otherwise: strip variable content and group structurally identical lines | A rule-rejection trace is repetitive by nature; what matters is which distinct things happened, not how many times |
 | **Guardrails** | Force full retention for decision vocabulary (shared words plus the service's own), rare templates, and flow boundaries — each bounded | Without bounds the exemptions invert the pipeline. An unbounded "always keep decision lines" rule once produced reduced output larger than its input. |

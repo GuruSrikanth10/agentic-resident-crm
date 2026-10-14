@@ -395,7 +395,7 @@ def test_drain_commits_what_completed_and_leaves_the_rest(monkeypatch):
 
 def test_elasticsearch_path_records_are_redacted_before_persistence(tmp_path, monkeypatch):
     """Elasticsearch is the path most deployments actually use, and it never
-    redacted -- so resident PII reached raw_logs.txt, the casebook and S3."""
+    redacted -- so resident PII reached disk, the casebook and S3."""
     from src.log_pipeline import pipeline
     from src.log_pipeline.types import FetchDiagnostics, FetchResult
 
@@ -411,11 +411,9 @@ def test_elasticsearch_path_records_are_redacted_before_persistence(tmp_path, mo
         }
     ]
 
-    # `_save_reduced_logs` used to be stubbed here to stop it writing. It no
-    # longer exists: `reduce_logs` returns the reduced text and its callers
-    # persist it as `fetched_logs.txt`, so there is no second write to
-    # suppress. `_save_raw_logs` below is still captured -- that artifact is
-    # the one this test is about.
+    # `reduce_logs` writes no artifact of its own: what it returns is what its
+    # callers persist, as `fetched_logs.txt`, and what the model reads. So the
+    # returned text is the thing that must be redacted.
     monkeypatch.setattr(
         pipeline.source_chain, "fetch_with_fallback",
         lambda *_a, **_kw: FetchResult(
@@ -423,31 +421,16 @@ def test_elasticsearch_path_records_are_redacted_before_persistence(tmp_path, mo
         ),
     )
 
-    written = {}
-
-    # **_kw absorbs the `storage=` argument the artifact writers gained in
-    # Phase 5 of DLT_PLAN.md, matching the other stubs in this file.
-    def capture_raw(event_id, logs, **_kw):
-        written["logs"] = [dict(entry) for entry in logs]
-        return "raw_logs.txt"
-
-    monkeypatch.setattr(pipeline, "_save_raw_logs", capture_raw)
-
     output = pipeline.reduce_logs("evt-42")
 
-    persisted = written["logs"][0]["message"]
-    assert aadhaar not in persisted
-    assert mobile not in persisted
-    assert "[REDACTED:AADHAAR]" in persisted
-    assert "[REDACTED:MOBILE]" in persisted
-
-    # ...and nothing unredacted reaches the LLM-facing text either.
     assert aadhaar not in output
     assert mobile not in output
+    assert "[REDACTED:AADHAAR]" in output
+    assert "[REDACTED:MOBILE]" in output
 
     # The correlation id is operational, not resident PII -- it must survive,
     # or the investigation loses its anchor.
-    assert "evt-42" in persisted
+    assert "evt-42" in output
 
 
 def test_extra_identifiers_are_allowlisted_from_redaction(monkeypatch):
@@ -463,7 +446,6 @@ def test_extra_identifiers_are_allowlisted_from_redaction(monkeypatch):
         "app_name": "svc",
     }]
 
-    monkeypatch.setattr(pipeline, "_save_raw_logs", lambda *_a, **_kw: "raw")
     monkeypatch.setattr(
         pipeline.source_chain, "fetch_with_fallback",
         lambda *_a, **_kw: FetchResult(

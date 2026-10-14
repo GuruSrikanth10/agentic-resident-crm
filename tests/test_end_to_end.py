@@ -44,12 +44,10 @@ def storage(tmp_path, monkeypatch):
     """Real local storage and a private checkpoint DB, isolated to a tmp root."""
     import src.api.routes as routes
     import src.core.checkpointer as checkpointer
-    import src.log_pipeline.pipeline as pipeline
     import src.tools.tool_registry as tool_registry
 
     store = LocalFilesystemCasebookStorage(base_dir=str(tmp_path))
     monkeypatch.setattr(routes, "get_casebook_storage", lambda: store)
-    monkeypatch.setattr(pipeline, "get_casebook_storage", lambda: store)
     # fetch_logs_node's cache check (orch) and fetch_and_persist_logs'
     # artifact write (tool_registry) each hold their own module-level
     # binding of get_casebook_storage -- both must be patched too, or the

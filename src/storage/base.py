@@ -104,7 +104,7 @@ class CasebookStorage(Protocol):
     # Blob artifacts (G3)
     # ------------------------------------------------------------------
     # The JSON methods above cover casebook.json / status.json / outcome.json.
-    # Everything else beside a casebook -- raw_logs.txt, reduced_logs.txt, the
+    # Everything else beside a casebook -- the log artifacts and the
     # Kubernetes snapshot JSONL -- was written straight to the local
     # filesystem, bypassing this abstraction entirely. Under
     # CASEBOOK_STORAGE_BACKEND=s3 those artifacts lived on whichever pod ran

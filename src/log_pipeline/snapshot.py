@@ -16,8 +16,8 @@ become deterministic and free, the cluster is not re-hit once per retry-loop
 iteration, and evidence captured while it existed survives long after the
 kubelet dropped it.
 
-JSONL rather than the formatted `raw_logs.txt` so Stages 2-4 can be re-run
-later with different tuning.
+JSONL rather than formatted text so Stages 2-4 can be re-run later with
+different tuning.
 """
 import json
 from datetime import datetime, timezone

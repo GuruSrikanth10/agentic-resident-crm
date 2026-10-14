@@ -414,13 +414,12 @@ def fetch_dlt_logs(message: DltMessage):
         metrics.record_dlt_window_age(window.age_seconds)
         try:
             formatted = reduce_logs(
-                # Search on refId -- the only identifier the service logs --
-                # but persist under the record's storage key (DLT_PLAN.md 5.5).
+                # Search on refId -- the only identifier the service logs. The
+                # result is persisted below, under the record's storage key
+                # (DLT_PLAN.md 5.5).
                 message.ref_id,
                 extra_identifiers=(case_id,),
-                storage_key=key,
                 window=window.to_time_window(),
-                storage=storage,
                 # The record's own service's apps, when it is analysed with
                 # its own pack; the environment's lists otherwise.
                 **({"service": log_service} if log_service else {}),

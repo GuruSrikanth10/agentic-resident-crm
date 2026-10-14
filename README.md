@@ -348,8 +348,7 @@ flowchart TD
     NONE["no source returned logs"] --> EMPTY["'No logs found for ID: X'<br/>+ gap banner"]
 
     WIN --> RED2["redact before ANY persistence"]
-    RED2 --> RAW["save raw_logs.txt"]
-    RAW --> SIZE{"record count under 50?"}
+    RED2 --> SIZE{"record count under 50?"}
     SIZE -->|yes| DIRECT["emit full trace verbatim"]
     SIZE -->|no| BR{"any level == ERROR?"}
     BR -->|"yes: stuck path"| ERRP["ERROR + 200 lines before<br/>+ 200 lines after"]
@@ -929,7 +928,6 @@ loop auditable and prevents an LLM from silently rewriting its own instructions.
 Outputs are stored in `local_casesheets/casebook_<event_id>/`. This directory contains:
 - `casebook.json`: The final structured JSON block (terminal state only).
 - `status.json`: The in-flight lifecycle marker (`IN_PROGRESS`, then the terminal status).
-- `raw_logs.txt`: The complete uncompressed Elasticsearch log trace.
 - `reduced_logs.txt`: The heavily compressed logs that were injected into the LLM.
 - `*.lock` / `*.tmp`: `filelock` and atomic-write scratch files.
 

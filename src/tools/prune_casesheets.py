@@ -38,6 +38,8 @@ from src.utils.paths import LOCAL_CASESHEETS_DIR  # noqa: E402
 #: outcome.json is deliberately NOT here: it is human-supplied ground truth
 #: and the entire accuracy dataset. Routine disk hygiene must not delete the
 #: only record of whether the system's resolutions were correct (G2).
+#: raw_logs.txt and reduced_logs.txt are no longer written; they stay listed
+#: because cases written before their removal still carry them.
 LOG_ARTEFACTS = ("raw_logs.txt", "reduced_logs.txt", "raw_logs_k8s.jsonl")
 
 #: Files worth keeping even when a whole casebook directory is pruned.

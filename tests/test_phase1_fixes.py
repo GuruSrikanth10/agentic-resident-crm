@@ -260,7 +260,7 @@ def test_routes_falls_back_to_truncated_logs_when_s3_unset(monkeypatch):
         storage = get_casebook_storage()
         casebook = storage.load(event_id)
         # `rejection_logs` is a {"path", "gaps"} record, not a bare string:
-        # the log text itself lives in the raw_logs.txt artifact, and only its
+        # the log text itself lives in the fetched_logs.txt artifact, and only its
         # locator is embedded here. The old assertions read it as a string and
         # raised AttributeError once that shape changed.
         logs_field = casebook["packet_status"]["rejection_data"]["rejection_logs"]

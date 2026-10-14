@@ -19,7 +19,7 @@ or already a `[REDACTED:...]` placeholder is not counted.
 
 Usage:
     python -m src.tools.redaction_audit --service enu-demographic samples/enu-demographic/
-    python -m src.tools.redaction_audit --service enu-demographic raw_logs.txt --json
+    python -m src.tools.redaction_audit --service enu-demographic pod.log --json
 
 Every file under a directory is read, one log line per text line. Findings
 name the file, the line and the key or pattern, never the value.

@@ -3,8 +3,8 @@ Canonical contracts shared by every log source (KUBERNETES_LOGS_PLAN.md 4.1).
 
 Stages 2-4 of the reduction pipeline are source-agnostic: `branch_on_error`
 reads `level`, `cluster_logs` reads `message` and `timestamp`, the guardrails
-read all four required keys, and `pipeline._format_*` / `_save_raw_logs`
-render `timestamp` / `app_name` / `level` / `message`.
+read all four required keys, and `pipeline._format_*` render `timestamp` /
+`app_name` / `level` / `message`.
 
 Any source emitting `LogRecord` therefore works with Drain3 clustering, the
 evidence guardrails, the S3 offload, and the casebook wiring unchanged.

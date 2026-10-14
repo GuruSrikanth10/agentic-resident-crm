@@ -3,9 +3,9 @@ PII redaction (KUBERNETES_LOGS_PLAN.md 5.9).
 
 Raw pod logs are unfiltered, where the Elasticsearch path source-filtered to
 four fields. In a biometric enrolment context they may carry resident
-identifiers or entire request payloads -- and that text is persisted to
-`raw_logs.txt`, to the log snapshot, and potentially to S3 via the
->5000-character offload.
+identifiers or entire request payloads -- and that text is persisted to the
+log snapshot, to the reduced trace (`fetched_logs.txt`), and potentially to
+S3.
 
 ORDERING IS LOAD-BEARING:
 

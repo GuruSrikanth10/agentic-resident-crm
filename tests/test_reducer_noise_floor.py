@@ -61,8 +61,8 @@ def test_unknown_level_is_kept_not_dropped(monkeypatch):
 
 
 def test_floor_does_not_mutate_the_caller_s_records(monkeypatch):
-    """raw_logs.txt is written from the same list; collapsing in place would
-    retroactively edit the audit copy."""
+    """The floor thins only the model's copy; collapsing in place would also
+    rewrite the records the caller still holds."""
     monkeypatch.setattr(reducer, "MIN_LEVEL", "INFO")
     original = _rec("INFO", SELECT)
     logs = [original]

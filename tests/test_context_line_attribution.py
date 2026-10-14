@@ -111,7 +111,7 @@ def test_the_rendered_trace_marks_context_lines_and_explains_the_mark():
          "message": "ours failed", "identifier_match": True},
     ]
 
-    text = _format_error_path("evt-1", records, 2, "some/path")
+    text = _format_error_path("evt-1", records, 2)
     marked = [line for line in text.splitlines()
               if CONTEXT_LINE_MARKER in line and "someone else" in line]
 
@@ -133,7 +133,7 @@ def test_a_trace_with_no_context_lines_renders_no_mark_and_no_legend():
          "message": "ours failed again"},  # no flag: an Elasticsearch record
     ]
 
-    text = _format_error_path("evt-1", records, 2, "some/path")
+    text = _format_error_path("evt-1", records, 2)
 
     assert CONTEXT_LINE_MARKER not in text
     assert "may belong to another transaction" not in text
@@ -148,7 +148,7 @@ def test_a_neighbours_timeout_no_longer_makes_this_packet_partial(
     """The chain, whole: a real pod log with two transactions interleaved,
     read through the selector, rendered, and judged."""
     records = _read(monkeypatch, tmp_path, [NEIGHBOUR, OURS])
-    text = _format_error_path(REF_ID, records, len(records), "some/path")
+    text = _format_error_path(REF_ID, records, len(records))
 
     result = corroborate(text, BUSINESS_FQCN, CODE)
 
@@ -167,7 +167,7 @@ def test_the_same_trace_without_the_flag_is_what_the_bug_looked_like(
     records = _read(monkeypatch, tmp_path, [NEIGHBOUR, OURS])
     for record in records:
         del record["identifier_match"]
-    text = _format_error_path(REF_ID, records, len(records), "some/path")
+    text = _format_error_path(REF_ID, records, len(records))
 
     result = corroborate(text, BUSINESS_FQCN, CODE)
 

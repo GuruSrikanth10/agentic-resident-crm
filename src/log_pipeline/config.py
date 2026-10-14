@@ -28,16 +28,16 @@ ERROR_TRAILING_LINES = int(os.environ.get("LOG_ERROR_TRAILING_LINES", "200"))
 ERROR_REPEAT_THRESHOLD = int(os.environ.get("LOG_ERROR_REPEAT_THRESHOLD", "3"))
 
 # ---------------------------------------------------------------------------
-# Stage 2.5 -- Noise floor (applied AFTER raw_logs.txt is written)
+# Stage 2.5 -- Noise floor (applied to the LLM's copy only)
 # ---------------------------------------------------------------------------
 # Severity floor for the text handed to the reducer. Framework DEBUG chatter
 # -- shard hints, JPA transaction bookkeeping, integrity interceptors, SQL
 # echo -- is ~50% of the lines and ~66% of the BYTES in a real trace, and
 # none of it distinguishes one packet's outcome from another's.
 #
-# Applied after `_save_raw_logs`, never before: raw_logs.txt stays the
-# complete, unfiltered record for audit. Only the LLM's copy is thinned, and
-# the count of what was dropped is announced in the header rather than
+# Only the LLM's copy is thinned: the Kubernetes snapshot
+# (`raw_logs_k8s.jsonl`, saved during the fetch) stays the complete record,
+# and the count of what was dropped is announced in the header rather than
 # removed silently.
 MIN_LEVEL = os.environ.get("LOG_MIN_LEVEL", "INFO").strip().upper()
 

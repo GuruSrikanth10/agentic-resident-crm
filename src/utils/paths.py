@@ -81,8 +81,8 @@ def casebook_dir(event_id: str) -> Path:
     """Directory holding one event's casebook and log artifacts.
 
     Callers that write there must still go through CasebookStorage for the
-    casebook itself; this is for the log artifacts (raw_logs.txt,
-    reduced_logs.txt, the Kubernetes snapshot) that sit beside it.
+    casebook itself; this is for the log artifacts (fetched_logs.txt, the
+    Kubernetes snapshot) that sit beside it.
     """
     return LOCAL_CASESHEETS_DIR / f"casebook_{event_id}"
 

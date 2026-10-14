@@ -87,8 +87,8 @@ def test_meta_records_provenance(tmp_path):
 
 
 def test_records_are_written_as_jsonl(tmp_path):
-    """JSONL rather than the formatted raw_logs.txt, so Stages 2-4 can be
-    re-run later with different tuning."""
+    """JSONL rather than formatted text, so Stages 2-4 can be re-run later
+    with different tuning."""
     snapshot.save("evt-5", _records(3))
     lines = (tmp_path / "casebook_evt-5" / snapshot.RECORDS_FILENAME) \
         .read_text().strip().splitlines()
@@ -168,6 +168,7 @@ def _casebook(root, event_id, status, age_days=0.0):
     (directory / "casebook.json").write_text(json.dumps({
         "packet_status": {"status": status}
     }))
+    # No longer written, but cases from before its removal still carry it.
     (directory / "raw_logs.txt").write_text("x" * 100)
     (directory / "raw_logs_k8s.jsonl").write_text('{"a":1}\n')
     if age_days:

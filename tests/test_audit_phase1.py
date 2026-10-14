@@ -320,7 +320,7 @@ def test_unparseable_output_preserves_the_evidence():
         assert casebook["packet_status"]["status"] == "FAILED_SYNTHESIS_PARSE"
         rejection = casebook["packet_status"]["rejection_data"]
         # `rejection_logs` is a {"path", "gaps"} locator now, not the log text:
-        # the text goes to S3 or to the raw_logs.txt artifact, and the casebook
+        # the text is in the `fetched_logs.txt` artifact, and the casebook
         # records where. What this test cares about is that the record is still
         # written on the failure path -- a contract breach must not also erase
         # the pointer to the trace.
@@ -449,33 +449,18 @@ def test_snapshot_round_trips_on_a_non_filesystem_backend(monkeypatch):
     assert gaps == []
 
 
-def test_log_artifacts_go_through_storage(monkeypatch):
-    """raw_logs.txt / reduced_logs.txt lived on pod-local disk even when the
-    casebook itself was in S3, so the evidence died with the pod."""
+def test_reduce_logs_persists_nothing_itself(monkeypatch, tmp_path):
+    """`reduce_logs` used to write two artifacts of its own, and nothing read
+    either back. `reduced_logs.txt` was the very string it returns, which both
+    production callers persist themselves as `fetched_logs.txt`. `raw_logs.txt`
+    was every fetched record rendered as text -- for the Kubernetes source, a
+    line-for-line copy of the snapshot that source already keeps."""
     from src.log_pipeline import pipeline
 
     storage = _InMemoryStorage()
-    monkeypatch.setattr(pipeline, "get_casebook_storage", lambda: storage)
-
-    locator = pipeline._save_raw_logs("evt-art", [
-        {"timestamp": "T0", "level": "ERROR", "message": "boom",
-         "app_name": "svc"},
-    ])
-
-    assert locator == "memory://evt-art/raw_logs.txt"
-    assert "boom" in storage.artifacts[("evt-art", "raw_logs.txt")]
-
-
-def test_the_reduced_trace_is_stored_once_not_twice(monkeypatch, tmp_path):
-    """`reduce_logs` used to write `reduced_logs.txt` and then return the very
-    same string, which both production callers persist themselves as
-    `fetched_logs.txt` -- two objects, identical bytes, only one of them ever
-    read back. The audit copy (`raw_logs.txt`) is a different rendering and
-    stays."""
-    from src.log_pipeline import pipeline
-
-    storage = _InMemoryStorage()
-    monkeypatch.setattr(pipeline, "get_casebook_storage", lambda: storage)
+    # Every module's `get_casebook_storage` hands out the factory's cached
+    # backend, so this sees a write from anywhere `reduce_logs` reaches.
+    monkeypatch.setattr("src.storage.factory._STORAGE_CACHE", storage)
 
     csv_path = tmp_path / "logs.csv"
     doc = ('{""@timestamp"":""2026-01-01T00:00:01Z"",""level"":""ERROR"",'
@@ -489,19 +474,20 @@ def test_the_reduced_trace_is_stored_once_not_twice(monkeypatch, tmp_path):
     reduced = pipeline.reduce_logs("evt-once")
 
     assert "dedup rejected evt-once" in reduced
-    assert ("evt-once", "raw_logs.txt") in storage.artifacts
-    assert ("evt-once", "reduced_logs.txt") not in storage.artifacts, (
-        "reduce_logs must not persist the text it already returns to a caller "
-        "that stores it as fetched_logs.txt"
+    assert storage.artifacts == {} and storage.docs == {}, (
+        "reduce_logs must return the reduced text and leave persisting it to "
+        "its callers, which store it as fetched_logs.txt"
     )
 
 
-def test_old_cases_reduced_logs_are_still_pruned():
-    """Nothing writes `reduced_logs.txt` any more, but cases written before
-    that change still have one, so the pruner must keep cleaning it up."""
+def test_old_cases_removed_log_artefacts_are_still_pruned():
+    """Nothing writes `reduced_logs.txt` or `raw_logs.txt` any more, but cases
+    written before those changes still have them, so the pruner must keep
+    cleaning them up."""
     from src.tools.prune_casesheets import LOG_ARTEFACTS
 
     assert "reduced_logs.txt" in LOG_ARTEFACTS
+    assert "raw_logs.txt" in LOG_ARTEFACTS
 
 
 def test_pruning_preserves_recorded_outcomes(tmp_path, monkeypatch):
@@ -512,7 +498,7 @@ def test_pruning_preserves_recorded_outcomes(tmp_path, monkeypatch):
     directory.mkdir(parents=True)
     (directory / "casebook.json").write_text(
         json.dumps({"packet_status": {"status": "COMPLETED"}}), encoding="utf-8")
-    (directory / "raw_logs.txt").write_text("bulky", encoding="utf-8")
+    (directory / "raw_logs_k8s.jsonl").write_text("bulky", encoding="utf-8")
     (directory / "outcome.json").write_text(
         json.dumps({"verdict": "CORRECT"}), encoding="utf-8")
 
@@ -526,5 +512,5 @@ def test_pruning_preserves_recorded_outcomes(tmp_path, monkeypatch):
     prune_casesheets.main()
 
     assert (directory / "outcome.json").exists(), "the verdict must survive"
-    assert not (directory / "raw_logs.txt").exists()
+    assert not (directory / "raw_logs_k8s.jsonl").exists()
     assert not (directory / "casebook.json").exists()
