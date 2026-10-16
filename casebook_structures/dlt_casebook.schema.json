@@ -1,0 +1,901 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "DltCasebook",
+    "description": "casebook.json written for one dead-lettered (DLT) record, schema_version 1.4. There are two shapes. An analysed record (status COMPLETED or NEEDS_MANUAL_REVIEW) carries every block. A record whose analysis ran out of time (status FAILED_TIMEOUT) is a short record holding only schema_version, case_id, detected_at, packet.ref_id, finding.narrative, finding.recommendation, finding.action, packet_status and casebook_metadata.",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+        "schema_version",
+        "case_id",
+        "detected_at",
+        "packet",
+        "finding",
+        "packet_status",
+        "casebook_metadata"
+    ],
+    "properties": {
+        "schema_version": {
+            "description": "Version of this casebook shape. Older casebooks in the store may carry an earlier version with a different shape.",
+            "type": "string",
+            "const": "1.4"
+        },
+        "case_id": {
+            "description": "The record's identity: dlt-<original topic>-<partition>-<offset>, followed by -g<digest of the consumer group> when the group is known. Unique per dead-lettered record.",
+            "type": ["string", "null"]
+        },
+        "detected_at": {
+            "description": "When this casebook was assembled, Unix epoch seconds with a fraction.",
+            "type": "number"
+        },
+        "source": {
+            "$ref": "#/definitions/DltSource"
+        },
+        "packet": {
+            "$ref": "#/definitions/DltPacket"
+        },
+        "failure": {
+            "$ref": "#/definitions/DltFailure"
+        },
+        "evidence": {
+            "$ref": "#/definitions/DltEvidence"
+        },
+        "finding": {
+            "$ref": "#/definitions/DltFinding"
+        },
+        "confidence": {
+            "$ref": "#/definitions/DltConfidence"
+        },
+        "provenance": {
+            "$ref": "#/definitions/DltProvenance"
+        },
+        "code_check": {
+            "$ref": "#/definitions/DltCodeCheck"
+        },
+        "replay": {
+            "$ref": "#/definitions/DltReplay"
+        },
+        "parked": {
+            "$ref": "#/definitions/DltParked"
+        },
+        "packet_status": {
+            "$ref": "#/definitions/DltPacketStatus"
+        },
+        "casebook_metadata": {
+            "$ref": "#/definitions/DltCasebookMetadata"
+        }
+    },
+    "allOf": [
+        {
+            "if": {
+                "properties": {
+                    "packet_status": {
+                        "properties": {
+                            "status": {
+                                "const": "FAILED_TIMEOUT"
+                            }
+                        }
+                    }
+                }
+            },
+            "then": {
+                "properties": {
+                    "finding": {
+                        "properties": {
+                            "action": {
+                                "const": "NEEDS_MANUAL_REVIEW"
+                            }
+                        }
+                    }
+                }
+            },
+            "else": {
+                "required": [
+                    "source",
+                    "failure",
+                    "evidence",
+                    "confidence",
+                    "provenance",
+                    "code_check",
+                    "replay",
+                    "parked"
+                ],
+                "properties": {
+                    "packet": {
+                        "required": [
+                            "ref_id",
+                            "ref_id_source",
+                            "record_key",
+                            "payload_ref_id_conflict",
+                            "event_id",
+                            "service",
+                            "service_resolution"
+                        ]
+                    },
+                    "finding": {
+                        "required": [
+                            "narrative",
+                            "discrepancy",
+                            "recommendation",
+                            "action",
+                            "reviewer_approved"
+                        ]
+                    }
+                }
+            }
+        },
+        {
+            "if": {
+                "required": ["provenance"],
+                "properties": {
+                    "provenance": {
+                        "required": ["source"],
+                        "properties": {
+                            "source": {
+                                "const": "agent"
+                            }
+                        }
+                    }
+                }
+            },
+            "then": {
+                "properties": {
+                    "finding": {
+                        "required": ["per_code_violations"]
+                    }
+                }
+            }
+        },
+        {
+            "if": {
+                "required": ["provenance"],
+                "properties": {
+                    "provenance": {
+                        "required": ["source"],
+                        "properties": {
+                            "source": {
+                                "const": "failed_synthesis"
+                            }
+                        }
+                    }
+                }
+            },
+            "then": {
+                "properties": {
+                    "finding": {
+                        "required": ["parse_error"]
+                    }
+                }
+            }
+        }
+    ],
+    "definitions": {
+        "DltSource": {
+            "title": "DltSource",
+            "description": "Where the record came from, read from the Spring Kafka dead-letter headers.",
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "original_topic",
+                "partition",
+                "offset",
+                "consumer_group",
+                "attempts",
+                "original_timestamp",
+                "last_attempt_timestamp",
+                "anchor_is_fallback",
+                "type_id"
+            ],
+            "properties": {
+                "original_topic": {
+                    "description": "The topic the record was consumed from before it was dead-lettered.",
+                    "type": ["string", "null"]
+                },
+                "partition": {
+                    "type": ["integer", "null"]
+                },
+                "offset": {
+                    "type": ["integer", "null"]
+                },
+                "consumer_group": {
+                    "description": "The consumer group that gave up on the record.",
+                    "type": ["string", "null"]
+                },
+                "attempts": {
+                    "description": "How many times the record was tried.",
+                    "type": ["integer", "null"]
+                },
+                "original_timestamp": {
+                    "description": "When the original record was produced, Unix epoch milliseconds.",
+                    "type": ["integer", "null"]
+                },
+                "last_attempt_timestamp": {
+                    "description": "When the last attempt failed, Unix epoch milliseconds. Falls back to original_timestamp when the retry header is missing.",
+                    "type": ["integer", "null"]
+                },
+                "anchor_is_fallback": {
+                    "description": "true when last_attempt_timestamp had to fall back to original_timestamp.",
+                    "type": "boolean"
+                },
+                "type_id": {
+                    "description": "The payload's __TypeId__ header, e.g. com.uidai.enu.common.model.EventMessage.",
+                    "type": ["string", "null"]
+                }
+            }
+        },
+        "DltPacket": {
+            "title": "DltPacket",
+            "description": "Which packet the record belongs to.",
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["ref_id"],
+            "properties": {
+                "ref_id": {
+                    "description": "The packet's refId, used to find its logs. Null when no identifier could be found.",
+                    "type": ["string", "null"]
+                },
+                "ref_id_source": {
+                    "description": "Where ref_id was read from.",
+                    "type": "string",
+                    "enum": ["contract", "record_key", "configured_path", "type_path", "search", "none"]
+                },
+                "record_key": {
+                    "description": "The Kafka record key, verbatim.",
+                    "type": ["string", "null"]
+                },
+                "payload_ref_id_conflict": {
+                    "description": "The payload's refId, only when it disagreed with the record key. Null when they agreed or only one was present.",
+                    "type": ["string", "null"]
+                },
+                "event_id": {
+                    "description": "The payload's eventId, when the payload is in the packet event contract. Equal to the refId for the AUDIT contract.",
+                    "type": ["string", "null"]
+                },
+                "service": {
+                    "description": "The service the record was resolved to, e.g. enu-biometric. _unresolved when nothing placed it.",
+                    "type": ["string", "null"]
+                },
+                "service_resolution": {
+                    "$ref": "#/definitions/DltServiceResolution"
+                }
+            }
+        },
+        "DltServiceResolution": {
+            "title": "DltServiceResolution",
+            "description": "How packet.service was decided. Null when no resolution was recorded.",
+            "type": ["object", "null"],
+            "required": [
+                "service",
+                "source",
+                "matched",
+                "conflict",
+                "detail",
+                "registry_sha256",
+                "reason_code_map_sha256"
+            ],
+            "properties": {
+                "service": {
+                    "type": "string"
+                },
+                "source": {
+                    "description": "Which piece of evidence decided the service.",
+                    "type": "string",
+                    "enum": [
+                        "consumer_group",
+                        "flow_stage",
+                        "original_topic",
+                        "java_package",
+                        "source_topic",
+                        "reason_code_docs",
+                        "none"
+                    ]
+                },
+                "matched": {
+                    "description": "The value that decided it, e.g. the stage or the Java frame.",
+                    "type": ["string", "null"]
+                },
+                "conflict": {
+                    "description": "Other evidence that named a different service, as {source: service}. Null when nothing disagreed.",
+                    "type": ["object", "null"],
+                    "additionalProperties": {
+                        "type": "string"
+                    }
+                },
+                "detail": {
+                    "title": "DltServiceResolutionDetail",
+                    "description": "The values the resolution looked at.",
+                    "type": "object",
+                    "properties": {
+                        "consumer_group": {
+                            "type": ["string", "null"]
+                        },
+                        "original_topic": {
+                            "type": ["string", "null"]
+                        },
+                        "stage": {
+                            "type": ["string", "null"]
+                        },
+                        "sub_stage": {
+                            "type": ["string", "null"]
+                        },
+                        "source_topic": {
+                            "type": ["string", "null"]
+                        },
+                        "java_frame": {
+                            "type": ["string", "null"]
+                        },
+                        "reason_code": {
+                            "type": ["string", "null"]
+                        }
+                    }
+                },
+                "registry_sha256": {
+                    "description": "Digest of the service registry that was used, sha256:<hex>.",
+                    "type": ["string", "null"]
+                },
+                "reason_code_map_sha256": {
+                    "description": "Always null for a dead-lettered record.",
+                    "type": ["string", "null"]
+                }
+            }
+        },
+        "DltFailure": {
+            "title": "DltFailure",
+            "description": "The failure, parsed from the stack trace in the dead-letter headers.",
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "class",
+                "class_reason",
+                "root_fqcn",
+                "business_code",
+                "registry_description",
+                "registry_category",
+                "registry_category_source",
+                "registry_stage",
+                "signature",
+                "fingerprint",
+                "fingerprint_service",
+                "frames",
+                "truncated"
+            ],
+            "properties": {
+                "class": {
+                    "description": "A business exception, B code defect, C technical failure, U unknown.",
+                    "type": "string",
+                    "enum": ["A", "B", "C", "U"]
+                },
+                "class_reason": {
+                    "description": "Why the record got that class.",
+                    "type": "string"
+                },
+                "root_fqcn": {
+                    "description": "Fully qualified class of the root exception. Null when the stack trace could not be parsed.",
+                    "type": ["string", "null"]
+                },
+                "business_code": {
+                    "description": "The error code in the exception message, e.g. UID_ORIGIN_TRACKER_DATA_NOT_FOUND.",
+                    "type": ["string", "null"]
+                },
+                "registry_description": {
+                    "description": "The code's published description. Null when the code is not in the catalog.",
+                    "type": ["string", "null"]
+                },
+                "registry_category": {
+                    "description": "The code's category in the catalog: BUSINESS_VALIDATION_ERROR, BUSINESS_EXCEPTION or TECHNICAL_EXCEPTION. Empty when the catalog has none for the code; null when the code is not in it.",
+                    "type": ["string", "null"]
+                },
+                "registry_category_source": {
+                    "description": "declared or inferred. Empty or null as for registry_category.",
+                    "type": ["string", "null"]
+                },
+                "registry_stage": {
+                    "description": "The catalog's stage for the code, e.g. PostEnrolment. Empty or null as for registry_category.",
+                    "type": ["string", "null"]
+                },
+                "signature": {
+                    "description": "Human-readable label for the failure mode, e.g. BusinessException[CODE] @ Class.method.",
+                    "type": "string"
+                },
+                "fingerprint": {
+                    "description": "Identity of the failure mode: 64 lowercase hex characters. Records with the same fingerprint share a group.",
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                },
+                "fingerprint_service": {
+                    "description": "The service the fingerprint is namespaced by. Null for enu-biometric and unresolved records.",
+                    "type": ["string", "null"]
+                },
+                "frames": {
+                    "description": "Application stack frames, failure site first, as package.Class.method without line numbers.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "truncated": {
+                    "description": "true when the stack trace in the header was cut short.",
+                    "type": "boolean"
+                }
+            }
+        },
+        "DltEvidence": {
+            "title": "DltEvidence",
+            "description": "Whether the logs agree with the stack trace.",
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "corroboration",
+                "corroboration_reason",
+                "citations",
+                "unexplained_exceptions",
+                "could_not_look",
+                "log_window",
+                "gaps"
+            ],
+            "properties": {
+                "corroboration": {
+                    "description": "CORROBORATED: the logs show the declared exception. PARTIAL: they show it, plus errors it does not explain. CONTRADICTED: they show a different failure instead. UNVERIFIABLE: no usable logs.",
+                    "type": "string",
+                    "enum": ["CORROBORATED", "PARTIAL", "CONTRADICTED", "UNVERIFIABLE"]
+                },
+                "corroboration_reason": {
+                    "type": "string"
+                },
+                "citations": {
+                    "description": "Log lines the verdict rests on, verbatim, at most 20.",
+                    "type": "array",
+                    "maxItems": 20,
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "unexplained_exceptions": {
+                    "description": "Exception classes in the packet's own error lines that the stack trace does not explain.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "could_not_look": {
+                    "description": "true when logs could not be read at all; false when they were read, even if they held nothing.",
+                    "type": "boolean"
+                },
+                "log_window": {
+                    "description": "The time window searched, as text: <start> .. <end> (anchored on <time>, age <hours>h). Null when there was none.",
+                    "type": ["string", "null"]
+                },
+                "gaps": {
+                    "description": "Why the log evidence is weaker than usual. Empty when nothing was missing.",
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": [
+                            "REFID_KEY_PAYLOAD_MISMATCH",
+                            "NO_CORRELATION_ID",
+                            "NO_TIMESTAMP",
+                            "LOGS_TOO_OLD",
+                            "LOG_FETCH_FAILED"
+                        ]
+                    }
+                }
+            }
+        },
+        "DltFinding": {
+            "title": "DltFinding",
+            "description": "What the analysis concluded.",
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["narrative", "recommendation", "action"],
+            "properties": {
+                "narrative": {
+                    "description": "What the evidence shows, in plain language.",
+                    "type": "string"
+                },
+                "discrepancy": {
+                    "description": "How the logs disagree with the stack trace. Only set when evidence.corroboration is CONTRADICTED or PARTIAL; null otherwise.",
+                    "type": ["string", "null"]
+                },
+                "recommendation": {
+                    "description": "What a person should do.",
+                    "type": "string"
+                },
+                "action": {
+                    "description": "Who should handle it. NO_ACTION is the only action that ends in packet_status COMPLETED.",
+                    "type": "string",
+                    "enum": [
+                        "NEEDS_MANUAL_REVIEW",
+                        "ROUTE_TO_DEV",
+                        "REDRIVE_AFTER_RECOVERY",
+                        "DATA_FIX_REQUIRED",
+                        "NO_ACTION"
+                    ]
+                },
+                "reviewer_approved": {
+                    "description": "Whether the Reviewer approved the investigation. Null when no Reviewer ran (a fixed treatment).",
+                    "type": ["boolean", "null"]
+                },
+                "per_code_violations": {
+                    "description": "Present only when provenance.source is agent: packet-specific text found in a finding that is cached for the whole failure mode. Empty when clean.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/DltPerCodeViolation"
+                    }
+                },
+                "parse_error": {
+                    "description": "Present only when provenance.source is failed_synthesis: why the analysis output failed validation.",
+                    "type": "string"
+                }
+            }
+        },
+        "DltPerCodeViolation": {
+            "title": "DltPerCodeViolation",
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["pattern", "severity", "field", "text"],
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "enum": ["uuid", "long_number", "this_packet", "source_line"]
+                },
+                "severity": {
+                    "description": "identifier keeps the finding out of the cache; phrasing is only counted.",
+                    "type": "string",
+                    "enum": ["identifier", "phrasing"]
+                },
+                "field": {
+                    "description": "The finding field the text was found in.",
+                    "type": "string",
+                    "enum": ["narrative", "recommendation", "discrepancy"]
+                },
+                "text": {
+                    "description": "The matched text.",
+                    "type": "string"
+                }
+            }
+        },
+        "DltConfidence": {
+            "title": "DltConfidence",
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["score", "ceilings_applied", "abstained"],
+            "properties": {
+                "score": {
+                    "description": "0 to 1, after every cap. Null when no model produced the finding (a fixed treatment).",
+                    "type": ["number", "null"],
+                    "minimum": 0,
+                    "maximum": 1
+                },
+                "ceilings_applied": {
+                    "description": "Every cap this case triggered, not only the lowest. Empty when none applied.",
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": [
+                            "class_b",
+                            "class_u",
+                            "unverifiable",
+                            "logs_unavailable",
+                            "logs_silent",
+                            "contradicted",
+                            "registry_miss",
+                            "unreviewed",
+                            "evidence_gap",
+                            "reuse_decay"
+                        ]
+                    }
+                },
+                "abstained": {
+                    "type": "boolean"
+                }
+            }
+        },
+        "DltProvenance": {
+            "title": "DltProvenance",
+            "description": "How the finding was produced.",
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "source",
+                "reuse_decision",
+                "reuse_reason",
+                "group_fingerprint",
+                "group_occurrences",
+                "group_state",
+                "recommendation_state",
+                "single_flight",
+                "service_pack"
+            ],
+            "properties": {
+                "source": {
+                    "description": "agent: the agents investigated. canned: a fixed treatment for class B, C or U. group_reuse: the cached finding for this failure mode was reused. failed_synthesis: the agents' output failed validation.",
+                    "type": "string",
+                    "enum": ["agent", "canned", "group_reuse", "failed_synthesis"]
+                },
+                "reuse_decision": {
+                    "type": "string",
+                    "enum": ["LLM_REQUIRED", "REUSE_GROUP", "CANNED"]
+                },
+                "reuse_reason": {
+                    "type": "string"
+                },
+                "group_fingerprint": {
+                    "description": "Same as failure.fingerprint.",
+                    "type": "string"
+                },
+                "group_occurrences": {
+                    "description": "How many records of this failure mode have been seen, this one included. Null when the group could not be read.",
+                    "type": ["integer", "null"]
+                },
+                "group_state": {
+                    "description": "Whether this record was counted in its group.",
+                    "type": "string",
+                    "enum": ["ok", "occurrence_not_recorded", "unavailable"]
+                },
+                "recommendation_state": {
+                    "description": "What happened to this finding in the failure-mode cache.",
+                    "type": "string",
+                    "enum": ["none", "draft", "final", "unpersisted", "withheld", "per_occurrence"]
+                },
+                "single_flight": {
+                    "description": "How this record waited on a concurrent investigation of the same failure mode. Null when it did not need to.",
+                    "type": ["string", "null"],
+                    "enum": ["leader", "reused", "waited_then_ran", "timeout", null]
+                },
+                "service_pack": {
+                    "$ref": "#/definitions/DltServicePack"
+                }
+            }
+        },
+        "DltServicePack": {
+            "title": "DltServicePack",
+            "description": "The service pack the agents were built from.",
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["service", "sha256"],
+            "properties": {
+                "service": {
+                    "description": "Pack name, e.g. enu-biometric. Null when the record was analysed without a pack.",
+                    "type": ["string", "null"]
+                },
+                "sha256": {
+                    "description": "Digest of the pack, sha256:<hex>.",
+                    "type": ["string", "null"]
+                }
+            }
+        },
+        "DltCodeCheck": {
+            "title": "DltCodeCheck",
+            "description": "Whether the code at the failure site has changed since the record failed, and whether that change is running. UNKNOWN when the check is off or could not decide.",
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "verdict",
+                "reason",
+                "repo",
+                "path",
+                "paths_checked",
+                "frames_resolved",
+                "frames_unmapped",
+                "branch",
+                "baseline_version",
+                "running_version",
+                "required_version",
+                "candidates",
+                "frames_examined",
+                "checked_at"
+            ],
+            "properties": {
+                "verdict": {
+                    "type": "string",
+                    "enum": ["NO_CHANGE", "NOT_DEPLOYED", "FIX_DEPLOYED", "UNKNOWN"]
+                },
+                "reason": {
+                    "type": "string"
+                },
+                "repo": {
+                    "description": "Repository of the failure site, as PROJECT/repo.",
+                    "type": ["string", "null"]
+                },
+                "path": {
+                    "description": "Source file of the failure site.",
+                    "type": ["string", "null"]
+                },
+                "paths_checked": {
+                    "description": "Every source file checked, failure site first.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "frames_resolved": {
+                    "type": "integer"
+                },
+                "frames_unmapped": {
+                    "type": "integer"
+                },
+                "branch": {
+                    "type": ["string", "null"]
+                },
+                "baseline_version": {
+                    "description": "The build that was running when the record failed.",
+                    "type": ["string", "null"]
+                },
+                "running_version": {
+                    "description": "The build running when the check ran.",
+                    "type": ["string", "null"]
+                },
+                "required_version": {
+                    "description": "The earliest version carrying every change found.",
+                    "type": ["string", "null"]
+                },
+                "candidates": {
+                    "description": "Commits that touched the call path since the record failed.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/DltCodeCheckCandidate"
+                    }
+                },
+                "frames_examined": {
+                    "type": "integer"
+                },
+                "checked_at": {
+                    "description": "When the check ran, Unix epoch seconds with a fraction. 0 when it never ran.",
+                    "type": "number"
+                },
+                "details": {
+                    "description": "Optional extra detail. Usually absent.",
+                    "type": "object",
+                    "additionalProperties": true
+                }
+            }
+        },
+        "DltCodeCheckCandidate": {
+            "title": "DltCodeCheckCandidate",
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["commit", "subject", "path", "timestamp_ms", "first_containing_version", "resolved_by"],
+            "properties": {
+                "commit": {
+                    "description": "Short commit id.",
+                    "type": "string"
+                },
+                "subject": {
+                    "description": "Commit subject, at most 120 characters.",
+                    "type": "string"
+                },
+                "path": {
+                    "type": "string"
+                },
+                "timestamp_ms": {
+                    "description": "Commit time, Unix epoch milliseconds.",
+                    "type": ["integer", "null"]
+                },
+                "first_containing_version": {
+                    "type": ["string", "null"]
+                },
+                "resolved_by": {
+                    "description": "How first_containing_version was determined.",
+                    "type": "string"
+                }
+            }
+        },
+        "DltReplay": {
+            "title": "DltReplay",
+            "description": "Whether an automatic replay was attempted, and why or why not.",
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["attempted", "reason", "queued", "result"],
+            "properties": {
+                "attempted": {
+                    "type": "boolean"
+                },
+                "reason": {
+                    "type": "string"
+                },
+                "queued": {
+                    "description": "true when the replay was accepted.",
+                    "type": "boolean"
+                },
+                "result": {
+                    "description": "What the replay call returned. Null when none was attempted.",
+                    "type": ["string", "null"]
+                },
+                "args": {
+                    "$ref": "#/definitions/DltReplayArgs"
+                }
+            },
+            "if": {
+                "properties": {
+                    "attempted": {
+                        "const": true
+                    }
+                }
+            },
+            "then": {
+                "required": ["args"]
+            }
+        },
+        "DltReplayArgs": {
+            "title": "DltReplayArgs",
+            "description": "Present only when a replay was attempted: the request sent to the replay service. Null when there was no refId to send.",
+            "type": ["object", "null"],
+            "additionalProperties": false,
+            "required": ["id", "idType", "priority", "operatorName", "category", "fromSedaStart"],
+            "properties": {
+                "id": {
+                    "type": "string"
+                },
+                "idType": {
+                    "type": "string"
+                },
+                "priority": {
+                    "type": "integer"
+                },
+                "operatorName": {
+                    "type": "string"
+                },
+                "category": {
+                    "type": "string"
+                },
+                "fromSedaStart": {
+                    "type": "boolean"
+                }
+            }
+        },
+        "DltParked": {
+            "title": "DltParked",
+            "description": "Whether a replay was parked until a fix deploys, and why or why not.",
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["parked", "reason"],
+            "properties": {
+                "parked": {
+                    "type": "boolean"
+                },
+                "reason": {
+                    "type": "string"
+                },
+                "required_version": {
+                    "description": "Present only when parked is true: the version the pods must reach before the replay is released.",
+                    "type": ["string", "null"]
+                }
+            },
+            "if": {
+                "properties": {
+                    "parked": {
+                        "const": true
+                    }
+                }
+            },
+            "then": {
+                "required": ["required_version"]
+            }
+        },
+        "DltPacketStatus": {
+            "title": "DltPacketStatus",
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["status"],
+            "properties": {
+                "status": {
+                    "description": "COMPLETED when finding.action is NO_ACTION, NEEDS_MANUAL_REVIEW for any other action, FAILED_TIMEOUT when the analysis ran out of time.",
+                    "type": "string",
+                    "enum": ["COMPLETED", "NEEDS_MANUAL_REVIEW", "FAILED_TIMEOUT"]
+                }
+            }
+        },
+        "DltCasebookMetadata": {
+            "title": "DltCasebookMetadata",
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["last_updated"],
+            "properties": {
+                "last_updated": {
+                    "description": "When the file was last saved. UTC, to the second, e.g. 2026-10-14T07:12:41Z.",
+                    "type": "string",
+                    "format": "date-time"
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,138 @@
+{
+    "schema_version": "1.4",
+    "case_id": "dlt-ENU.UPDATE.CHECKER.COMPLETION.V1-63-3352-gefa4d880fe",
+    "detected_at": 1791961961.873,
+    "source": {
+        "original_topic": "ENU.UPDATE.CHECKER.COMPLETION.V1",
+        "partition": 63,
+        "offset": 3352,
+        "consumer_group": "enu-biodedup-cg",
+        "attempts": 5,
+        "original_timestamp": 1791960072304,
+        "last_attempt_timestamp": 1791961127119,
+        "anchor_is_fallback": false,
+        "type_id": "com.uidai.enu.common.model.EventMessage"
+    },
+    "packet": {
+        "ref_id": "6f1d2c3a-8b4e-4f7a-9c21-5d3e7a9b0c14",
+        "ref_id_source": "contract",
+        "record_key": "6f1d2c3a-8b4e-4f7a-9c21-5d3e7a9b0c14",
+        "payload_ref_id_conflict": null,
+        "event_id": "6f1d2c3a-8b4e-4f7a-9c21-5d3e7a9b0c14",
+        "service": "enu-biometric",
+        "service_resolution": {
+            "service": "enu-biometric",
+            "source": "flow_stage",
+            "matched": "Biometric",
+            "conflict": null,
+            "detail": {
+                "consumer_group": "enu-biodedup-cg",
+                "original_topic": "ENU.UPDATE.CHECKER.COMPLETION.V1",
+                "stage": "Biometric",
+                "sub_stage": null,
+                "source_topic": null,
+                "java_frame": "com.uidai.enu.biometric.service.impl.BioDataBaseHelperServiceImpl.getUidOriginTrackerData",
+                "reason_code": "UID_ORIGIN_TRACKER_DATA_NOT_FOUND"
+            },
+            "registry_sha256": "sha256:5298295601ae2ed3773e2a706a97ea55d62d5e318cbe2cafc6e4981dec701135",
+            "reason_code_map_sha256": null
+        }
+    },
+    "failure": {
+        "class": "A",
+        "class_reason": "business exception carrying code UID_ORIGIN_TRACKER_DATA_NOT_FOUND",
+        "root_fqcn": "in.gov.uidai.common.exception.BusinessException",
+        "business_code": "UID_ORIGIN_TRACKER_DATA_NOT_FOUND",
+        "registry_description": "UidOriginTracker data not found for update request",
+        "registry_category": "BUSINESS_EXCEPTION",
+        "registry_category_source": "declared",
+        "registry_stage": "PostEnrolment",
+        "signature": "BusinessException[UID_ORIGIN_TRACKER_DATA_NOT_FOUND] @ BioDataBaseHelperServiceImpl.getUidOriginTrackerData",
+        "fingerprint": "2bc62d82761a7f19593aea92c2eef08e51bf481bef517aa8883eef61b51ee57b",
+        "fingerprint_service": null,
+        "frames": [
+            "com.uidai.enu.biometric.service.impl.BioDataBaseHelperServiceImpl.getUidOriginTrackerData",
+            "com.uidai.enu.biometric.service.impl.BioDeDuplicationServiceImpl.filterCandidatesAndBuildRefIdUidMap",
+            "com.uidai.enu.biometric.service.impl.BioDeDuplicationServiceImpl.prepareMDDPB0Request",
+            "com.uidai.enu.biometric.service.impl.BioDeDuplicationServiceImpl.processingAndHandlingPB0Preprocessing",
+            "com.uidai.enu.biometric.service.impl.BioDeDuplicationServiceImpl.processUpdateCheckerResponse",
+            "com.uidai.enu.biometric.messagingQueue.consumer.UpdateCheckerResponseConsumer.processPayload",
+            "com.uidai.enu.biometric.messagingQueue.consumer.AbstractBaseConsumer.lambda$executeConsumption$0"
+        ],
+        "truncated": false
+    },
+    "evidence": {
+        "corroboration": "CORROBORATED",
+        "corroboration_reason": "the declared root appears in the logs (matched on its fqcn)",
+        "citations": [
+            "*** [2026-10-14T12:28:47.081734512+05:30] [enu-biometric@enu-biometric-biodedup-7c9f6d5b8-q2xkp] [ERROR] Error while processing update checker response for refId 6f1d2c3a-8b4e-4f7a-9c21-5d3e7a9b0c14: in.gov.uidai.common.exception.BusinessException: [UID_ORIGIN_TRACKER_DATA_NOT_FOUND] UidOriginTracker data not found for update request",
+            "*** [2026-10-14T12:28:47.093518206+05:30] [enu-biometric@enu-biometric-biodedup-7c9f6d5b8-q2xkp] [ERROR] Consumption failed for refId 6f1d2c3a-8b4e-4f7a-9c21-5d3e7a9b0c14 after 5 attempts; handing the record to the DLT"
+        ],
+        "unexplained_exceptions": [],
+        "could_not_look": false,
+        "log_window": "2026-10-14T06:53:47.119000+00:00 .. 2026-10-14T07:00:47.119000+00:00 (anchored on 2026-10-14T06:58:47.119000+00:00, age 0.3h)",
+        "gaps": []
+    },
+    "finding": {
+        "narrative": "The biometric de-duplication consumer failed while building the candidate refId-to-UID map for an update request: BioDataBaseHelperServiceImpl.getUidOriginTrackerData found no UidOriginTracker row for one of the matched candidates and raised BusinessException [UID_ORIGIN_TRACKER_DATA_NOT_FOUND]. The service documentation lists this code as a business exception on the PostEnrolment (Bio Fraud) path: the lookup treats an absent origin-tracker row as fatal, so every retry fails the same way until the row exists. The logs corroborate the trace: the same exception and code appear on the failing consumer's ERROR line inside the retry window, with no other error for the packet.",
+        "discrepancy": null,
+        "recommendation": "Check UidOriginTracker for the candidate UIDs the update request matched and backfill the missing origin-tracker row from the source enrolment. Redrive the dead-lettered record only after the row exists; a redrive before that reproduces the same dead letter.",
+        "action": "DATA_FIX_REQUIRED",
+        "reviewer_approved": true,
+        "per_code_violations": []
+    },
+    "confidence": {
+        "score": 0.8,
+        "ceilings_applied": [],
+        "abstained": false
+    },
+    "provenance": {
+        "source": "agent",
+        "reuse_decision": "LLM_REQUIRED",
+        "reuse_reason": "novel fingerprint; no recommendation on file for this group",
+        "group_fingerprint": "2bc62d82761a7f19593aea92c2eef08e51bf481bef517aa8883eef61b51ee57b",
+        "group_occurrences": 1,
+        "group_state": "ok",
+        "recommendation_state": "draft",
+        "single_flight": "leader",
+        "service_pack": {
+            "service": "enu-biometric",
+            "sha256": "sha256:3a22026ede03bf903370d4bc95ae6c30261264aa546a6af01d9fb9981af8f1ce"
+        }
+    },
+    "code_check": {
+        "verdict": "NO_CHANGE",
+        "reason": "nothing on release has touched any of the 2 file(s) on this call path since the packet failed, so a replay reproduces the same dead letter",
+        "repo": "ENU/enu-biometric",
+        "path": "src/main/java/com/uidai/enu/biometric/service/impl/BioDataBaseHelperServiceImpl.java",
+        "paths_checked": [
+            "src/main/java/com/uidai/enu/biometric/service/impl/BioDataBaseHelperServiceImpl.java",
+            "src/main/java/com/uidai/enu/biometric/service/impl/BioDeDuplicationServiceImpl.java"
+        ],
+        "frames_resolved": 5,
+        "frames_unmapped": 0,
+        "branch": "release",
+        "baseline_version": "2.14.3",
+        "running_version": "2.14.3",
+        "required_version": null,
+        "candidates": [],
+        "frames_examined": 5,
+        "checked_at": 1791961862.415
+    },
+    "replay": {
+        "attempted": false,
+        "reason": "DLT_AUTO_REPLAY_ENABLED is off",
+        "queued": false,
+        "result": null
+    },
+    "parked": {
+        "parked": false,
+        "reason": "DLT_CODE_CHECK_PARK_ENABLED is off"
+    },
+    "packet_status": {
+        "status": "NEEDS_MANUAL_REVIEW"
+    },
+    "casebook_metadata": {
+        "last_updated": "2026-10-14T07:12:41Z"
+    }
+}

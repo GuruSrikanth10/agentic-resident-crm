@@ -84,6 +84,16 @@ PACKET_DURATION = _histogram(
     buckets=(1, 5, 15, 30, 60, 120, 180, 300, 450, 600, float("inf")),
 )
 
+# A casebook about to be saved that does not match its published contract
+# (src/models/casebook.py). Any count at all is a bug in a casebook writer.
+CASEBOOK_CONTRACT_VIOLATIONS = _counter(
+    "agentic_resident_crm_casebook_contract_violations_total",
+    "Casebooks that did not match their published contract when they were "
+    "about to be saved, by lane (rejection, dlt) and by what happened: "
+    "refused (CASEBOOK_CONTRACT_MODE=enforce) or saved (record).",
+    ("lane", "outcome"),
+)
+
 # Services (MULTI_SERVICE_PLAN.md D1, D5) ----------------------------
 # The `service` label is bounded by the registry and the reason-code
 # documentation files: a resolution only ever names one of those, or
@@ -322,6 +332,10 @@ def record_dlt_group_write(operation: str, ok: bool) -> None:
 def record_packet_claim(outcome: str) -> None:
     if PACKET_CLAIMS is not None:
         PACKET_CLAIMS.labels(outcome=outcome).inc()
+
+
+def record_casebook_contract_violation(lane: str, outcome: str) -> None:
+    CASEBOOK_CONTRACT_VIOLATIONS.labels(lane=lane, outcome=outcome).inc()
 
 
 def record_service_resolution(resolution: dict) -> None:

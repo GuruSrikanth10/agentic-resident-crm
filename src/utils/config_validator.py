@@ -83,6 +83,22 @@ def _prompt_source_errors() -> list:
     return errors
 
 
+def _casebook_contract_errors() -> list:
+    """Validation errors for CASEBOOK_CONTRACT_MODE (src/models/casebook.py).
+    Pure, like `_prompt_source_errors`.
+
+    An unknown mode is enforced rather than ignored (`contract_mode`), so a
+    typo cannot switch the check off; it is still a typo, and said so here.
+    """
+    from src.models.casebook import ENV_MODE, MODES
+
+    mode = os.environ.get(ENV_MODE, "").strip().lower()
+    if mode and mode not in MODES:
+        return [f"Unknown {ENV_MODE} '{mode}'; expected "
+                f"{' or '.join(repr(name) for name in MODES)}."]
+    return []
+
+
 def validate_config():
     """Fail-fast startup check to ensure required configurations and permissions are valid."""
     errors = []
@@ -133,6 +149,8 @@ def validate_config():
         errors.append(
             f"Unknown CASEBOOK_STORAGE_BACKEND '{backend}'; expected 'local' or 's3'."
         )
+
+    errors.extend(_casebook_contract_errors())
 
     checkpoint_backend = os.environ.get("CHECKPOINT_BACKEND", "sqlite").strip().lower()
     if checkpoint_backend == "postgres":

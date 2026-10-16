@@ -55,6 +55,10 @@ langfuse==4.17.0
 
 # --- Test ---
 pytest==9.1.1
+# Validates casebooks against the published JSON Schema in casebook_structures/
+# (tests/test_casebook_contract.py). Already installed with mcp; pinned so the
+# contract tests do not depend on mcp keeping it.
+jsonschema==4.26.0
 
 # Optional: only needed for CHECKPOINT_BACKEND=postgres (multi-replica).
 # langgraph-checkpoint-postgres

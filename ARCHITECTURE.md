@@ -2251,6 +2251,22 @@ suggests. `sid` replaced the earlier `eid` key: the event id is already the
 directory name and the `status.json` stub's `packet_metadata.eid`, while `sid`
 is the payload identifier downstream systems actually join on.
 
+**The casebook contract.** This shape, and the DLT casebook's (section 4.4),
+are published to the services that read casebooks as JSON Schema --
+`casebook_structures/rejection_casebook.schema.json` and
+`dlt_casebook.schema.json`, each with an example beside it -- and enforced by
+pydantic models of the same contract (`src/models/casebook.py`,
+`src/models/dlt_casebook.py`). Every casebook is saved through
+`save_rejection_casebook` or `save_dlt_casebook`, which check it first; nothing
+else in `src/` calls `save_terminal`. One that breaks the contract is not saved
+(`CASEBOOK_CONTRACT_MODE=enforce`, the default): the request fails, and the
+consumer dead-letters the packet to be replayed once the writer is fixed.
+`record` saves it as it is and logs the violation instead. Both count it in
+`agentic_resident_crm_casebook_contract_violations_total`.
+`tests/test_casebook_contract.py` holds the models and the published schemas to
+each other -- every field, type, null and allowed value -- and every writer to
+the models, so a change to the shape changes both, with the schema version.
+
 ### 3.9 Runbook Pipeline
 For repeated rejections, the system implements a Runbook pattern to short-circuit the multi-minute LLM loop.
 - **Drafting (Offline)**: `build_runbooks.py` mines `local_casesheets/` for completed resolutions sharing the same service, `errorReasonCode` and `enrolmentType` (section 3.2.3, Phase 5). It uses a strictly prompted LLM (the `simple` tier) to synthesize a generic resolution template that contains zero packet-specific values (enforced by a regex validator checking for UUIDs, dates, SRNs, etc.). The result is saved to `src/runbooks/draft/<service>/`, as schema 1.2 with the service and its binding.

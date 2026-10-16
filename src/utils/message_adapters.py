@@ -72,7 +72,8 @@ class MessageAdapter(Protocol):
         ...
 
     def save_terminal(self, identity: str, casebook: dict) -> None:
-        """Persist a terminal casebook to this role's own store."""
+        """Persist a terminal casebook to this role's own store, once it has
+        passed the casebook contract (src/models/casebook.py)."""
         ...
 
 
@@ -137,10 +138,11 @@ class RejectionAdapter:
         }
 
     def save_terminal(self, identity: str, casebook: dict) -> None:
+        from src.models.casebook import save_rejection_casebook
         from src.storage.factory import get_casebook_storage
         from src.utils.case_cleanup import cleanup_casebook_dir
 
-        get_casebook_storage().save_terminal(identity, casebook)
+        save_rejection_casebook(get_casebook_storage(), identity, casebook)
         cleanup_casebook_dir(identity)
 
 
@@ -295,9 +297,10 @@ class DltAdapter:
 
     def save_terminal(self, identity: str, casebook: dict) -> None:
         from src.dlt.case_storage import get_dlt_storage
+        from src.models.dlt_casebook import save_dlt_casebook
         from src.utils.case_cleanup import cleanup_casebook_dir
 
-        get_dlt_storage().save_terminal(identity, casebook)
+        save_dlt_casebook(get_dlt_storage(), identity, casebook)
         cleanup_casebook_dir(identity)
 
 

@@ -46,6 +46,8 @@ DLT_GROUPS_ROOT_NAME = "dlt_groups"
 #     consumer's -- are now this schema, with `case_id` the DLT case id and
 #     the refId under `packet`; the consumer's was a rejection-shaped record
 #     stamped with the rejection schema version.
+# The shape itself is src/models/dlt_casebook.py, published to readers as
+# casebook_structures/dlt_casebook.schema.json: a bump changes all three.
 DLT_CASEBOOK_SCHEMA_VERSION = "1.4"
 
 

@@ -1,0 +1,107 @@
+{
+    "casebook_metadata": {
+        "created_at": "2026-10-14T07:02:18Z",
+        "last_updated": "2026-10-14T07:02:18Z"
+    },
+    "packet_metadata": {
+        "srn": null,
+        "sid": "S118204417733020261013114207",
+        "ref_id": "b7c41e52-3d9a-4f60-8e1b-2a5c9d7f4e83",
+        "source": "ENU.REJECTINT.PROCESS.COMPLETION.V1",
+        "packet_type": "UC",
+        "is_mbu": false,
+        "update_type": "N",
+        "is_child": null,
+        "created_at": "2026-10-13T11:42:07+05:30",
+        "rejected_at": "2026-10-14T06:31:44.912Z",
+        "service": "enu-biometric",
+        "service_resolution": {
+            "service": "enu-biometric",
+            "source": "reason_code_map",
+            "matched": "RESIDENT_MAN_DEDUP_REJECT_TD",
+            "conflict": null,
+            "detail": {
+                "stage": "REJECTINTERCEPTOR",
+                "sub_stage": null,
+                "source_topic": "ENU.REJECTINT.PROCESS.COMPLETION.V1",
+                "reason_code": "RESIDENT_MAN_DEDUP_REJECT_TD"
+            },
+            "registry_sha256": "sha256:5298295601ae2ed3773e2a706a97ea55d62d5e318cbe2cafc6e4981dec701135",
+            "reason_code_map_sha256": "sha256:c48d5578f4539271b7b40c7a0073c2226c95a157c628ac324913723c6d994cd6"
+        }
+    },
+    "packet_status": {
+        "status": "REJECTED",
+        "service": "REJECTINTERCEPTOR",
+        "sub_service": null,
+        "last_updated": "2026-10-14T07:02:18Z",
+        "is_in_process": false,
+        "rejection_data": {
+            "rejection_code": "RESIDENT_MAN_DEDUP_REJECT_TD",
+            "rejection_description": "The packet (eventId: b7c41e52-3d9a-4f60-8e1b-2a5c9d7f4e83) was rejected during new enrolment (enrolmentType 'N') biometric de-duplication. The CRE policy batch (MDD_POLICY_BATCH_1) rejected the applicant at 12:01:44 IST: candidate filtering found 2 True Duplicate (TD) candidates, where every non-demographic biometric modality (fingerprints and iris) matched an existing record, and they resolved to 1 unique EID. The reject-interceptor cache was populated with the matching EID (isUpdateCase=false), a DedupMatchingEidEvent was published to ENU.REJECTINT.SAVE.MATCHING.EID.V1, and the packet was terminally rejected with RESIDENT_MAN_DEDUP_REJECT_TD (17040). The logs are complete from 11:47:12 IST through the rejection, so the whole rejection decision is in view.",
+            "rejection_logs": {
+                "path": "fetched_logs.txt",
+                "gaps": null,
+                "coverage": "LOG COVERAGE: this packet's logs are complete from 2026-10-14T11:47:12+05:30 through its rejection at 2026-10-14T12:01:44+05:30. Lines it logged before 2026-10-14T11:47:12+05:30 may be missing: the pods no longer hold them all."
+            }
+        }
+    },
+    "resolution": {
+        "source": "agent",
+        "synthesis": "The resident attempted a new enrolment, but their fingerprints and iris matched an existing Aadhaar holder: 2 True Duplicate candidates resolved to 1 unique EID. The rejection was correct and prevents a duplicate Aadhaar being issued. The resident should retrieve their existing Aadhaar through the Regional Office rather than enrolling again.",
+        "action": "RO_APPROVAL",
+        "resident_action": "RO_APPLICATION",
+        "confidence": 0.85,
+        "abstained": false,
+        "provenance": {
+            "prompt_fingerprint": {
+                "agents/investigator-agent": 7,
+                "agents/log-filter-agent": 2,
+                "agents/reviewer-agent": 5,
+                "agents/synthesis-agent": 4,
+                "packs/enu-biometric/policy": 3,
+                "packs/enu-biometric/investigator": 2,
+                "packs/enu-biometric/reviewer": 2,
+                "packs/enu-biometric/synthesis": 2
+            },
+            "service_pack": {
+                "service": "enu-biometric",
+                "sha256": "sha256:3a22026ede03bf903370d4bc95ae6c30261264aa546a6af01d9fb9981af8f1ce"
+            },
+            "reason_code_doc": {
+                "outcome": "hit",
+                "reason_code": "RESIDENT_MAN_DEDUP_REJECT_TD",
+                "requested_type": "E",
+                "matched_type": "ANY",
+                "refs": [
+                    {
+                        "source": "services/enu-biometric.json",
+                        "kind": "code",
+                        "ref": "17040"
+                    }
+                ],
+                "sha256": "sha256:09f861491b24f7a4ee766665ff61aadeb5a617221e3e97fd23496e2b566c1f69",
+                "truncated": false,
+                "detail": null,
+                "scope": "own"
+            },
+            "investigator_path": "direct",
+            "reviewer_path": "direct",
+            "tool_calls": [
+                {
+                    "tool": "bio_get_packet_stage_summary",
+                    "args": {
+                        "refid": "b7c41e52-3d9a-4f60-8e1b-2a5c9d7f4e83"
+                    }
+                },
+                {
+                    "tool": "bio_get_abis_candidates",
+                    "args": {
+                        "refid": "b7c41e52-3d9a-4f60-8e1b-2a5c9d7f4e83"
+                    }
+                }
+            ]
+        }
+    },
+    "schema_version": "1.3"
+}

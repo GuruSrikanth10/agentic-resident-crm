@@ -13,6 +13,7 @@ from typing import Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, Security, Request, Response
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
+from src.models.casebook import CasebookContractError, save_rejection_casebook
 from src.models.schemas import EVENT_ID_PATTERN, MessagePayload
 from src.models.synthesis import parse_synthesis
 from src.utils import metrics
@@ -176,7 +177,7 @@ def drain_and_shutdown() -> None:
             try:
                 if storage.terminal_status(event_id):
                     continue
-                storage.save_terminal(event_id, {
+                save_rejection_casebook(storage, event_id, {
                     # When the run was abandoned: the redelivery takes over
                     # the packet claim the abandoned run still holds, and only
                     # a claim at least this old (packet_claims).
@@ -1069,7 +1070,7 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
             # Both files move together, so the consumer (and any later
             # redelivery) sees the same verdict whichever one it reads (F4).
             outcome["status"] = "FAILED_TIMEOUT"
-            await _off_loop(storage.save_terminal, event_id, {
+            await _off_loop(save_rejection_casebook, storage, event_id, {
                 "packet_metadata": {"eid": event_id},
                 "packet_status": {"status": "FAILED_TIMEOUT"},
                 "resolution": {"synthesis": f"Investigation exceeded the server-side budget of {agent_invoke_timeout_seconds}s."}
@@ -1098,7 +1099,7 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
         # status.json at IN_PROGRESS here previously left it stuck forever,
         # since only casebook.json was written (1.5).
         outcome["status"] = "DLQ"
-        await _off_loop(storage.save_terminal, event_id, {
+        await _off_loop(save_rejection_casebook, storage, event_id, {
             "packet_metadata": {"eid": event_id},
             "packet_status": {"status": "DLQ"},
             "resolution": {"synthesis": f"Failed with {type(e).__name__}: {str(e)}"}
@@ -1369,7 +1370,18 @@ async def _investigate_packet(signal: MessagePayload, outcome: dict):
 
     # casebook.json and status.json reach the terminal status together, so a
     # crash between them can't leave status.json stuck at IN_PROGRESS.
-    await _off_loop(storage.save_terminal, event_id, casebook_data)
+    #
+    # The casebook is checked against its published contract on the way
+    # (src/models/casebook.py). One that breaks it is refused, and the
+    # request fails, so the consumer dead-letters the packet to be replayed
+    # once the writer is fixed: the services that read casebooks never see
+    # a shape they were not promised.
+    try:
+        await _off_loop(save_rejection_casebook, storage, event_id, casebook_data)
+    except CasebookContractError:
+        outcome["status"] = "CONTRACT_VIOLATION"
+        _score_packet_status(trace_ref, "CONTRACT_VIOLATION")
+        raise
 
     from src.utils.case_cleanup import cleanup_casebook_dir
     cleanup_casebook_dir(event_id)

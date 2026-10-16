@@ -166,9 +166,13 @@ def test_a_corroborated_occurrence_is_never_auto_replayed_on_a_mis_cast(monkeypa
     with its trace."""
     monkeypatch.setenv("DLT_AUTO_REPLAY_ENABLED", "true")
     attempts = []
+    # The request `attempt` really sends: the casebook contract checks it.
     monkeypatch.setattr(dlt_routes.auto_replay, "attempt",
                         lambda case_key, ref_id: attempts.append(ref_id) or
-                        {"queued": True, "result": "ok", "args": {}})
+                        {"queued": True, "result": "ok", "args": {
+                            "id": ref_id, "idType": "REFID", "priority": 5,
+                            "operatorName": "dlt-analysis-auto",
+                            "category": "DLT_REDRIVE", "fromSedaStart": False}})
     first, second, third = (message(case_id=f"dlt-T-64-{n}", ref_id=f"REF-R{n}")
                             for n in range(3))
 

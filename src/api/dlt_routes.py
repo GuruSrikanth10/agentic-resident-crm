@@ -70,6 +70,7 @@ from src.dlt.window import derive_window
 from src.log_pipeline import redaction
 from src.log_pipeline import scope as log_scope
 from src.log_pipeline.pipeline import reduce_logs
+from src.models.dlt_casebook import save_dlt_casebook
 from src.models.dlt_payload_schemas import summarise_payload
 from src.models.dlt_schemas import DltMessage
 from src.models.dlt_synthesis import DltFinding, apply_dlt_confidence_policy
@@ -900,7 +901,7 @@ async def analyze_dlt(message: DltMessage):
                 log.error("DLT analysis exceeded the server-side budget",
                           timeout_seconds=budget, llm_seconds=round(llm_budget, 1),
                           state="FAILED_TIMEOUT")
-                await _off_loop(storage.save_terminal, key,
+                await _off_loop(save_dlt_casebook, storage, key,
                                 _timeout_casebook(message, budget))
                 from src.utils.case_cleanup import cleanup_casebook_dir
                 cleanup_casebook_dir(key)
@@ -1033,7 +1034,10 @@ async def analyze_dlt(message: DltMessage):
                     "recorded by another actor", recorded_status=recorded_status)
         return {"status": "already_processed", "case_id": case_id}
 
-    await _off_loop(storage.save_terminal, key, casebook)
+    # Checked against the published contract on the way, as the rejection
+    # lane's is (src/models/casebook.py): a casebook that breaks it is not
+    # saved, and the request fails so the consumer dead-letters the record.
+    await _off_loop(save_dlt_casebook, storage, key, casebook)
 
     from src.utils.case_cleanup import cleanup_casebook_dir
     cleanup_casebook_dir(key)

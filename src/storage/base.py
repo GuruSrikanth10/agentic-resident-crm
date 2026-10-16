@@ -9,6 +9,8 @@ from typing import Protocol, Optional
 #: stamped when the rejection was published); every timestamp names its zone
 #: (`utils/timestamps`); and `rejection_logs.coverage` and the optional
 #: `resolution.confidence_policy` are added.
+#: The shape itself is `src/models/casebook.py`, published to readers as
+#: casebook_structures/rejection_casebook.schema.json: a bump changes all three.
 CASEBOOK_SCHEMA_VERSION = "1.3"
 
 #: Verdicts an operator can attach to a resolution.

@@ -1,0 +1,630 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "RejectionCasebook",
+    "description": "casebook.json written for one rejected packet, schema_version 1.3. There are two shapes. A finished investigation (status REJECTED, NEEDS_MANUAL_REVIEW or FAILED_SYNTHESIS_PARSE) carries every block. A run that never finished (status FAILED_TIMEOUT, DLQ or FAILED_SHUTDOWN) is a short record holding only packet_metadata.eid, packet_status.status, resolution.synthesis, casebook_metadata.last_updated and schema_version.",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+        "schema_version",
+        "casebook_metadata",
+        "packet_metadata",
+        "packet_status",
+        "resolution"
+    ],
+    "properties": {
+        "schema_version": {
+            "description": "Version of this casebook shape. Older casebooks in the store may carry an earlier version with a different shape.",
+            "type": "string",
+            "const": "1.3"
+        },
+        "casebook_metadata": {
+            "$ref": "#/definitions/CasebookMetadata"
+        },
+        "packet_metadata": {
+            "$ref": "#/definitions/PacketMetadata"
+        },
+        "packet_status": {
+            "$ref": "#/definitions/PacketStatus"
+        },
+        "resolution": {
+            "$ref": "#/definitions/Resolution"
+        },
+        "pilot": {
+            "description": "Present, and true, only when the packet's service is analysed in pilot mode. Absent for every other casebook.",
+            "type": "boolean",
+            "const": true
+        }
+    },
+    "allOf": [
+        {
+            "if": {
+                "properties": {
+                    "packet_status": {
+                        "properties": {
+                            "status": {
+                                "enum": ["FAILED_TIMEOUT", "DLQ", "FAILED_SHUTDOWN"]
+                            }
+                        }
+                    }
+                }
+            },
+            "then": {
+                "properties": {
+                    "packet_metadata": {
+                        "required": ["eid"]
+                    },
+                    "resolution": {
+                        "required": ["synthesis"]
+                    }
+                }
+            },
+            "else": {
+                "properties": {
+                    "casebook_metadata": {
+                        "required": ["created_at", "last_updated"]
+                    },
+                    "packet_metadata": {
+                        "required": [
+                            "srn",
+                            "sid",
+                            "ref_id",
+                            "source",
+                            "packet_type",
+                            "is_mbu",
+                            "update_type",
+                            "is_child",
+                            "created_at",
+                            "rejected_at",
+                            "service",
+                            "service_resolution"
+                        ]
+                    },
+                    "packet_status": {
+                        "required": [
+                            "status",
+                            "service",
+                            "sub_service",
+                            "last_updated",
+                            "is_in_process",
+                            "rejection_data"
+                        ]
+                    },
+                    "resolution": {
+                        "required": [
+                            "source",
+                            "synthesis",
+                            "action",
+                            "resident_action",
+                            "confidence",
+                            "abstained",
+                            "provenance"
+                        ]
+                    }
+                }
+            }
+        },
+        {
+            "if": {
+                "properties": {
+                    "packet_status": {
+                        "properties": {
+                            "status": {
+                                "const": "FAILED_SYNTHESIS_PARSE"
+                            }
+                        }
+                    }
+                }
+            },
+            "then": {
+                "properties": {
+                    "resolution": {
+                        "required": ["parse_error", "raw_output"],
+                        "properties": {
+                            "action": {
+                                "const": "MANUAL_REVIEW"
+                            },
+                            "resident_action": {
+                                "const": "PENDING"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    ],
+    "definitions": {
+        "CasebookMetadata": {
+            "title": "CasebookMetadata",
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["last_updated"],
+            "properties": {
+                "created_at": {
+                    "description": "When the investigation finished and this casebook was written. UTC, to the second, e.g. 2026-10-14T07:02:18Z. Absent on the short records.",
+                    "type": "string",
+                    "format": "date-time"
+                },
+                "last_updated": {
+                    "description": "When the file was last saved. UTC, to the second. Stamped on every save.",
+                    "type": "string",
+                    "format": "date-time"
+                }
+            }
+        },
+        "PacketMetadata": {
+            "title": "PacketMetadata",
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "eid": {
+                    "description": "Short records only: the packet's eventId.",
+                    "type": "string"
+                },
+                "abandoned_at": {
+                    "description": "FAILED_SHUTDOWN records only: when the run was abandoned, Unix epoch seconds with a fraction.",
+                    "type": "number"
+                },
+                "srn": {
+                    "description": "packetMetaData.srn. Null for packets in the AUDIT contract, which does not carry it.",
+                    "type": ["string", "null"]
+                },
+                "sid": {
+                    "description": "The packet's sid.",
+                    "type": ["string", "null"]
+                },
+                "ref_id": {
+                    "description": "packetMetaData.refId. Equal to the eventId for packets in the AUDIT contract.",
+                    "type": ["string", "null"]
+                },
+                "source": {
+                    "description": "The payload's sourceTopic: the topic the rejection was published on.",
+                    "type": ["string", "null"]
+                },
+                "packet_type": {
+                    "description": "packetMetaData.pktSource, e.g. UC.",
+                    "type": ["string", "null"]
+                },
+                "is_mbu": {
+                    "description": "packetMetaData.isMBU. Only the AUDIT contract carries it; null otherwise.",
+                    "type": ["boolean", "null"]
+                },
+                "update_type": {
+                    "description": "packetMetaData.enrolmentType, e.g. N, E, U or Z.",
+                    "type": ["string", "null"]
+                },
+                "is_child": {
+                    "description": "Reserved. Always null today.",
+                    "type": ["boolean", "null"]
+                },
+                "created_at": {
+                    "description": "When the packet was created at the centre (the sid's date), ISO-8601 with the producers' UTC offset, e.g. 2026-10-13T11:42:07+05:30. A value that cannot be read as a time is kept as the producer wrote it.",
+                    "type": ["string", "null"]
+                },
+                "rejected_at": {
+                    "description": "When the rejection was published (the payload's eventTimestamp), ISO-8601 with its zone, e.g. 2026-10-14T06:31:44.912Z. A value that cannot be read as a time is kept as the producer wrote it.",
+                    "type": ["string", "null"]
+                },
+                "service": {
+                    "description": "The service the packet was resolved to, e.g. enu-biometric. _unresolved when nothing placed it.",
+                    "type": "string"
+                },
+                "service_resolution": {
+                    "$ref": "#/definitions/ServiceResolution"
+                }
+            }
+        },
+        "ServiceResolution": {
+            "title": "ServiceResolution",
+            "description": "How packet_metadata.service was decided.",
+            "type": "object",
+            "required": [
+                "service",
+                "source",
+                "matched",
+                "conflict",
+                "detail",
+                "registry_sha256",
+                "reason_code_map_sha256"
+            ],
+            "properties": {
+                "service": {
+                    "description": "Same value as packet_metadata.service.",
+                    "type": "string"
+                },
+                "source": {
+                    "description": "Which piece of evidence decided the service.",
+                    "type": "string",
+                    "enum": ["reason_code_map", "flow_stage", "source_topic", "reason_code_docs", "none"]
+                },
+                "matched": {
+                    "description": "The payload value that decided it: the reason code, the stage or the topic.",
+                    "type": ["string", "null"]
+                },
+                "conflict": {
+                    "description": "Other evidence that named a different service, as {source: service}. Null when nothing disagreed.",
+                    "type": ["object", "null"],
+                    "additionalProperties": {
+                        "type": "string"
+                    }
+                },
+                "detail": {
+                    "title": "ServiceResolutionDetail",
+                    "description": "The payload values the resolution looked at.",
+                    "type": "object",
+                    "properties": {
+                        "stage": {
+                            "type": ["string", "null"]
+                        },
+                        "sub_stage": {
+                            "type": ["string", "null"]
+                        },
+                        "source_topic": {
+                            "type": ["string", "null"]
+                        },
+                        "reason_code": {
+                            "type": ["string", "null"]
+                        }
+                    }
+                },
+                "registry_sha256": {
+                    "description": "Digest of the service registry that was used, sha256:<hex>.",
+                    "type": ["string", "null"]
+                },
+                "reason_code_map_sha256": {
+                    "description": "Digest of the reason-code service map that was used, sha256:<hex>.",
+                    "type": ["string", "null"]
+                }
+            }
+        },
+        "PacketStatus": {
+            "title": "PacketStatus",
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["status"],
+            "properties": {
+                "status": {
+                    "description": "REJECTED is copied from the packet's own packetStatus (the lane only analyses rejected packets). NEEDS_MANUAL_REVIEW when resolution.action is MANUAL_REVIEW. FAILED_SYNTHESIS_PARSE when the agents' output never passed validation. FAILED_TIMEOUT, DLQ and FAILED_SHUTDOWN mark a run that never finished.",
+                    "type": "string",
+                    "enum": [
+                        "REJECTED",
+                        "NEEDS_MANUAL_REVIEW",
+                        "FAILED_SYNTHESIS_PARSE",
+                        "FAILED_TIMEOUT",
+                        "DLQ",
+                        "FAILED_SHUTDOWN"
+                    ]
+                },
+                "service": {
+                    "description": "The payload's flowMetaData.stage, e.g. REJECTINTERCEPTOR. Not the service name; that is packet_metadata.service.",
+                    "type": ["string", "null"]
+                },
+                "sub_service": {
+                    "description": "The payload's flowMetaData.subStage.",
+                    "type": ["string", "null"]
+                },
+                "last_updated": {
+                    "description": "When the status was set. UTC, to the second.",
+                    "type": "string",
+                    "format": "date-time"
+                },
+                "is_in_process": {
+                    "description": "false when the packet's own packetStatus is REJECTED, otherwise null. Never true.",
+                    "type": ["boolean", "null"]
+                },
+                "rejection_data": {
+                    "$ref": "#/definitions/RejectionData"
+                }
+            }
+        },
+        "RejectionData": {
+            "title": "RejectionData",
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["rejection_code", "rejection_description", "rejection_logs"],
+            "properties": {
+                "rejection_code": {
+                    "description": "The first errorReasonCode in the payload's packetExecutionSummary.errorData, e.g. RESIDENT_MAN_DEDUP_REJECT_TD.",
+                    "type": ["string", "null"]
+                },
+                "rejection_description": {
+                    "description": "The investigation's technical account of why the packet was rejected.",
+                    "type": "string"
+                },
+                "rejection_logs": {
+                    "$ref": "#/definitions/RejectionLogs"
+                }
+            }
+        },
+        "RejectionLogs": {
+            "title": "RejectionLogs",
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "gaps", "coverage"],
+            "properties": {
+                "path": {
+                    "description": "Name of the log file stored beside this casebook: fetched_logs.txt, or filtered_logs.txt when the log filter ran. The literal text No logs found when no logs were fetched.",
+                    "type": "string"
+                },
+                "gaps": {
+                    "description": "The evidence-gaps banner (--- EVIDENCE GAPS ... --- END EVIDENCE GAPS ---), newline-separated, when part of the log window could not be read. Null otherwise.",
+                    "type": ["string", "null"]
+                },
+                "coverage": {
+                    "description": "The LOG COVERAGE line: from when the packet's logs are complete through its rejection. Null when there is none.",
+                    "type": ["string", "null"]
+                }
+            }
+        },
+        "Resolution": {
+            "title": "Resolution",
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["synthesis"],
+            "properties": {
+                "source": {
+                    "description": "agent, or runbook:<runbook_id>@v<version> when a stored runbook answered without the agents.",
+                    "type": "string",
+                    "pattern": "^(agent|runbook:.+)$"
+                },
+                "synthesis": {
+                    "description": "Plain-language summary of what happened and what should be done. On a short record, the reason the run did not finish.",
+                    "type": "string"
+                },
+                "action": {
+                    "description": "What operations should do.",
+                    "type": "string",
+                    "enum": [
+                        "REPLAY",
+                        "WHITELISTING",
+                        "QC_REPLAY",
+                        "RO_APPROVAL",
+                        "RESIDENT_PACKET_RESUBMIT",
+                        "MANUAL_REVIEW"
+                    ]
+                },
+                "resident_action": {
+                    "description": "What the resident must do. PENDING goes with MANUAL_REVIEW.",
+                    "type": "string",
+                    "enum": [
+                        "NEW_PACKET",
+                        "NEW_PACKET_WITH_DIFFERENT_ARTIFACTS",
+                        "RO_APPLICATION",
+                        "PENDING"
+                    ]
+                },
+                "confidence": {
+                    "description": "0 to 1, after any confidence cap. Null when no score was given.",
+                    "type": ["number", "null"],
+                    "minimum": 0,
+                    "maximum": 1
+                },
+                "abstained": {
+                    "description": "true when the confidence fell below the configured threshold and the packet was routed to manual review instead.",
+                    "type": "boolean"
+                },
+                "confidence_policy": {
+                    "$ref": "#/definitions/ConfidencePolicy"
+                },
+                "shadow": {
+                    "$ref": "#/definitions/ShadowComparison"
+                },
+                "parse_error": {
+                    "description": "FAILED_SYNTHESIS_PARSE only: why the agents' output failed validation.",
+                    "type": "string"
+                },
+                "raw_output": {
+                    "description": "FAILED_SYNTHESIS_PARSE only: the first 2000 characters of the invalid output.",
+                    "type": "string",
+                    "maxLength": 2000
+                },
+                "provenance": {
+                    "$ref": "#/definitions/Provenance"
+                }
+            }
+        },
+        "ConfidencePolicy": {
+            "title": "ConfidencePolicy",
+            "description": "Present only when a confidence cap or the abstention threshold changed the score.",
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["model_confidence", "detail"],
+            "properties": {
+                "model_confidence": {
+                    "description": "The score the model gave before it was changed.",
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                },
+                "detail": {
+                    "description": "What changed it and why.",
+                    "type": "string"
+                }
+            }
+        },
+        "ShadowComparison": {
+            "title": "ShadowComparison",
+            "description": "Present only when a runbook ran in shadow mode beside the agents: what the runbook would have decided.",
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["runbook_id", "action", "resident_action", "synthesis", "agreed"],
+            "properties": {
+                "runbook_id": {
+                    "type": "string"
+                },
+                "action": {
+                    "type": ["string", "null"]
+                },
+                "resident_action": {
+                    "type": ["string", "null"]
+                },
+                "synthesis": {
+                    "type": ["string", "null"]
+                },
+                "agreed": {
+                    "description": "Whether the runbook's action matches resolution.action.",
+                    "type": "boolean"
+                }
+            }
+        },
+        "Provenance": {
+            "title": "Provenance",
+            "description": "What produced this resolution.",
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "prompt_fingerprint",
+                "service_pack",
+                "reason_code_doc",
+                "investigator_path",
+                "reviewer_path",
+                "tool_calls"
+            ],
+            "properties": {
+                "prompt_fingerprint": {
+                    "description": "Which prompts the agents used. When prompts come from Langfuse (PROMPT_SOURCE=langfuse) it is an object of {Langfuse prompt name: version}, e.g. {\"agents/investigator-agent\": 7}. When they come from files it is a string, sha256:<hex>.",
+                    "type": ["object", "string"],
+                    "additionalProperties": {
+                        "type": "integer"
+                    },
+                    "pattern": "^sha256:[0-9a-f]{64}$"
+                },
+                "service_pack": {
+                    "$ref": "#/definitions/ServicePack"
+                },
+                "reason_code_doc": {
+                    "$ref": "#/definitions/ReasonCodeDoc"
+                },
+                "investigator_path": {
+                    "description": "How the Investigator ran. Null when a runbook answered and no agent ran.",
+                    "type": ["string", "null"],
+                    "enum": ["direct", "harness", null]
+                },
+                "reviewer_path": {
+                    "description": "How the Reviewer ran. Null when a runbook answered and no agent ran.",
+                    "type": ["string", "null"],
+                    "enum": ["direct", "harness", null]
+                },
+                "tool_calls": {
+                    "description": "The lookups the Investigator's tools made, in order. Empty when none were made.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/ToolCall"
+                    }
+                }
+            }
+        },
+        "ServicePack": {
+            "title": "ServicePack",
+            "description": "The service pack the agents were built from.",
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["service", "sha256"],
+            "properties": {
+                "service": {
+                    "description": "Pack name, e.g. enu-biometric, or _default for a packet whose service was not resolved.",
+                    "type": "string"
+                },
+                "sha256": {
+                    "description": "Digest of the pack, sha256:<hex>. Null when the pack is not in the registry.",
+                    "type": ["string", "null"]
+                }
+            }
+        },
+        "ReasonCodeDoc": {
+            "title": "ReasonCodeDoc",
+            "description": "The reason-code documentation the investigation was given. Its text is not stored, only its digest. Null when the run predates the lookup.",
+            "type": ["object", "null"],
+            "additionalProperties": false,
+            "required": [
+                "outcome",
+                "reason_code",
+                "requested_type",
+                "matched_type",
+                "refs",
+                "sha256",
+                "truncated",
+                "detail",
+                "scope"
+            ],
+            "properties": {
+                "outcome": {
+                    "description": "hit when documentation was found.",
+                    "type": "string",
+                    "enum": ["hit", "miss", "no_reason_code", "error", "disabled"]
+                },
+                "reason_code": {
+                    "type": ["string", "null"]
+                },
+                "requested_type": {
+                    "description": "The packet's enrolment-type family, e.g. E or U.",
+                    "type": ["string", "null"]
+                },
+                "matched_type": {
+                    "description": "The family the documentation entries matched, or ANY.",
+                    "type": ["string", "null"]
+                },
+                "refs": {
+                    "description": "The documentation entries used. Empty unless outcome is hit.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/ReasonCodeDocRef"
+                    }
+                },
+                "sha256": {
+                    "description": "Digest of the documentation text, sha256:<hex>. Null unless outcome is hit.",
+                    "type": ["string", "null"]
+                },
+                "truncated": {
+                    "description": "true when the documentation text was cut to fit the prompt.",
+                    "type": "boolean"
+                },
+                "detail": {
+                    "description": "Why the lookup missed or failed, when it says.",
+                    "type": ["string", "null"]
+                },
+                "scope": {
+                    "description": "Whose documentation was used: the packet's own service's, another service's, or every service's. Null unless outcome is hit.",
+                    "type": ["string", "null"],
+                    "enum": ["own", "other_service", "all", null]
+                }
+            }
+        },
+        "ReasonCodeDocRef": {
+            "title": "ReasonCodeDocRef",
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["source", "kind", "ref"],
+            "properties": {
+                "source": {
+                    "description": "The documentation file, e.g. services/enu-biometric.json.",
+                    "type": "string"
+                },
+                "kind": {
+                    "type": "string",
+                    "enum": ["code", "rule"]
+                },
+                "ref": {
+                    "description": "The numeric reason code or the rule id.",
+                    "type": "string"
+                }
+            }
+        },
+        "ToolCall": {
+            "title": "ToolCall",
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["tool", "args"],
+            "properties": {
+                "tool": {
+                    "description": "Tool name, e.g. bio_get_packet_stage_summary.",
+                    "type": "string"
+                },
+                "args": {
+                    "description": "The arguments it was called with, e.g. {\"refid\": \"...\"}. Keys depend on the tool.",
+                    "type": "object",
+                    "additionalProperties": true
+                }
+            }
+        }
+    }
+}
